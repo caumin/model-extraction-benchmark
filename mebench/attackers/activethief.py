@@ -209,22 +209,14 @@ class ActiveThief(BaseAttack):
         if substitute is None:
             return np.random.choice(unlabeled_indices, k, replace=False).tolist()
             
-        # Step 4: Get approximate labels (probability vectors)
-        # Optimization: To avoid O(N^2) with huge pools, we sample a large candidate pool.
-        # Paper implies full scan, but 50k x 50k distance matrix is heavy.
-        # We use a large candidate pool (e.g. 5000 + k) to approximate full scan efficiently.
-        max_candidates = 5000 + k
-        if len(unlabeled_indices) > max_candidates:
-            candidate_pool_idx = np.random.choice(len(unlabeled_indices), max_candidates, replace=False)
-            candidates = [unlabeled_indices[i] for i in candidate_pool_idx]
-        else:
-            candidates = unlabeled_indices
+        # Step 4: Get approximate labels (probability vectors) for ALL unlabeled samples
+        # Strict implementation: No subsampling.
+        candidates = unlabeled_indices
             
         # Get probs for candidates (U) and labeled set (L)
         probs_u = self._get_approx_probs(candidates, substitute) # [M, C]
         
-        # For L, we re-compute current probs to be in same space (or cache them)
-        # Re-computing ensures consistency with current model state
+        # For L, we re-compute current probs to be in same space
         probs_l = self._get_approx_probs(labeled_indices, substitute) # [N, C]
         
         return self._k_center_greedy(probs_u, probs_l, candidates, k)
@@ -296,13 +288,8 @@ class ActiveThief(BaseAttack):
         if substitute is None:
             return np.random.choice(unlabeled_indices, k, replace=False).tolist()
 
-        # Optimization: Subsample candidate pool for heavy DFAL computation
-        max_candidates = 2000 + k
-        if len(unlabeled_indices) > max_candidates:
-            candidate_pool_idx = np.random.choice(len(unlabeled_indices), max_candidates, replace=False)
-            candidates = [unlabeled_indices[i] for i in candidate_pool_idx]
-        else:
-            candidates = unlabeled_indices
+        # Strict implementation: Apply DFAL metric to ALL unlabeled samples.
+        candidates = unlabeled_indices
 
         device = next(substitute.parameters()).device
         substitute.eval()
