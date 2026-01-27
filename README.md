@@ -9,7 +9,7 @@
 
 **A rigorous, paper-grade benchmark for fair comparison of Model Extraction Attacks.**
 
-[Paper](https://arxiv.org/abs/2305.14890) • [Documentation](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md) • [Agents Guide](AGENTS.md)
+[한국어](README-ko.md) • [Paper](https://arxiv.org/abs/2305.14890) • [Documentation](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md) • [Agents Guide](AGENTS.md)
 
 </div>
 
