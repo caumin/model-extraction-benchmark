@@ -110,68 +110,74 @@ class FeatureFool:
             feats = feats.view(feats.size(0), -1)
         return feats
 
-    def generate(
+    def generate_batch(
         self,
         x_source: torch.Tensor,
         x_target: torch.Tensor,
+        margin_m: torch.Tensor,
     ) -> torch.Tensor:
-        """Generate adversarial example from source toward target.
+        """Generate a batch of adversarial examples.
 
         Args:
-            x_source: Source image [C, H, W]
-            x_target: Target image [C, H, W]
+            x_source: Source images [B, C, H, W]
+            x_target: Target images [B, C, H, W]
+            margin_m: Per-sample margins [B]
 
         Returns:
-            Adversarial example [C, H, W]
+            Adversarial examples [B, C, H, W]
         """
+        B = x_source.size(0)
         self.model.eval()
+        
         with torch.no_grad():
-            phi_s = self._extract_features(x_source.unsqueeze(0).to(self.device))
-            phi_t = self._extract_features(x_target.unsqueeze(0).to(self.device))
-
-            phi_s_flat = phi_s.view(-1)
-            phi_t_flat = phi_t.view(-1)
-
-        # Define objective function for PyTorch LBFGS
-        # We optimize delta directly on GPU
+            phi_s = self._extract_features(x_source.to(self.device))
+            phi_t = self._extract_features(x_target.to(self.device))
+            
+            # [B, D]
+            phi_s = phi_s.view(B, -1)
+            phi_t = phi_t.view(B, -1)
+            
+        # Optimize delta [B, C, H, W]
         delta = torch.zeros_like(x_source, requires_grad=True, device=self.device)
         optimizer = torch.optim.LBFGS([delta], lr=1.0, max_iter=self.max_iters, history_size=10, line_search_fn="strong_wolfe")
         
         x_source_dev = x_source.to(self.device)
+        margin_m = margin_m.to(self.device).view(B, 1)
         
         def closure():
             optimizer.zero_grad()
-            
-            # Adversarial image
             x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
             
-            # Extract features (requires separate forward pass logic or hook reset)
-            # Since self.model is frozen, we can just run it.
-            # But _extract_features registers hooks which might conflict if re-entrant?
-            # Safe to call _extract_features inside closure if handle is managed well.
+            # Extract features for batch
+            phi_adv = self._extract_features(x_adv).view(B, -1)
             
-            # Optimization: Pre-extract phi_t and phi_s outside closure (already done)
+            # Per-sample triplet loss
+            # phi_adv, phi_t, phi_s: [B, D]
+            dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1)
+            dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1)
             
-        # Triplet loss
-            phi_adv = self._extract_features(x_adv.unsqueeze(0)).view(-1)
-            dist_t = torch.norm(phi_adv - phi_t_flat, p=2)
-            dist_s = torch.norm(phi_adv - phi_s_flat, p=2)
+            triplet = torch.clamp(dist_t - dist_s + margin_m.squeeze(), min=0.0)
             
-            # Paper Eq. 10: minimize ||delta||^2 + lambda * max(0, d(x_adv, x_t) - d(x_adv, x_s) + M)
-            triplet = torch.clamp(dist_t - dist_s + self.margin_m, min=0.0)
+            # Visual loss: Mean of squared L2 per sample
+            visual_loss = torch.sum(delta ** 2, dim=(1, 2, 3))
             
-            # Visual constraint: Squared L2 distance (||delta||^2)
-            visual_loss = torch.sum(delta ** 2)
-            
-            loss = visual_loss + self.lambda_adv * triplet
+            loss = torch.mean(visual_loss + self.lambda_adv * triplet)
             loss.backward()
             return loss
             
         optimizer.step(closure)
         
-        # Final result
         x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
         return x_adv.detach().cpu()
+
+    def generate(
+        self,
+        x_source: torch.Tensor,
+        x_target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Fallback for single image generation."""
+        margin = torch.tensor([self.margin_m])
+        return self.generate_batch(x_source.unsqueeze(0), x_target.unsqueeze(0), margin).squeeze(0)
 
 
 class CloudLeak(BaseAttack):
@@ -223,9 +229,7 @@ class CloudLeak(BaseAttack):
         # Round-based hyperparameters (paper ~1000 per round)
         self.num_rounds = int(config.get("num_rounds", 10))
         total_budget = int(state.metadata.get("max_budget", 10000))
-        # FIXED: round_size calculation was wrong (len(list) vs count)
         self.round_size = max(1, total_budget // self.num_rounds)
-        print(f"DEBUG: CloudLeak initialized. total_budget={total_budget}, round_size={self.round_size}")
         
         # Missing attribute restored (Paper implies ~20% or min samples per class)
         # We align with ActiveThief benchmark standard: 10% of total budget
@@ -248,6 +252,7 @@ class CloudLeak(BaseAttack):
         # FeatureFool optimizer
         self.featurefool = None
         self._class_feature_cache: Dict[int, torch.Tensor] = {}
+        self._class_indices_cache: Dict[int, List[int]] = {}
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         """Initialize attack-specific state.
@@ -362,30 +367,48 @@ class CloudLeak(BaseAttack):
         possible_sources = np.random.choice(pool_indices, n_cand, replace=True)
         possible_targets = np.random.choice(pool_indices, n_cand, replace=True)
         
-        print(f"\nGenerating {n_cand} adversarial queries via FeatureFool...")
-        for i in range(n_cand):
-            source_idx = possible_sources[i]
-            target_idx = possible_targets[i]
-            if source_idx == target_idx:
-                target_idx = np.random.choice([idx for idx in pool_indices if idx != source_idx])
+        print(f"\nGenerating {n_cand} adversarial queries via FeatureFool (Batch Mode)...")
+        
+        # Pre-calculate margins for all needed source labels
+        needed_source_labels = []
+        for s_idx in possible_sources:
+            _, label = self.pool_dataset[s_idx]
+            needed_source_labels.append(int(label))
+        
+        # Batch processing
+        batch_size = int(self.config.get("attack", {}).get("gen_batch_size", 64))
+        for i in range(0, n_cand, batch_size):
+            end_idx = min(i + batch_size, n_cand)
+            curr_s_indices = possible_sources[i:end_idx]
+            curr_t_indices = possible_targets[i:end_idx]
+            curr_s_labels = needed_source_labels[i:end_idx]
+            
+            s_imgs = torch.stack([self.pool_dataset[idx][0] for idx in curr_s_indices])
+            t_imgs = torch.stack([self.pool_dataset[idx][0] for idx in curr_t_indices])
+            
+            # Ensure different target if source == target (rare but possible)
+            for j in range(len(curr_s_indices)):
+                if curr_s_indices[j] == curr_t_indices[j]:
+                    new_t = np.random.choice([idx for idx in pool_indices if idx != curr_s_indices[j]])
+                    t_imgs[j], _ = self.pool_dataset[new_t]
+                    curr_t_indices[j] = int(new_t)
 
-            source_img, source_label = self.pool_dataset[source_idx]
-            target_img, _ = self.pool_dataset[target_idx]
-
-            if self.featurefool is not None and source_label is not None:
-                margin_m = self._compute_margin_m(int(source_label), device)
-                self.featurefool.margin_m = margin_m
-
-            # Generate adversarial example
-            x_adv = self.featurefool.generate(source_img, target_img)
-
+            # Get margins for this batch
+            margins = torch.tensor([self._compute_margin_m(l, device) for l in curr_s_labels])
+            
+            # Generate batch
+            x_adv_batch = self.featurefool.generate_batch(s_imgs, t_imgs, margins)
+            
+            # Evaluate uncertainty
             with torch.no_grad():
-                probs = F.softmax(substitute(x_adv.unsqueeze(0).to(device)), dim=1).squeeze(0)
-                entropy = -torch.sum(probs * torch.log(probs + 1e-10)).item()
-
-            scored.append((entropy, x_adv, (int(source_idx), int(target_idx))))
-            if (i + 1) % max(1, n_cand // 10) == 0:
-                print(f"  Progress: {i + 1}/{n_cand}")
+                logits = substitute(x_adv_batch.to(device))
+                probs = F.softmax(logits, dim=1)
+                entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
+            
+            for j in range(len(curr_s_indices)):
+                scored.append((entropy[j].item(), x_adv_batch[j], (int(curr_s_indices[j]), int(curr_t_indices[j]))))
+            
+            print(f"  Progress: {end_idx}/{n_cand}")
 
         scored.sort(key=lambda t: t[0], reverse=True)
         top = scored[:k]
@@ -408,11 +431,17 @@ class CloudLeak(BaseAttack):
         if self.pool_dataset is None or self.featurefool is None:
             return float(self.margin_m)
 
-        class_indices = []
-        for idx in range(len(self.pool_dataset)):
-            _, label = self.pool_dataset[idx]
-            if int(label) == class_id:
-                class_indices.append(idx)
+        # Index dataset by class if not already done
+        if not self._class_indices_cache:
+            for idx in range(len(self.pool_dataset)):
+                _, label = self.pool_dataset[idx]
+                l = int(label)
+                if l not in self._class_indices_cache:
+                    self._class_indices_cache[l] = []
+                self._class_indices_cache[l].append(idx)
+            print(f"Indexed pool dataset ({len(self.pool_dataset)} samples) for margin computation.")
+
+        class_indices = self._class_indices_cache.get(class_id, [])
 
         if len(class_indices) < 2:
             return float(self.margin_m)
@@ -429,13 +458,17 @@ class CloudLeak(BaseAttack):
             return float(self.margin_m)
 
         feature_stack = torch.stack(features)
+        # diffs: [N, N, D]
         diffs = feature_stack.unsqueeze(1) - feature_stack.unsqueeze(0)
-        distances = torch.norm(diffs, p=2, dim=2)
-        mask = ~torch.eye(distances.size(0), dtype=torch.bool, device=distances.device)
-        mean_dist = distances[mask].mean().item() if mask.any() else 0.0
+        # squared distances: [N, N]
+        sq_distances = torch.sum(diffs ** 2, dim=2)
+        mask = ~torch.eye(sq_distances.size(0), dtype=torch.bool, device=sq_distances.device)
+        
+        # Paper Eq. 11: average squared distance
+        mean_sq_dist = sq_distances[mask].mean().item() if mask.any() else 0.0
 
         alpha = 0.5
-        margin_m = alpha - mean_dist
+        margin_m = alpha - mean_sq_dist
         self._class_feature_cache[class_id] = torch.tensor(margin_m)
         return float(margin_m)
 
@@ -513,8 +546,9 @@ class CloudLeak(BaseAttack):
                 state.metadata.get("num_classes")
                 or state.metadata.get("dataset_config", {}).get("num_classes", 10)
             )
+            sub_config = state.metadata.get("substitute_config", {})
             model = create_substitute(
-                arch="resnet18",
+                arch=sub_config.get("arch", "resnet18"),
                 num_classes=num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
             ).to(device)
@@ -546,17 +580,32 @@ class CloudLeak(BaseAttack):
             state.metadata.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        sub_config = state.metadata.get("substitute_config", {})
         model = create_substitute(
-            arch="resnet18",
+            arch=sub_config.get("arch", "resnet18"),
             num_classes=num_classes,
             input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
         ).to(device)
 
         # Freeze backbone (conv layers)
-        # For ResNet18, freeze layer1, layer2, layer3, layer4
+        # We find the final Linear layers (head) and keep them trainable
+        # Common names: 'fc', 'classifier', 'last_linear'
+        head_keywords = ["fc", "classifier", "last_linear"]
         for name, param in model.named_parameters():
-            if "fc" not in name:  # Only train final FC
+            if not any(k in name for k in head_keywords):
                 param.requires_grad = False
+            else:
+                param.requires_grad = True
+        
+        # Verify if any parameters are trainable
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        if not trainable_params:
+            print("Warning: No trainable parameters found with current head keywords. Unfreezing last parameter.")
+            # Fallback: unfreeze the last layer's parameters
+            all_params = list(model.parameters())
+            if all_params:
+                all_params[-1].requires_grad = True
+                all_params[-2].requires_grad = True if len(all_params) > 1 else False
 
         # Optimizer (only for FC layer)
         import torch.optim as optim
@@ -626,7 +675,8 @@ class CloudLeak(BaseAttack):
         # Store in state
         state.attack_state["substitute"] = model
 
-        # Update FeatureFool with new substitute
+        # Update FeatureFool with new substitute and clear margin cache
+        self._class_feature_cache = {}
         self.featurefool = FeatureFool(
             model,
             margin_m=self.margin_m,
