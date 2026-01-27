@@ -132,74 +132,45 @@ class FeatureFool:
             phi_s_flat = phi_s.view(-1)
             phi_t_flat = phi_t.view(-1)
 
-        # Define objective function for L-BFGS
-        def objective(delta_flat: np.ndarray) -> tuple:
-            """Objective: maximize feature distance with visual constraint.
-
-            Returns:
-                (loss, gradient) tuple
-            """
-            # Reshape delta to image
-            delta = (
-                torch.from_numpy(delta_flat)
-                .reshape(x_source.shape)
-                .float()
-                .to(self.device)
-                .requires_grad_(True)
-            )
-
+        # Define objective function for PyTorch LBFGS
+        # We optimize delta directly on GPU
+        delta = torch.zeros_like(x_source, requires_grad=True, device=self.device)
+        optimizer = torch.optim.LBFGS([delta], lr=1.0, max_iter=self.max_iters, history_size=10, line_search_fn="strong_wolfe")
+        
+        x_source_dev = x_source.to(self.device)
+        
+        def closure():
+            optimizer.zero_grad()
+            
             # Adversarial image
-            x_adv = x_source.to(self.device) + delta
-
-            # Clamp to [0, 1]
-            x_adv = torch.clamp(x_adv, 0.0, 1.0)
-
-            self.model.eval()
-            phi_adv = self._extract_features(x_adv.unsqueeze(0))
-            phi_adv = phi_adv.view(-1)
-
+            x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
+            
+            # Extract features (requires separate forward pass logic or hook reset)
+            # Since self.model is frozen, we can just run it.
+            # But _extract_features registers hooks which might conflict if re-entrant?
+            # Safe to call _extract_features inside closure if handle is managed well.
+            
+            # Optimization: Pre-extract phi_t and phi_s outside closure (already done)
+            
+            phi_adv = self._extract_features(x_adv.unsqueeze(0)).view(-1)
+            
             # Triplet loss
-            # maximize D(phi_adv, phi_t) - D(phi_adv, phi_s)
             dist_t = torch.norm(phi_adv - phi_t_flat, p=2)
             dist_s = torch.norm(phi_adv - phi_s_flat, p=2)
             triplet = F.relu(dist_t - dist_s + self.margin_m)
-
-            # Visual constraint (L2 perturbation)
+            
+            # Visual constraint
             visual_loss = torch.norm(delta, p=2)
-
-            # Total loss (minimize visual + lambda * triplet)
+            
             loss = visual_loss + self.lambda_adv * triplet
-
             loss.backward()
-            grad = delta.grad.detach().cpu().numpy().ravel().astype(np.float64)
-            return float(loss.item()), grad
-
-        # Initial delta (zero)
-        delta_init = np.zeros(x_source.numel())
-
-        # Bounds for perturbation (epsilon)
-        bounds = [(-self.epsilon, self.epsilon)] * x_source.numel()
-
-        # Run L-BFGS optimization
-        delta_opt, loss, info = fmin_l_bfgs_b(
-            objective,
-            delta_init,
-            bounds=bounds,
-            maxiter=self.max_iters,
-            factr=float(self.factr),
-            pgtol=float(self.pgtol),
-        )
-
-        # Reshape optimal delta
-        delta_opt = torch.from_numpy(delta_opt).reshape(x_source.shape).float()
-
-        # Generate adversarial example
-        x_adv = x_source.to(self.device) + delta_opt
-
-        # Clamp
-        x_adv = torch.clamp(x_adv, 0.0, 1.0)
-
-        return x_adv.cpu()
+            return loss
+            
+        optimizer.step(closure)
+        
+        # Final result
+        x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
+        return x_adv.detach().cpu()
 
 
 class CloudLeak(BaseAttack):
@@ -281,8 +252,28 @@ class CloudLeak(BaseAttack):
         Args:
             state: Global benchmark state to update
         """
-        # Pool tracking (random pool for adversarial synthesis)
-        state.attack_state["pool_indices"] = list(range(self.initial_pool_size))
+        # Load dataset config to get size
+        dataset_config = state.metadata.get("dataset_config", {})
+        if not dataset_config:
+            dataset_config = self.config.get("dataset", {})
+        
+        # We need actual dataset size to random sample
+        # Lazy loading or metadata check
+        if "size" in dataset_config:
+            total_size = dataset_config["size"]
+        else:
+            # Fallback: load dataset to check size (once)
+            temp_loader = create_dataloader(dataset_config, batch_size=1, shuffle=False)
+            total_size = len(temp_loader.dataset)
+
+        # Pool tracking: Randomly sample initial pool indices from entire dataset
+        # This fixes the bias of taking first N samples
+        if total_size > self.initial_pool_size:
+            pool_indices = np.random.choice(total_size, self.initial_pool_size, replace=False).tolist()
+        else:
+            pool_indices = list(range(total_size))
+            
+        state.attack_state["pool_indices"] = pool_indices
 
         # Query tracking
         state.attack_state["query_data_x"] = []
