@@ -51,6 +51,10 @@ def generate_configs():
 
     # Add hard-labeled versions for Dissecor
     attacks.append("blackbox_dissector")
+    
+    # Add ActiveThief variants
+    attacks.append("activethief_uncertainty")
+    attacks.append("activethief_dfal")
 
     seeds = [0, 1, 2]
     
@@ -59,9 +63,24 @@ def generate_configs():
     for setup in configs:
         for attack in attacks:
             for seed in seeds:
+                # Determine attack type and strategy
+                attack_name = attack
+                attack_strategy = None
+                
+                if attack.startswith("activethief_"):
+                    attack_strategy = attack.split("_")[1]
+                    attack_name = "activethief"
+                elif attack == "activethief":
+                    # Default ActiveThief uses dfal_k_center
+                    attack_strategy = "dfal_k_center"
+
                 # Dissector is typically hard-label
                 output_mode = "hard_top1" if attack == "blackbox_dissector" else "soft_prob"
                 
+                # Determine data mode
+                data_free_attacks = {"dfme", "maze", "dfms", "game", "es", "blackbox_ripper"}
+                data_mode = "data_free" if attack_name in data_free_attacks else "surrogate"
+
                 config = {
                     "run": {
                         "name": f"{setup['id']}_{attack}_seed{seed}",
@@ -81,12 +100,12 @@ def generate_configs():
                     },
                     "dataset": {
                         "name": setup['victim_dataset'],
-                        "data_mode": "surrogate" if attack not in ["dfme", "maze", "dfms"] else "data_free",
+                        "data_mode": data_mode,
                         "surrogate_name": setup['surrogate'],
                         "train_split": True
                     },
                     "attack": {
-                        "name": attack,
+                        "name": attack_name,
                         "output_mode": output_mode
                     },
                     "substitute": {
@@ -106,8 +125,8 @@ def generate_configs():
                         "patience": 100
                     },
                     "budget": {
-                        "max_budget": 10000,
-                        "checkpoints": [1000, 10000]
+                        "max_budget": 1000,
+                        "checkpoints": [1000]
                     },
                     "cache": {
                         "enabled": True,
@@ -115,6 +134,17 @@ def generate_configs():
                         "delete_on_finish": True
                     }
                 }
+
+                if attack_strategy:
+                    config["attack"]["strategy"] = attack_strategy
+
+                if attack == "blackbox_ripper":
+                    config["attack"]["proxy_dataset"] = {
+                        "name": setup['surrogate'],
+                        "data_mode": "surrogate",
+                        "surrogate_name": setup['surrogate'],
+                        "train_split": True
+                    }
 
                 filename = f"configs/matrix/{setup['id']}_{attack}_seed{seed}.yaml"
                 with open(filename, 'w') as f:

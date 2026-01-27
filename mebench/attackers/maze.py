@@ -175,7 +175,9 @@ class MAZE(BaseAttack):
         m_per_base = m_per_base_cpu.to(device)
 
         victim_config = state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization", {"mean": [0.5], "std": [0.5]})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
 

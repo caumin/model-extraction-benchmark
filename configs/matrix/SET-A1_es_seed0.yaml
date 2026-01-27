@@ -17,7 +17,7 @@ victim:
   temperature: 1.0
 dataset:
   name: MNIST
-  data_mode: surrogate
+  data_mode: data_free
   surrogate_name: EMNIST
   train_split: true
 attack:
@@ -37,10 +37,9 @@ substitute:
   max_epochs: 1000
   patience: 100
 budget:
-  max_budget: 10000
+  max_budget: 1000
   checkpoints:
   - 1000
-  - 10000
 cache:
   enabled: true
   policy: temporary

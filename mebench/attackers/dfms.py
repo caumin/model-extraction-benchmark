@@ -189,7 +189,9 @@ class DFMSHL(BaseAttack):
 
         with torch.no_grad():
             victim_config = self.state.metadata.get("victim_config", {})
-            normalization = victim_config.get("normalization", {"mean": [0.5], "std": [0.5]})
+            normalization = victim_config.get("normalization")
+            if normalization is None:
+                normalization = {"mean": [0.0], "std": [1.0]}
             norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(fake_x.device)
             norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(fake_x.device)
             def _norm(x):
@@ -217,7 +219,9 @@ class DFMSHL(BaseAttack):
 
     def _train_clone(self, x_fake: torch.Tensor, hard_labels: torch.Tensor) -> None:
         victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization", {"mean": [0.5], "std": [0.5]})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(x_fake.device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(x_fake.device)
         

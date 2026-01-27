@@ -43,7 +43,7 @@ class ActiveThief(BaseAttack):
         super().__init__(config, state)
 
         # Hyperparameters (from AGENTS.md)
-        self.strategy = config.get("strategy", "uncertainty")  # uncertainty, k_center, dfal
+        self.strategy = config.get("strategy", "dfal_k_center")  # uncertainty, k_center, dfal, dfal_k_center
         default_seed = config.get("initial_seed_size")
         if default_seed is None:
             max_budget = state.metadata.get("max_budget", 1000)

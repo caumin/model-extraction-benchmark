@@ -23,6 +23,7 @@ dataset:
 attack:
   name: activethief
   output_mode: soft_prob
+  strategy: dfal_k_center
 substitute:
   arch: resnet18
   init_seed: 1236
@@ -37,10 +38,9 @@ substitute:
   max_epochs: 1000
   patience: 100
 budget:
-  max_budget: 10000
+  max_budget: 1000
   checkpoints:
   - 1000
-  - 10000
 cache:
   enabled: true
   policy: temporary

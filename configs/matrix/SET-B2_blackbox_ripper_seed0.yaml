@@ -17,12 +17,17 @@ victim:
   temperature: 1.0
 dataset:
   name: CIFAR10
-  data_mode: surrogate
+  data_mode: data_free
   surrogate_name: GTSRB
   train_split: true
 attack:
   name: blackbox_ripper
   output_mode: soft_prob
+  proxy_dataset:
+    name: GTSRB
+    data_mode: surrogate
+    surrogate_name: GTSRB
+    train_split: true
 substitute:
   arch: resnet18
   init_seed: 1234
@@ -37,10 +42,9 @@ substitute:
   max_epochs: 1000
   patience: 100
 budget:
-  max_budget: 10000
+  max_budget: 1000
   checkpoints:
   - 1000
-  - 10000
 cache:
   enabled: true
   policy: temporary

@@ -204,7 +204,9 @@ class GAME(BaseAttack):
 
     def _train_student(self, x: torch.Tensor, victim_probs: torch.Tensor) -> None:
         victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization", {"mean": [0.5], "std": [0.5]})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(x.device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(x.device)
         
@@ -239,7 +241,9 @@ class GAME(BaseAttack):
         else:
             y_g = y_cpu.to(device)
         victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization", {"mean": [0.5], "std": [0.5]})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
         def _norm(img):
