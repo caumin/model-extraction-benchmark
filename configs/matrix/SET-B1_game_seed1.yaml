@@ -23,6 +23,11 @@ dataset:
 attack:
   name: game
   output_mode: soft_prob
+  proxy_dataset:
+    name: SVHN
+    data_mode: surrogate
+    surrogate_name: SVHN
+    train_split: true
 substitute:
   arch: resnet18
   init_seed: 1235

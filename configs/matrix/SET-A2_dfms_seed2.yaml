@@ -23,6 +23,11 @@ dataset:
 attack:
   name: dfms
   output_mode: soft_prob
+  proxy_dataset:
+    name: FashionMNIST
+    data_mode: surrogate
+    surrogate_name: FashionMNIST
+    train_split: true
 substitute:
   arch: lenet_mnist
   init_seed: 1236

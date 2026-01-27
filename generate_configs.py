@@ -138,7 +138,7 @@ def generate_configs():
                 if attack_strategy:
                     config["attack"]["strategy"] = attack_strategy
 
-                if attack == "blackbox_ripper":
+                if attack in ["blackbox_ripper", "game", "dfms"]:
                     config["attack"]["proxy_dataset"] = {
                         "name": setup['surrogate'],
                         "data_mode": "surrogate",
