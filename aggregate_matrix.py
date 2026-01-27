@@ -66,22 +66,39 @@ def aggregate_matrix(root_dir="runs"):
     # 7. Pivot for Paper Table
     # Row: Attack, Column: Set
     pivot_acc = stats.pivot(index="Attack", columns="Set", values="Accuracy (mean+std)")
+    pivot_agr = stats.pivot(index="Attack", columns="Set", values="Agreement (mean+std)")
     
     print("\n### Extraction Accuracy (mean+std) across Experimental Sets")
     print(pivot_acc.to_markdown())
+
+    print("\n### Extraction Agreement (mean+std) across Experimental Sets")
+    print(pivot_agr.to_markdown())
     
     pivot_acc.to_csv("matrix_results_accuracy.csv", encoding='utf-8')
+    pivot_agr.to_csv("matrix_results_agreement.csv", encoding='utf-8')
     
-    # Generate LaTeX
+    # Save full summary stats
+    stats.to_csv("matrix_results_summary.csv", index=False, encoding='utf-8')
+    
+    # Generate LaTeX for Accuracy
     latex_acc = pivot_acc.to_latex(
         caption="Model Extraction Accuracy (mean $\\pm$ std) across different Victim-Surrogate setups (10k Budget).",
-        label="tab:matrix_results",
+        label="tab:matrix_results_acc",
         escape=False
     )
-    with open("matrix_results.tex", "w", encoding='utf-8') as f:
+    with open("matrix_results_accuracy.tex", "w", encoding='utf-8') as f:
         f.write(latex_acc)
+
+    # Generate LaTeX for Agreement
+    latex_agr = pivot_agr.to_latex(
+        caption="Model Extraction Agreement (mean $\\pm$ std) across different Victim-Surrogate setups (10k Budget).",
+        label="tab:matrix_results_agr",
+        escape=False
+    )
+    with open("matrix_results_agreement.tex", "w", encoding='utf-8') as f:
+        f.write(latex_agr)
     
-    print("\nArtifacts saved: matrix_results_accuracy.csv, matrix_results.tex")
+    print("\nArtifacts saved: matrix_results_{accuracy,agreement,summary}.csv, matrix_results_{accuracy,agreement}.tex")
 
 if __name__ == "__main__":
     aggregate_matrix()

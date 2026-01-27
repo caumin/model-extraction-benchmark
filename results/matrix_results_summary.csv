@@ -1,0 +1,6 @@
+Set,Attack,Accuracy_mean,Accuracy_std,Agreement_mean,Agreement_std,Accuracy (mean+std),Agreement (mean+std)
+SET-A1,ACTIVETHIEF,0.9133,,0.9167,,0.9133,0.9167
+SET-A1,CLOUDLEAK,0.8547,,0.857,,0.8547,0.8570
+SET-A1,DFME,0.6691,,0.6724,,0.6691,0.6724
+SET-A1,KNOCKOFF,0.8685,,0.8726,,0.8685,0.8726
+SET-A1,RANDOM,0.9046,,0.9066,,0.9046,0.9066
