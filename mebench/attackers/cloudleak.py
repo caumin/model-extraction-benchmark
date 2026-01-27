@@ -94,6 +94,7 @@ class FeatureFool:
         return last_linear
 
     def _extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract features using a temporary hook."""
         activations: List[torch.Tensor] = []
 
         def forward_hook(_module, _inputs, output):
@@ -129,46 +130,56 @@ class FeatureFool:
         B = x_source.size(0)
         self.model.eval()
         
-        with torch.no_grad():
-            phi_s = self._extract_features(x_source.to(self.device))
-            phi_t = self._extract_features(x_target.to(self.device))
-            
-            # [B, D]
-            phi_s = phi_s.view(B, -1)
-            phi_t = phi_t.view(B, -1)
-            
-        # Optimize delta [B, C, H, W]
-        delta = torch.zeros_like(x_source, requires_grad=True, device=self.device)
-        optimizer = torch.optim.LBFGS([delta], lr=1.0, max_iter=self.max_iters, history_size=10, line_search_fn="strong_wolfe")
+        # Setup persistent hook for the duration of optimization
+        activations: List[torch.Tensor] = []
+        def forward_hook(_module, _inputs, output):
+            activations.append(output)
         
-        x_source_dev = x_source.to(self.device)
-        margin_m = margin_m.to(self.device).view(B, 1)
+        hook_handle = self._feature_layer.register_forward_hook(forward_hook)
         
-        def closure():
-            optimizer.zero_grad()
+        try:
+            with torch.no_grad():
+                # Initial feature extraction
+                _ = self.model(x_source.to(self.device))
+                phi_s = activations.pop(0).detach().view(B, -1)
+                
+                _ = self.model(x_target.to(self.device))
+                phi_t = activations.pop(0).detach().view(B, -1)
+                
+            # Optimize delta [B, C, H, W]
+            delta = torch.zeros_like(x_source, requires_grad=True, device=self.device)
+            optimizer = torch.optim.LBFGS([delta], lr=1.0, max_iter=self.max_iters, history_size=10, line_search_fn="strong_wolfe")
+            
+            x_source_dev = x_source.to(self.device)
+            margin_m = margin_m.to(self.device).view(B, 1)
+            
+            def closure():
+                optimizer.zero_grad()
+                x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
+                
+                # Forward pass to trigger hook
+                _ = self.model(x_adv)
+                phi_adv = activations.pop(0).view(B, -1)
+                
+                # Per-sample triplet loss
+                dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1)
+                dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1)
+                
+                triplet = torch.clamp(dist_t - dist_s + margin_m.squeeze(), min=0.0)
+                
+                # Visual loss: Mean of squared L2 per sample
+                visual_loss = torch.sum(delta ** 2, dim=(1, 2, 3))
+                
+                loss = torch.mean(visual_loss + self.lambda_adv * triplet)
+                loss.backward()
+                return loss
+                
+            optimizer.step(closure)
+            
             x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
-            
-            # Extract features for batch
-            phi_adv = self._extract_features(x_adv).view(B, -1)
-            
-            # Per-sample triplet loss
-            # phi_adv, phi_t, phi_s: [B, D]
-            dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1)
-            dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1)
-            
-            triplet = torch.clamp(dist_t - dist_s + margin_m.squeeze(), min=0.0)
-            
-            # Visual loss: Mean of squared L2 per sample
-            visual_loss = torch.sum(delta ** 2, dim=(1, 2, 3))
-            
-            loss = torch.mean(visual_loss + self.lambda_adv * triplet)
-            loss.backward()
-            return loss
-            
-        optimizer.step(closure)
-        
-        x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
-        return x_adv.detach().cpu()
+            return x_adv.detach().cpu()
+        finally:
+            hook_handle.remove()
 
     def generate(
         self,
