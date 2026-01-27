@@ -248,9 +248,11 @@ class CloudLeak(BaseAttack):
         self.epsilon = float(config.get("epsilon", 8.0 / 255.0))
         self.uncertainty_candidates = int(config.get("uncertainty_candidates", 5))
 
-        # Pool hyperparameters
-        self.initial_pool_size = int(config.get("initial_pool_size", 1000))
-
+        # Round-based hyperparameters (paper ~1000 per round)
+        self.num_rounds = int(config.get("num_rounds", 10))
+        total_budget = int(state.metadata.get("max_budget", 10000))
+        self.round_size = max(1, total_budget // self.num_rounds)
+        
         # Training hyperparameters
         self.batch_size = int(config.get("batch_size", 64))
         self.lr = float(config.get("lr", 0.01))
@@ -455,9 +457,9 @@ class CloudLeak(BaseAttack):
             indices = query_batch.meta.get("indices", [])
             state.attack_state["synthetic_indices"].extend(indices)
 
-        # Train substitute periodically
+        # Train substitute at the end of each round (paper protocol)
         query_count = len(state.attack_state["query_data_x"])
-        if query_count % 100 == 0 and query_count > 0:
+        if query_count % self.round_size == 0 and query_count > 0:
             self.train_substitute(state)
 
     def train_substitute(self, state: BenchmarkState) -> None:

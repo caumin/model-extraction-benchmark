@@ -23,8 +23,8 @@ class KnockoffNets(BaseAttack):
         super().__init__(config, state)
 
         self.batch_size = int(config.get("batch_size", 128))
-        self.policy_lr = float(config.get("policy_lr", 0.1))
-        self.train_every = int(config.get("train_every", 500))
+        # Update substitute periodically or every batch if policy requires fresh logits
+        self.train_every = int(config.get("train_every", self.batch_size))
         self.train_epochs = int(config.get("train_epochs", 1))
         self.reward_window = int(config.get("reward_window", 100))
         self.reward_certainty_weight = float(config.get("reward_certainty_weight", 1.0))

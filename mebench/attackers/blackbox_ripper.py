@@ -26,10 +26,7 @@ class BlackboxRipper(BaseAttack):
 
         self.batch_size = int(config.get("batch_size", 128))
 
-        # Defaults aligned to the official Black-box Ripper implementation.
-        # Repo: https://github.com/antoniobarbalau/black-box-ripper
-        # - z ~ U(-3.3, 3.3)
-        # - population size = 30, elite size = 10, mutation sigma = 0.5
+        # Paper: population 30, elite 10, max 10 iterations per image.
         self.noise_dim = int(config.get("noise_dim", 128))
         self.latent_bound = float(config.get("latent_bound", 3.3))
         self.population_size = int(config.get("population_size", 30))
@@ -37,10 +34,16 @@ class BlackboxRipper(BaseAttack):
         self.mutation_scale = float(config.get("mutation_scale", 0.5))
         self.fitness_threshold = float(config.get("fitness_threshold", 0.02))
         self.max_evolve_iters = int(config.get("max_evolve_iters", 10))
+        
+        # Training: 200 epochs, batch size 64. No explicit "train_every" in paper,
+        # but implies training on collected samples until convergence.
+        # We align with round-based updates for efficiency.
+        total_budget = int(state.metadata.get("max_budget", 10000))
+        self.train_every = int(config.get("train_every", max(256, total_budget // 10)))
+        
         self.pretrain_steps = int(config.get("pretrain_steps", 100))
-        self.train_every = int(config.get("train_every", 500))
         self.substitute_lr = float(config.get("substitute_lr", 0.01))
-        self.substitute_epochs = int(config.get("substitute_epochs", 5))
+        self.substitute_epochs = int(config.get("substitute_epochs", 200)) # Paper: 200 epochs
         self.base_channels = int(config.get("base_channels", 64))
         self.gan_backbone = str(config.get("gan_backbone", "sngan")).lower()
         self.num_classes = int(

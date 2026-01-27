@@ -33,7 +33,10 @@ class InverseNet(BaseAttack):
         self.inversion_epochs = int(config.get("inversion_epochs", 5))
         self.substitute_epochs = int(config.get("substitute_epochs", 5))
         self.phase_ratios = config.get("phase_ratios", [0.45, 0.45, 0.1])
-        self.train_every = int(config.get("train_every", 200))
+        # Paper: train twice only (end of phase 1, end of phase 3)
+        self.train_phase_1 = False
+        self.train_phase_3 = False
+        
         # Paper commonly uses top-1 truncation.
         self.truncation_k = int(config.get("truncation_k", 1))
         self.max_pool_eval = int(config.get("max_pool_eval", 2000))
@@ -142,17 +145,28 @@ class InverseNet(BaseAttack):
         self._update_phase(state)
         phase = state.attack_state["phase"]
 
+        # Train substitute at end of Phase 1
+        if phase == 2 and not self.train_phase_1:
+            self._train_substitute_from_queries(state)
+            self.train_phase_1 = True
+
         if phase == 2:
             state.attack_state["inversion_x"].append(query_batch.x.detach().cpu())
             trunc = self._truncate_logits(oracle_output.y.detach().cpu())
             state.attack_state["inversion_y"].append(trunc)
+            # Inversion model is trained at end of Phase 2 logic (using accumulated data)
+            # But paper implies training G_V using HCSS samples (phase 2 data).
+            # We train continuously or once at end? Paper: "train G_V using S_I" (accumulated).
+            # For efficiency, we can train incrementally or at end of phase.
+            # To match protocol strictly: Train G_V after Phase 2 completion?
+            # Current implementation: Online updates to G_V. Kept for now as G_V needs to be ready for Phase 3.
             self._train_inversion(state)
 
         if phase == 3:
             self._train_substitute_on_batch(query_batch.x, oracle_output.y, state)
-
-        if state.query_count % self.train_every == 0 and state.query_count > 0:
-            self._train_substitute_from_queries(state)
+            # Phase 3 is retraining loop.
+            
+        # Removed periodic training to match paper protocol (2-stage training)
 
     def _train_inversion(self, state: BenchmarkState) -> None:
         if self.inversion_model is None:
