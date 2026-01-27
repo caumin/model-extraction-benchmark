@@ -23,6 +23,7 @@ dataset:
 attack:
   name: knockoff_nets
   output_mode: soft_prob
+  max_budget: 20000
 substitute:
   arch: lenet_mnist
   init_seed: 1236

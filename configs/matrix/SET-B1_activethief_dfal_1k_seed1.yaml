@@ -1,0 +1,48 @@
+run:
+  name: SET-B1_activethief_dfal_1k_seed1
+  seeds:
+  - 1
+  device: cuda:0
+victim:
+  victim_id: cifar10_resnet18
+  arch: resnet18
+  channels: 3
+  num_classes: 10
+  input_size:
+  - 32
+  - 32
+  checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
+  normalization: null
+  output_mode: soft_prob
+  temperature: 1.0
+dataset:
+  name: CIFAR10
+  data_mode: surrogate
+  surrogate_name: SVHN
+  train_split: true
+attack:
+  name: activethief
+  output_mode: soft_prob
+  max_budget: 1000
+  strategy: dfal
+substitute:
+  arch: resnet18
+  init_seed: 1235
+  trackA:
+    batch_size: 128
+    steps_coeff_c: 0.2
+  optimizer:
+    name: sgd
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.0005
+  max_epochs: 1000
+  patience: 100
+budget:
+  max_budget: 1000
+  checkpoints:
+  - 1000
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true

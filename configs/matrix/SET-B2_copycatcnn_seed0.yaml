@@ -23,6 +23,7 @@ dataset:
 attack:
   name: copycatcnn
   output_mode: soft_prob
+  max_budget: 20000
 substitute:
   arch: resnet18
   init_seed: 1234

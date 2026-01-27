@@ -23,6 +23,7 @@ dataset:
 attack:
   name: blackbox_dissector
   output_mode: hard_top1
+  max_budget: 20000
 substitute:
   arch: resnet18
   init_seed: 1235

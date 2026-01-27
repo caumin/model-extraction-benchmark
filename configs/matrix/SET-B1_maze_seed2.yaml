@@ -23,6 +23,7 @@ dataset:
 attack:
   name: maze
   output_mode: soft_prob
+  max_budget: 100000
 substitute:
   arch: resnet18
   init_seed: 1236
@@ -37,11 +38,13 @@ substitute:
   max_epochs: 1000
   patience: 100
 budget:
-  max_budget: 20000
+  max_budget: 100000
   checkpoints:
   - 1000
   - 10000
   - 20000
+  - 50000
+  - 100000
 cache:
   enabled: true
   policy: temporary
