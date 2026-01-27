@@ -235,7 +235,6 @@ class CloudLeak(BaseAttack):
         self.margin_m = float(config.get("margin_m", 0.5))
         self.lambda_adv = float(config.get("lambda_adv", 0.001))
         self.epsilon = float(config.get("epsilon", 8.0 / 255.0))
-        self.uncertainty_candidates = int(config.get("uncertainty_candidates", 5))
 
         # Round-based hyperparameters (paper ~1000 per round)
         self.num_rounds = int(config.get("num_rounds", 10))
@@ -351,9 +350,10 @@ class CloudLeak(BaseAttack):
             meta = {"indices": selected, "synthetic": False}
             return QueryBatch(x=x, meta=meta)
 
-        # FeatureFool generation
+        # FeatureFool generation: Process the ENTIRE pool to find the most informative examples
         x_list = []
         selected_indices = []
+        scored = []
 
         # Initialize FeatureFool if needed
         if self.featurefool is None:
@@ -368,60 +368,76 @@ class CloudLeak(BaseAttack):
                 device=device,
                 config=self.config,
             )
-
-        # Generate adversarial synthesis candidates (paper uses Source-Target pair)
-        n_cand = max(int(k), int(k) * max(1, int(self.uncertainty_candidates)))
-        scored = []
+            
         substitute.eval()
         
-        # Pre-select source and target indices for efficiency
-        possible_sources = np.random.choice(pool_indices, n_cand, replace=True)
-        possible_targets = np.random.choice(pool_indices, n_cand, replace=True)
+        # Use all available pool indices as per paper's Adversarial Active Learning logic
+        all_indices = pool_indices
+        n_total = len(all_indices)
         
-        print(f"\nGenerating {n_cand} adversarial queries via FeatureFool (Batch Mode)...")
+        print(f"\nGenerating adversarial queries for the ENTIRE pool ({n_total} samples) via FeatureFool...")
         
-        # Pre-calculate margins for all needed source labels
-        needed_source_labels = []
-        for s_idx in possible_sources:
-            _, label = self.pool_dataset[s_idx]
-            needed_source_labels.append(int(label))
+        # Pre-calculate margins and labels for the whole pool
+        all_labels = []
+        for idx in all_indices:
+            _, label = self.pool_dataset[idx]
+            all_labels.append(int(label))
         
-        # Batch processing
+        # Batch processing for the entire pool
         batch_size = int(self.config.get("attack", {}).get("gen_batch_size", 64))
-        for i in range(0, n_cand, batch_size):
-            end_idx = min(i + batch_size, n_cand)
-            curr_s_indices = possible_sources[i:end_idx]
-            curr_t_indices = possible_targets[i:end_idx]
-            curr_s_labels = needed_source_labels[i:end_idx]
+        for i in range(0, n_total, batch_size):
+            end_idx = min(i + batch_size, n_total)
+            curr_indices = all_indices[i:end_idx]
+            curr_labels = all_labels[i:end_idx]
             
-            s_imgs = torch.stack([self.pool_dataset[idx][0] for idx in curr_s_indices])
-            t_imgs = torch.stack([self.pool_dataset[idx][0] for idx in curr_t_indices])
+            # Select random targets for each source in the batch
+            # Paper: Guide image chosen to have different label
+            s_imgs = []
+            t_imgs = []
+            for j, s_idx in enumerate(curr_indices):
+                s_img, _ = self.pool_dataset[s_idx]
+                s_imgs.append(s_img)
+                
+                # Find a target image with a different label for guidance
+                target_idx = np.random.choice([idx for idx in all_indices if idx != s_idx])
+                t_img, _ = self.pool_dataset[target_idx]
+                t_imgs.append(t_img)
             
-            # Ensure different target if source == target (rare but possible)
-            for j in range(len(curr_s_indices)):
-                if curr_s_indices[j] == curr_t_indices[j]:
-                    new_t = np.random.choice([idx for idx in pool_indices if idx != curr_s_indices[j]])
-                    t_imgs[j], _ = self.pool_dataset[new_t]
-                    curr_t_indices[j] = int(new_t)
-
+            s_imgs = torch.stack(s_imgs)
+            t_imgs = torch.stack(t_imgs)
+            
             # Get margins for this batch
-            margins = torch.tensor([self._compute_margin_m(l, device) for l in curr_s_labels])
+            margins = torch.tensor([self._compute_margin_m(l, device) for l in curr_labels])
             
-            # Generate batch
+            # Generate adversarial batch for these pool samples
             x_adv_batch = self.featurefool.generate_batch(s_imgs, t_imgs, margins)
             
-            # Evaluate uncertainty
+            # Evaluate uncertainty (Entropy) on the synthetic examples
             with torch.no_grad():
                 logits = substitute(x_adv_batch.to(device))
                 probs = F.softmax(logits, dim=1)
                 entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
             
-            for j in range(len(curr_s_indices)):
-                scored.append((entropy[j].item(), x_adv_batch[j], (int(curr_s_indices[j]), int(curr_t_indices[j]))))
+            for j in range(len(curr_indices)):
+                scored.append((entropy[j].item(), x_adv_batch[j], int(curr_indices[j])))
             
-            print(f"  Progress: {end_idx}/{n_cand}")
+            if (i + batch_size) % (batch_size * 5) == 0 or end_idx == n_total:
+                print(f"  Progress: {end_idx}/{n_total} pool samples processed")
 
+        # Select top-k most informative (highest entropy) examples from the entire perturbed pool
         scored.sort(key=lambda t: t[0], reverse=True)
+        top = scored[:k]
+        for _entropy, x_adv, idx in top:
+            x_list.append(x_adv)
+            selected_indices.append(idx)
+
+        x = torch.stack(x_list)
+        meta = {
+            "indices": selected_indices,
+            "synthetic": True,
+        }
+
+        return QueryBatch(x=x, meta=meta)
         top = scored[:k]
         for _entropy, x_adv, pair in top:
             x_list.append(x_adv)
