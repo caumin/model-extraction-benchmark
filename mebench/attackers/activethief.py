@@ -607,7 +607,11 @@ class ActiveThief(BaseAttack):
             else:
                 patience_counter += 1
 
-            epochs_pbar.set_postfix({"loss": f"{train_loss/len(train_loader):.4f}", "val_f1": f"{val_f1:.4f}"})
+            epochs_pbar.set_postfix({
+                "loss": f"{train_loss/len(train_loader):.4f}", 
+                "val_f1": f"{val_f1:.4f}",
+                "queries": len(state.attack_state["labeled_indices"])
+            })
 
             # Early stopping
             if patience_counter >= self.patience:
