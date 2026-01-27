@@ -280,7 +280,16 @@ class ActiveThief(BaseAttack):
         dfal_candidates = self._select_dfal(rho, state)
         if len(dfal_candidates) <= k:
             return dfal_candidates
-        return self._select_k_center_candidates(k, dfal_candidates, state)
+            
+        # K-Center greedy selection from the DFAL candidates
+        substitute = state.attack_state["substitute"]
+        labeled_indices = state.attack_state["labeled_indices"]
+        
+        # Get probs for DFAL candidates (U) and labeled set (L)
+        probs_u = self._get_approx_probs(dfal_candidates, substitute)
+        probs_l = self._get_approx_probs(labeled_indices, substitute)
+        
+        return self._k_center_greedy(probs_u, probs_l, dfal_candidates, k)
 
     def _select_dfal(self, k: int, state: BenchmarkState) -> list:
         """Select k samples closest to decision boundary using vectorized DeepFool approximation.
