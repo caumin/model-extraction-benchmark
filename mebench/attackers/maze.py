@@ -249,7 +249,8 @@ class MAZE(BaseAttack):
                 grad_est[i] = g.view_as(grad_est[i])
                 cursor_pert += m_eff
 
-            x_base_grad.backward(grad_est)
+            # Gradient Ascent: Negate gradient because optimizer minimizes
+            x_base_grad.backward(-grad_est)
             self.generator_optimizer.step()
 
         for _ in range(self.n_c_steps):

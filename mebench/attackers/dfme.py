@@ -332,7 +332,8 @@ class DFME(BaseAttack):
                 grad_est[i] = g.view_as(grad_est[i])
                 cursor_pert += m_eff
 
-            pre_tanh_base.backward(grad_est)
+            # Gradient Ascent: Negate gradient to maximize disagreement
+            pre_tanh_base.backward(-grad_est)
             self.generator_optimizer.step()
 
         # S-step: Minimize disagreement using base queries
