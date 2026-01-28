@@ -36,10 +36,14 @@ class QueryStorage(Dataset):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.output_mode = output_mode
 
-        # Storage tensors
-        self.queries: Optional[torch.Tensor] = None
-        self.labels: Optional[torch.Tensor] = None
+        # Storage buffers (list of tensors)
+        self.query_chunks: list[torch.Tensor] = []
+        self.label_chunks: list[torch.Tensor] = []
+        self.chunk_sizes: list[int] = []
         self.count = 0
+        
+        # Cumulative indices for efficient random access
+        self.cumulative_sizes: list[int] = [0]
 
     def add_batch(self, x_batch: torch.Tensor, y_batch: torch.Tensor) -> None:
         """Append a batch of queries to storage.
@@ -51,37 +55,45 @@ class QueryStorage(Dataset):
         # Move to CPU for storage
         x_cpu = x_batch.detach().cpu()
         y_cpu = y_batch.detach().cpu()
+        
+        batch_size = x_cpu.shape[0]
+        if batch_size == 0:
+            return
 
-        # Initialize storage tensors
-        if self.queries is None:
-            self.queries = x_cpu
-            self.labels = y_cpu
-        else:
-            # Concatenate with existing storage
-            self.queries = torch.cat([self.queries, x_cpu], dim=0)
-            self.labels = torch.cat([self.labels, y_cpu], dim=0)
-
-        self.count += x_batch.shape[0]
+        self.query_chunks.append(x_cpu)
+        self.label_chunks.append(y_cpu)
+        self.chunk_sizes.append(batch_size)
+        self.count += batch_size
+        self.cumulative_sizes.append(self.count)
 
     def save(self) -> None:
-        """Save current storage to disk."""
-        if self.queries is None or self.labels is None:
+        """Save current storage to disk.
+        
+        Note: Currently saves all chunks to a single file. 
+        TODO: Implement incremental append or chunk-based saving for very large datasets.
+        """
+        if self.count == 0:
             return
 
         queries_path = self.cache_dir / "queries.pt"
         labels_path = self.cache_dir / "labels.pt"
         meta_path = self.cache_dir / "meta.pkl"
 
+        # Concatenate for saving (or save list?)
+        # Concatenating once at save time is better than concatenating every batch.
+        all_queries = torch.cat(self.query_chunks, dim=0)
+        all_labels = torch.cat(self.label_chunks, dim=0)
+
         # Save tensors
-        torch.save(self.queries, queries_path)
-        torch.save(self.labels, labels_path)
+        torch.save(all_queries, queries_path)
+        torch.save(all_labels, labels_path)
 
         # Save metadata
         meta = {
             "count": self.count,
             "output_mode": self.output_mode,
-            "queries_shape": self.queries.shape,
-            "labels_shape": self.labels.shape,
+            "queries_shape": all_queries.shape,
+            "labels_shape": all_labels.shape,
         }
         with open(meta_path, "wb") as f:
             pickle.dump(meta, f)
@@ -98,13 +110,19 @@ class QueryStorage(Dataset):
             return
 
         # Load tensors
-        self.queries = torch.load(queries_path, weights_only=True)
-        self.labels = torch.load(labels_path, weights_only=True)
+        queries = torch.load(queries_path, weights_only=True)
+        labels = torch.load(labels_path, weights_only=True)
+        
+        # Reset buffers and load as a single chunk
+        self.query_chunks = [queries]
+        self.label_chunks = [labels]
+        self.chunk_sizes = [queries.shape[0]]
+        self.count = queries.shape[0]
+        self.cumulative_sizes = [0, self.count]
 
         # Load metadata
         with open(meta_path, "rb") as f:
             meta = pickle.load(f)
-        self.count = meta["count"]
         self.output_mode = meta.get("output_mode", self.output_mode)
 
         print(f"Loaded {self.count} queries from {self.cache_dir}")
@@ -122,7 +140,7 @@ class QueryStorage(Dataset):
         Returns:
             DataLoader
         """
-        if self.queries is None:
+        if self.count == 0:
             # Return empty loader if no data
             return torch.utils.data.DataLoader([])
             
@@ -143,16 +161,35 @@ class QueryStorage(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get a single query by index.
 
+        Efficiently locates the correct chunk and index within that chunk.
+
         Args:
             idx: Query index
 
         Returns:
             (x, y) tuple
         """
-        if self.queries is None or self.labels is None:
-            raise RuntimeError("QueryStorage not loaded. Call load() first.")
+        if self.count == 0:
+             raise IndexError("QueryStorage is empty")
+             
+        if idx < 0:
+            idx += self.count
+        if idx >= self.count or idx < 0:
+            raise IndexError(f"Index {idx} out of range [0, {self.count-1}]")
 
-        return self.queries[idx], self.labels[idx]
+        # Binary search for the chunk containing idx
+        # self.cumulative_sizes stores [0, s1, s1+s2, ...]
+        # We want i such that cumulative_sizes[i] <= idx < cumulative_sizes[i+1]
+        
+        # Bisect right gives index where idx would be inserted. 
+        # Since idx is 0-based index of item, and cum_sizes are accumulated counts:
+        # Example: chunks=[10, 20], cum=[0, 10, 30]. idx=5 -> chunk 0. idx=15 -> chunk 1.
+        
+        import bisect
+        chunk_idx = bisect.bisect_right(self.cumulative_sizes, idx) - 1
+        
+        offset = idx - self.cumulative_sizes[chunk_idx]
+        return self.query_chunks[chunk_idx][offset], self.label_chunks[chunk_idx][offset]
 
 
 def create_query_storage(
