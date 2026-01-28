@@ -123,7 +123,9 @@ def random_erase(
     """
     variants = []
     c, h, w = img.shape
-    erase_area = int(h * w * erase_ratio)
+    
+    # Not used with random sampling of area/aspect ratio
+    # erase_area = int(h * w * erase_ratio)
 
     for _ in range(n):
         # Random erasing
@@ -133,10 +135,16 @@ def random_erase(
         y = np.random.randint(0, h)
         x = np.random.randint(0, w)
 
-        # Random size
+        # Paper: Sample random area and aspect ratio (consistent with cam_erase)
+        area = h * w
+        target_area = np.random.uniform(0.02, 0.4) * area
         aspect_ratio = np.random.uniform(0.3, 3.3)
-        h_erase = int(np.sqrt(erase_area * aspect_ratio))
-        w_erase = int(erase_area / h_erase)
+
+        h_erase = int(round(np.sqrt(target_area * aspect_ratio)))
+        w_erase = int(round(np.sqrt(target_area / aspect_ratio)))
+
+        h_erase = min(h, max(1, h_erase))
+        w_erase = min(w, max(1, w_erase))
 
         # Clip bounds
         y_end = min(y + h_erase, h)
@@ -174,9 +182,11 @@ def cam_erase(
     c, h, w = img.shape
 
     erase_area = int(h * w * erase_ratio)
-    erase_size = max(1, int(np.sqrt(erase_area)))
-    h_erase = min(h, erase_size)
-    w_erase = min(w, max(1, erase_area // h_erase))
+    
+    # Not used with random sampling of area/aspect ratio
+    # erase_size = max(1, int(np.sqrt(erase_area)))
+    # h_erase = min(h, erase_size)
+    # w_erase = min(w, max(1, erase_area // h_erase))
 
     heatmap_flat = heatmap.view(-1)
     heatmap_sum = heatmap_flat.sum()
@@ -189,6 +199,17 @@ def cam_erase(
     max_index = torch.multinomial(probs, 1).item()
     center_y = max_index // w
     center_x = max_index % w
+
+    # Paper: Sample random area and aspect ratio
+    area = h * w
+    target_area = np.random.uniform(0.02, 0.4) * area
+    aspect_ratio = np.random.uniform(0.3, 3.3)
+
+    h_erase = int(round(np.sqrt(target_area * aspect_ratio)))
+    w_erase = int(round(np.sqrt(target_area / aspect_ratio)))
+
+    h_erase = min(h, max(1, h_erase))
+    w_erase = min(w, max(1, w_erase))
 
     y1 = max(0, center_y - h_erase // 2)
     x1 = max(0, center_x - w_erase // 2)
@@ -496,43 +517,9 @@ class BlackboxDissector(BaseAttack):
             torch.tensor(query_batch.meta.get("indices", []))
         )
 
-        # Generate pseudo-labels for Self-KD
-        # Use random erasing on original samples
-        erased_indices = query_batch.meta.get("erased_indices", [])
-        original_indices = query_batch.meta.get("indices", [])
-        variant_types = query_batch.meta.get("variant_types", [])
-
-        substitute = state.attack_state["substitute"]
-        device = state.metadata.get("device", "cpu")
-
-        if substitute is not None:
-            substitute.eval()
-            with torch.no_grad():
-                # For each original sample, generate N random variants
-                for i in range(len(x_batch)):
-                    if i in erased_indices:
-                        continue  # Skip erased variants
-                    if i >= len(variant_types) or variant_types[i] != "original":
-                        continue
-
-                    orig_img = x_batch[i]
-
-                    # Generate N random erasures
-                    variants = random_erase(orig_img, n=self.n_variants, erase_ratio=self.erasing_ratio)
-
-                    # Get predictions for all variants
-                    variant_preds = []
-                    for variant in variants:
-                        x_var = variant.unsqueeze(0).to(device)
-                        probs = F.softmax(substitute(x_var), dim=1)
-                        variant_preds.append(probs.squeeze(0))
-
-                    # Average to get pseudo-label
-                    if variant_preds:
-                        pseudo_label = torch.stack(variant_preds).mean(dim=0)
-                        # Store pseudo-label
-                        idx = original_indices[i]
-                        state.attack_state["pseudo_labels"][idx] = pseudo_label.cpu()
+        # Note: Pseudo-label generation logic for Self-KD has been moved 
+        # to train_substitute to correctly use Unlabeled Data (D_U).
+        # The previous logic here only used the query batch (D_T), which was incorrect.
 
         # Train substitute periodically
         labeled_count = len(state.attack_state["labeled_indices"])
@@ -540,9 +527,9 @@ class BlackboxDissector(BaseAttack):
             self.train_substitute(state)
 
     def train_substitute(self, state: BenchmarkState) -> None:
-        """Train substitute model with Self-KD.
+        """Train substitute model with Self-KD on Unlabeled Data.
 
-        Loss = CE(victim_labels) + CE(pseudo_labels)
+        Loss = CE(victim_labels) + alpha * Consistency(unlabeled_data)
 
         Args:
             state: Current benchmark state
@@ -554,12 +541,12 @@ class BlackboxDissector(BaseAttack):
         if len(query_data_x) == 0:
             return
 
-        # Concatenate query data
+        # Concatenate query data (Labeled Set D_T)
         x_all = torch.cat(query_data_x, dim=0)
         y_all = torch.cat(query_data_y, dim=0)
         idx_all = torch.cat(query_data_indices, dim=0)
 
-        # Create dataset
+        # Create labeled dataset
         class QueryDataset(torch.utils.data.Dataset):
             def __init__(self, x, y):
                 self.x = x
@@ -572,19 +559,39 @@ class BlackboxDissector(BaseAttack):
             def __getitem__(self, idx):
                 return self.x[idx], self.y[idx], self.indices[idx]
 
-        dataset = QueryDataset(x_all, y_all)
+        labeled_dataset = QueryDataset(x_all, y_all)
 
-        # Use 20% validation split
-        total_size = len(dataset)
+        # Create unlabeled dataset (D_U)
+        unlabeled_indices = state.attack_state.get("unlabeled_indices", [])
+        if self.pool_dataset is None:
+             # Should be initialized in propose, but safe check
+             dataset_config = state.metadata.get("dataset_config", {})
+             if "data_mode" not in dataset_config:
+                 dataset_config = {"data_mode": "seed", **dataset_config}
+             if "name" not in dataset_config:
+                 dataset_config = {"name": "CIFAR10", **dataset_config}
+             self.pool_dataset = create_dataloader(
+                 dataset_config,
+                 batch_size=1,
+                 shuffle=False,
+             ).dataset
+
+        # Use Subset for unlabeled data
+        # Note: pool_dataset returns (img, label), we ignore label
+        unlabeled_dataset = Subset(self.pool_dataset, unlabeled_indices)
+
+        # Use 20% validation split from Labeled Data
+        total_size = len(labeled_dataset)
         val_size = max(1, int(0.2 * total_size))
         train_size = total_size - val_size
 
+        device = state.metadata.get("device", "cpu")
+        num_classes = int(
+            state.metadata.get("num_classes")
+            or state.metadata.get("dataset_config", {}).get("num_classes", 10)
+        )
+
         if train_size < 2:
-            device = state.metadata.get("device", "cpu")
-            num_classes = int(
-                state.metadata.get("num_classes")
-                or state.metadata.get("dataset_config", {}).get("num_classes", 10)
-            )
             model = create_substitute(
                 arch="resnet18",
                 num_classes=num_classes,
@@ -594,7 +601,7 @@ class BlackboxDissector(BaseAttack):
             return
 
         train_subset, val_subset = torch.utils.data.random_split(
-            dataset,
+            labeled_dataset,
             [train_size, val_size],
             generator=torch.Generator().manual_seed(42),
         )
@@ -604,6 +611,7 @@ class BlackboxDissector(BaseAttack):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=0,
+            drop_last=False,
         )
         val_loader = torch.utils.data.DataLoader(
             val_subset,
@@ -612,12 +620,21 @@ class BlackboxDissector(BaseAttack):
             num_workers=0,
         )
 
+        # Unlabeled loader (cycle it)
+        if len(unlabeled_dataset) > 0:
+            unlabeled_loader = torch.utils.data.DataLoader(
+                unlabeled_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=0,
+                drop_last=True, # Drop last to avoid tiny batches
+            )
+            unlabeled_iter = iter(unlabeled_loader)
+        else:
+            unlabeled_loader = None
+            unlabeled_iter = None
+
         # Initialize model
-        device = state.metadata.get("device", "cpu")
-        num_classes = int(
-            state.metadata.get("num_classes")
-            or state.metadata.get("dataset_config", {}).get("num_classes", 10)
-        )
         sub_config = state.metadata.get("substitute_config", {})
         opt_params = sub_config.get("optimizer", {})
         
@@ -653,60 +670,74 @@ class BlackboxDissector(BaseAttack):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
 
+        erase_ratio_val = self._current_erasing_ratio(state)
+
         for epoch in range(self.max_epochs):
             model.train()
             train_loss = 0.0
 
-            for x_batch, y_batch, idx_batch in train_loader:
+            for x_batch, y_batch, _ in train_loader:
                 x_batch = x_batch.to(device)
-                # Normalize images for substitute
-                x_batch = (x_batch - norm_mean) / norm_std
-                
                 y_batch = y_batch.to(device)
-                idx_batch = idx_batch.to(device)
+                
+                # Supervised Loss on Labeled Data
+                # Normalize images for substitute
+                x_norm = (x_batch - norm_mean) / norm_std
+                
+                outputs = model(x_norm)
+                y_labels = y_batch.argmax(dim=1) if y_batch.ndim > 1 else y_batch
+                
+                loss_sup = F.cross_entropy(outputs, y_labels.long())
+                
+                # Self-KD Loss on Unlabeled Data
+                loss_kd = torch.tensor(0.0, device=device)
+                
+                if unlabeled_loader is not None:
+                    try:
+                        x_unlab, _ = next(unlabeled_iter)
+                    except StopIteration:
+                        unlabeled_iter = iter(unlabeled_loader)
+                        x_unlab, _ = next(unlabeled_iter)
+                    
+                    if len(x_unlab) > 1:
+                        # 1. Generate pseudo-labels using erased variants
+                        # For efficiency, we process variants in batches
+                        # Target = Mean(Softmax(Model(Erased_Variants)))
+                        
+                        variants_list = []
+                        # Generate N variants per image
+                        for img in x_unlab:
+                            # random_erase returns List[Tensor]
+                            variants_list.extend(random_erase(img, n=self.n_variants, erase_ratio=erase_ratio_val))
+                        
+                        # Stack all variants: [B_u * N, C, H, W]
+                        x_variants = torch.stack(variants_list).to(device)
+                        x_variants_norm = (x_variants - norm_mean) / norm_std
+                        
+                        with torch.no_grad():
+                            logits_variants = model(x_variants_norm)
+                            probs_variants = F.softmax(logits_variants, dim=1)
+                            
+                            # Reshape to [B_u, N, NumClasses]
+                            probs_variants = probs_variants.view(len(x_unlab), self.n_variants, num_classes)
+                            
+                            # Average over variants to get pseudo-label
+                            pseudo_labels = probs_variants.mean(dim=1)
+                        
+                        # 2. Consistency Loss
+                        # Loss = CE(Model(Original), PseudoLabel)
+                        x_unlab_norm = (x_unlab.to(device) - norm_mean) / norm_std
+                        logits_unlab = model(x_unlab_norm)
+                        
+                        # Use Soft Cross Entropy
+                        loss_kd = soft_cross_entropy(logits_unlab, pseudo_labels).mean()
+
+                # Combined Loss
+                # Paper typically uses alpha=1.0 or 0.5. Preserving previous 0.5 logic
+                alpha = 0.5
+                loss = (1.0 - alpha) * loss_sup + alpha * loss_kd
 
                 optimizer.zero_grad()
-
-                # Forward pass
-                outputs = model(x_batch)
-
-                y_labels = y_batch.argmax(dim=1) if y_batch.ndim > 1 else y_batch
-
-                ce_loss = F.cross_entropy(outputs, y_labels.long(), reduction="none")
-
-                pseudo_labels = state.attack_state["pseudo_labels"]
-                if pseudo_labels:
-                    mask = []
-                    soft_targets = []
-                    for idx in idx_batch.tolist():
-                        if idx in pseudo_labels:
-                            mask.append(True)
-                            soft_targets.append(pseudo_labels[idx])
-                        else:
-                            mask.append(False)
-
-                    if any(mask):
-                        mask_tensor = torch.tensor(mask, device=device, dtype=torch.bool)
-                        soft_targets_tensor = torch.stack(soft_targets).to(device)
-                        outputs_kd = outputs[mask_tensor]
-                        hard_targets = F.one_hot(
-                            y_labels[mask_tensor].long(), num_classes=num_classes
-                        ).float()
-
-                        alpha = 0.5
-                        temperature = 2.0
-                        kd_loss = soft_cross_entropy(
-                            outputs_kd / temperature,
-                            F.softmax(soft_targets_tensor / temperature, dim=1),
-                        ) * (temperature * temperature)
-
-                        ce_subset = soft_cross_entropy(outputs_kd, hard_targets)
-                        combined_subset = (1.0 - alpha) * ce_subset + alpha * kd_loss
-                        ce_loss = ce_loss.clone()
-                        ce_loss[mask_tensor] = combined_subset
-
-                loss = ce_loss.mean()
-
                 loss.backward()
                 optimizer.step()
 
