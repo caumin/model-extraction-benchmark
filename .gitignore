@@ -34,8 +34,9 @@ coverage.xml
 
 # Project specific
 runs/
-data/
-configs/
+/data/
+!mebench/data/
+/configs/
 papers/*.pdf
 papers/*.txt
 !papers/README.md
