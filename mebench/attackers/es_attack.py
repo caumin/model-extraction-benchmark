@@ -185,26 +185,45 @@ class ESAttack(BaseAttack):
         y_g_cpu: torch.Tensor | None,
         device: str,
     ) -> None:
+        if self.generator is None:
+            return
+
         for _ in range(self.synthesis_steps):
             if z_cpu is None:
-                z = torch.randn(self.batch_size, self.noise_dim, device=device)
+                # Need batch_size pairs of (z, z2) for mode seeking
+                # But here we are given one batch 'z_cpu' from propose() usually.
+                # If dnn_syn, we sample fresh z.
+                z1 = torch.randn(self.batch_size, self.noise_dim, device=device)
             else:
-                z = z_cpu.to(device)
+                z1 = z_cpu.to(device)
+            
+            # Sample z2 for mode seeking
+            z2 = torch.randn_like(z1)
+            
             self.generator_optimizer.zero_grad()
             
+            # Generate labels if needed
             if self.use_class_conditional:
                 if y_g_cpu is None:
-                    y_g = torch.randint(0, self.num_classes, (z.size(0),), device=device)
+                    y = torch.randint(0, self.num_classes, (z1.size(0),), device=device)
                 else:
-                    y_g = y_g_cpu.to(device)
-                x_gen_raw = self.generator(z, y_g)
+                    y = y_g_cpu.to(device)
             else:
-                y_g = None
-                x_gen_raw = self.generator(z)
+                y = None
                 
-            # [FIX] Generator outputs [-1, 1]. Convert to [0, 1] for student query.
-            x_gen = x_gen_raw * 0.5 + 0.5
+            # Forward G
+            if y is not None:
+                x_gen_raw_1 = self.generator(z1, y)
+                x_gen_raw_2 = self.generator(z2, y)
+            else:
+                x_gen_raw_1 = self.generator(z1)
+                x_gen_raw_2 = self.generator(z2)
+                
+            # Convert [-1, 1] -> [0, 1] for student query
+            x_gen_1 = x_gen_raw_1 * 0.5 + 0.5
+            x_gen_2 = x_gen_raw_2 * 0.5 + 0.5
 
+            # Prepare student input
             victim_config = self.state.metadata.get("victim_config", {})
             normalization = victim_config.get("normalization")
             if normalization is None:
@@ -215,25 +234,45 @@ class ESAttack(BaseAttack):
             def _norm(img):
                 return (img - norm_mean) / norm_std
             
-            logits = self.student(_norm(x_gen))
-
-            if y_g is not None:
-                loss = F.cross_entropy(logits, y_g)
+            # 1. Classification Loss (L_img)
+            # Maximize probability of target class 'y'
+            # L_img = CE(S(G(z)), y)
+            logits_1 = self.student(_norm(x_gen_1))
+            
+            if y is not None:
+                # ACGAN style: maximize prob of specific class y
+                # We want to MINIMIZE CrossEntropy(S(G(z)), y) 
+                # wait, if S is fixed, and we want G(z) to be classified as y by S.
+                l_img = F.cross_entropy(logits_1, y)
             else:
-                probs = F.softmax(logits, dim=1)
-                loss = -probs.max(dim=1).values.mean()
+                # Unconditional: Maximize confidence of ANY class (entropy minimization)
+                # Or just maximize max-prob?
+                # Paper says "maximize confidence". So minimize entropy or minimize -max(prob).
+                probs = F.softmax(logits_1, dim=1)
+                l_img = -probs.max(dim=1).values.mean()
 
-            if self.mode_seeking_weight > 0.0:
-                z2 = torch.randn_like(z)
-                if y_g is not None:
-                    x_gen_2_raw = self.generator(z2, y_g)
-                else:
-                    x_gen_2_raw = self.generator(z2)
-                # Compare in raw [-1, 1] space is fine, but keeping consistent
-                delta_x = torch.mean(torch.abs(x_gen_raw - x_gen_2_raw))
-                delta_z = torch.mean(torch.abs(z - z2)) + 1e-6
-                mode_loss = -delta_x / delta_z
-                loss = loss + self.mode_seeking_weight * mode_loss
+            # 2. Mode Seeking Loss (L_ms)
+            # L_ms = d(z1, z2) / d(G(z1), G(z2))
+            # We maximize this ratio -> Minimize reciprocal?
+            # Paper Eq 5: L_DNN = L_img + lambda * L_ms
+            # where L_ms is defined as sum_i [ d(z1, z2) / d(G1, G2) ]
+            # Wait, maximizing the ratio means maximizing d(G1, G2) for small d(z1, z2).
+            # The formula in paper is likely a maximizing objective or minimizing negative.
+            # Usually Mode Seeking Loss is: Minimize L_ms = d(G1, G2) / d(z1, z2) ??
+            # Let's check common implementation (e.g. DSGAN).
+            # DSGAN: Maximize d(G1, G2) / d(z1, z2).
+            # So Loss = - d(G1, G2) / d(z1, z2).
+            
+            # Let's use L1 distance for images and z
+            lz = torch.mean(torch.abs(x_gen_raw_1 - x_gen_raw_2).view(z1.size(0), -1), dim=1)
+            dz = torch.mean(torch.abs(z1 - z2).view(z1.size(0), -1), dim=1) + 1e-8
+            
+            # We want to MAXIMIZE lz / dz. So MINIMIZE - (lz / dz)
+            l_ms = - torch.mean(lz / dz)
+            
+            # Total Loss
+            loss = l_img + self.mode_seeking_weight * l_ms
+            
             loss.backward()
             self.generator_optimizer.step()
 
@@ -250,8 +289,10 @@ class ESAttack(BaseAttack):
         x = self.syn_data[indices].clone().detach().to(device)
         x.requires_grad_(True)
         optimizer = optim.Adam([x], lr=self.opt_lr)
-        alpha = torch.abs(torch.randn(x.size(0), self.num_classes, device=device)) + 1e-3
-        target_probs = torch.distributions.Dirichlet(alpha).sample()
+        
+        # [FIX] OPT-SYN Objective: Match a random hard label
+        # Paper: "randomly assign a label y to each data... optimize x to minimize the cross-entropy loss"
+        target_labels = torch.randint(0, self.num_classes, (x.size(0),), device=device)
         
         augmenter = transforms.Compose(
             [
@@ -270,24 +311,32 @@ class ESAttack(BaseAttack):
 
         for _ in range(self.opt_steps):
             optimizer.zero_grad()
-            x_input = x
-            if self.use_opt_augment:
-                # Augmenter expects [0, 1] usually or tensor.
-                # Since we are in [-1, 1], let's do:
-                x_01 = x_input * 0.5 + 0.5
-                x_aug = augmenter(x_01)
-                x_input = (x_aug - 0.5) / 0.5 # back to [-1, 1] for optimization constraint
-                
-                noise = torch.randn_like(x_input) * 0.01
-                x_input = torch.clamp(x_input + noise, -1.0, 1.0)
             
+            # Ensure computation graph flows from 'x'
+            if self.use_opt_augment:
+                x_01 = x * 0.5 + 0.5
+                x_aug = augmenter(x_01)
+                x_input_raw = (x_aug - 0.5) / 0.5 # back to [-1, 1]
+                
+                noise = torch.randn_like(x_input_raw) * 0.01
+                x_input_raw = x_input_raw + noise
+            else:
+                x_input_raw = x
+
             # Forward pass: [-1, 1] -> [0, 1] -> Normalized
-            logits = self.student((x_input * 0.5 + 0.5 - norm_mean) / norm_std)
-            log_probs = F.log_softmax(logits, dim=1)
-            loss = -(target_probs * log_probs).sum(dim=1).mean()
+            x_input_clamped = torch.clamp(x_input_raw, -1.0, 1.0)
+            logits = self.student((x_input_clamped * 0.5 + 0.5 - norm_mean) / norm_std)
+            
+            # [FIX] Loss: Cross Entropy with Hard Targets
+            loss = F.cross_entropy(logits, target_labels)
+            
             loss.backward()
             optimizer.step()
-            x.data.clamp_(-1.0, 1.0)
+            
+            # Project back to valid range [-1, 1]
+            with torch.no_grad():
+                x.data.clamp_(-1.0, 1.0)
+                
         self.syn_data[indices] = x.detach()
 
     def _refresh_syn_data(self, device: str) -> None:
