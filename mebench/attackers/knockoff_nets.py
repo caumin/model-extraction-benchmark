@@ -35,6 +35,7 @@ class KnockoffNets(BaseAttack):
         self.kmeans_iters = int(config.get("kmeans_iters", 100))
         self.kmeans_tol = float(config.get("kmeans_tol", 1e-4))
         self.feature_arch = config.get("feature_arch", "resnet50")
+        self.policy_lr = float(config.get("policy_lr", 0.01))
         self.num_classes = int(
             state.metadata.get("num_classes")
             or config.get("num_classes")
