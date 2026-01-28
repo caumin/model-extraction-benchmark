@@ -84,14 +84,22 @@ def aggregate_matrix(root_dir="runs", output_root="reports"):
                         "KL": metrics.get("kl_mean", 0),
                         "L1": metrics.get("l1_mean", 0),
                         "Victim": victim_id,
-                        "Substitute": substitute_arch
+                        "Substitute": substitute_arch,
+                        "Timestamp": timestamp_dir.name # [FIX] Track timestamp for deduplication
                     })
-
+                    
     if not results:
         print("No results found to aggregate.")
         return
 
     df = pd.DataFrame(results)
+    
+    # [FIX] Deduplicate: If same (Set, Attack, Budget, Seed) exists, keep only the latest timestamp
+    if not df.empty:
+        # Sort by timestamp descending so the latest is first
+        df = df.sort_values("Timestamp", ascending=False)
+        # Drop duplicates, keeping the first (latest) one
+        df = df.drop_duplicates(subset=["Set", "Attack", "Budget", "Seed"], keep="first")
     
     # Save raw master data
     df.to_csv(output_path / "master_results_raw.csv", index=False)
