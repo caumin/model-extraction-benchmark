@@ -69,9 +69,14 @@ class QueryStorage(Dataset):
     def save(self) -> None:
         """Save current storage to disk.
         
+        Currently DISABLED to save disk space.
+        
         Note: Currently saves all chunks to a single file. 
         TODO: Implement incremental append or chunk-based saving for very large datasets.
         """
+        # Save is disabled for now as it consumes too much disk space
+        return
+
         if self.count == 0:
             return
 
