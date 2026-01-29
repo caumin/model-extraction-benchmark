@@ -11,10 +11,12 @@ def test_dfms_basic_flow(tmp_path) -> None:
         "batch_size": 2,
         "noise_dim": 16,
         "num_classes": 10,
+        "clone_arch": "lenet",  # Use small model for fast CPU testing
         "proxy_dataset": {
             "name": "CIFAR10",
             "data_mode": "seed",
             "seed_size": 10,
+            "num_workers": 0,  # Avoid multiprocessing hang on Windows
         },
     }
     state = BenchmarkState()

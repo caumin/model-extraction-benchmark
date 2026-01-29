@@ -30,12 +30,20 @@ def validate_config(config: Dict[str, Any]) -> None:
     if victim_mode != attack_mode:
         raise ValueError(f"Mode mismatch: victim={victim_mode}, attack={attack_mode}")
 
-    soft_only_attacks = {"inversenet", "swiftthief", "cloudleak"}
-    hard_only_attacks = {"blackbox_dissector"}
+    # Attacks that can work with soft labels (also compatible with hard labels)
+    # Note: CloudLeak and SwiftThief can work in hard mode with one-hot vectors
+    # but may have performance degradation compared to soft mode
+    # InverseNet kept as soft-only due to its inversion-based nature
+    soft_only_attacks = {"inversenet"}  # Removed cloudleak, swiftthief
+    hard_only_attacks = set()  # Removed "blackbox_dissector" to allow soft evaluation metrics
     if attack in soft_only_attacks and attack_mode != "soft_prob":
         raise ValueError(f"{attack} requires soft_prob output mode")
     if attack in hard_only_attacks and attack_mode != "hard_top1":
         raise ValueError(f"{attack} requires hard_top1 output mode")
+    
+    # Warning for soft attacks in hard mode (for awareness)
+    if attack in {"cloudleak", "swiftthief"} and attack_mode == "hard_top1":
+        print(f"[WARNING] {attack} running in hard_top1 mode - performance may be degraded compared to soft_prob mode")
 
     # Check temperature for default oracle
     if config["victim"]["temperature"] != 1.0:

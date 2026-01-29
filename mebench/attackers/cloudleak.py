@@ -146,8 +146,35 @@ class FeatureFool:
                 _ = self.model(x_target.to(self.device))
                 phi_t = activations.pop(0).detach().view(B, -1)
                 
-            # Optimize delta [B, C, H, W]
+            # Optimize delta [B, C, H, W] with epsilon constraint (critical fix)
             delta = torch.zeros_like(x_source, requires_grad=True, device=self.device)
+            
+            # Box-constrained L-BFGS: enforce epsilon bound at each step
+            def closure():
+                optimizer.zero_grad()
+                
+                # Enforce epsilon constraint: clip delta to [-epsilon, +epsilon]
+                delta_clamped = torch.clamp(delta, -self.epsilon, self.epsilon)
+                x_adv = torch.clamp(x_source_dev + delta_clamped, 0.0, 1.0)
+                
+                # Forward pass to trigger hook
+                _ = self.model(x_adv)
+                phi_adv = activations.pop(0).view(B, -1)
+                
+                # Per-sample triplet loss
+                dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1)
+                dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1)
+                
+                triplet = torch.clamp(dist_t - dist_s + margin_m.squeeze(), min=0.0)
+                
+                # Visual loss: L2 norm squared of delta (as per paper)
+                visual_loss = torch.sum(delta_clamped ** 2, dim=(1, 2, 3))
+                
+                loss = torch.mean(visual_loss + self.lambda_adv * triplet)
+                loss.backward()
+                return loss
+            
+            # Use L-BFGS with explicit bounds via projection in closure
             optimizer = torch.optim.LBFGS([delta], lr=1.0, max_iter=self.max_iters, history_size=10, line_search_fn="strong_wolfe")
             
             x_source_dev = x_source.to(self.device)
@@ -398,8 +425,16 @@ class CloudLeak(BaseAttack):
                 s_img, _ = self.pool_dataset[s_idx]
                 s_imgs.append(s_img)
                 
-                # Find a target image with a different label for guidance
-                target_idx = np.random.choice([idx for idx in all_indices if idx != s_idx])
+                # Find a target image with a different label for guidance (robust check)
+                source_label = all_labels[all_indices.index(s_idx)] if s_idx in all_indices else int(self.pool_dataset[s_idx][1])
+                different_label_indices = [idx for idx, label in zip(all_indices, all_labels) if label != source_label]
+                
+                if different_label_indices:
+                    target_idx = np.random.choice(different_label_indices)
+                else:
+                    # Fallback: if no different labels (edge case), pick any other index
+                    other_indices = [idx for idx in all_indices if idx != s_idx]
+                    target_idx = np.random.choice(other_indices) if other_indices else s_idx
                 t_img, _ = self.pool_dataset[target_idx]
                 t_imgs.append(t_img)
             

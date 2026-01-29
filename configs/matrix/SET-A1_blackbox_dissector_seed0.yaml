@@ -13,7 +13,7 @@ victim:
   - 28
   checkpoint_ref: runs/victims/mnist_lenet_mnist_seed0.pt
   normalization: null
-  output_mode: hard_top1
+  output_mode: soft_prob
   temperature: 1.0
 dataset:
   name: MNIST
@@ -22,7 +22,7 @@ dataset:
   train_split: true
 attack:
   name: blackbox_dissector
-  output_mode: hard_top1
+  output_mode: soft_prob
   max_budget: 20000
 substitute:
   arch: lenet_mnist

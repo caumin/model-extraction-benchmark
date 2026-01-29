@@ -226,13 +226,13 @@ class DFME(BaseAttack):
         # but if k is small (end of budget), we just produce what we can.
         
         # We iterate: 1 G-batch, then n_S S-batches.
-        current_k = 0
-        while current_k < k:
-             # Can we fit a G-batch?
-             # Approximate check. We fill sample by sample.
-             pass
+        # current_k = 0
+        # while current_k < k:
+        #      # Can we fit a G-batch?
+        #      # Approximate check. We fill sample by sample.
+        #      pass
 
-        while remaining > 0:
+        # while remaining > 0:
             # Decide type: G or S?
             # We follow the cycle: n_G batches for G, then n_S batches for S.
             # But we are generating sample-by-sample (or mini-batch by mini-batch).
@@ -265,7 +265,7 @@ class DFME(BaseAttack):
             
             # We break this structured loop into a flat stream of queries.
             
-            break # Replaced by logic below
+            # break # Replaced by logic below
 
         # Structured generation loop
         queries_generated = 0
@@ -641,7 +641,7 @@ class DFME(BaseAttack):
                         x_pert_tensor = x_all[cursor-local_m : cursor]
                         
                         with torch.no_grad():
-                             s_pert = self.student(_normalize_dfme(x_pert_tensor))
+                             s_pert = self.student(self._normalize_dfme(x_pert_tensor))
                              loss_pert = torch.mean(torch.abs(s_pert - v_pert), dim=1)
                         
                         # Calculate diff
@@ -690,7 +690,7 @@ class DFME(BaseAttack):
                 
                 # Update S
                 self.student_optimizer.zero_grad()
-                s_out = self.student(_normalize_dfme(x_batch.detach()))
+                s_out = self.student(self._normalize_dfme(x_batch.detach()))
                 loss = torch.mean(torch.abs(s_out - v_batch))
                 loss.backward()
                 self.student_optimizer.step()
@@ -702,6 +702,19 @@ class DFME(BaseAttack):
         self._maybe_step_lr(state)
         state.attack_state["substitute"] = self.student
 
+
+    def _normalize_dfme(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalize images for student model."""
+        victim_config = self.state.metadata.get("victim_config", {})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
+        
+        device = x.device
+        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
+        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        
+        return (x - norm_mean) / norm_std
 
     def _maybe_step_lr(self, state: BenchmarkState) -> None:
         if self.student_optimizer is None or self.generator_optimizer is None:

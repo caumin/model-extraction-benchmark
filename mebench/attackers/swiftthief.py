@@ -20,13 +20,17 @@ class SimSiamProjectionHead(nn.Module):
     """Projection head for SimSiam contrastive learning.
 
     Projects features to lower-dimensional space for contrastive learning.
-    Architecture: Linear -> BN -> ReLU -> Linear -> BN(affine=False)
+    Architecture: Linear -> BN -> ReLU -> Linear -> BN -> ReLU -> Linear -> BN(affine=False)
+    (3-layer MLP as per SimSiam paper and SwiftThief implementation)
     """
 
     def __init__(self, in_dim: int, proj_dim: int = 2048, hidden_dim: int = 2048):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, proj_dim),
@@ -734,6 +738,31 @@ class SwiftThief(BaseAttack):
             shuffle=False,
             num_workers=0,
         )
+        
+        # Create dataloader for unqueried pool U for L_self computation (critical fix)
+        unlabeled_indices = state.attack_state["unlabeled_indices"]
+        if len(unlabeled_indices) > 0:
+            class PoolDataset(torch.utils.data.Dataset):
+                def __init__(self, indices, pool_dataset):
+                    self.indices = indices
+                    self.pool_dataset = pool_dataset
+                
+                def __len__(self):
+                    return len(self.indices)
+                
+                def __getitem__(self, idx):
+                    pool_idx = self.indices[idx]
+                    img, _ = self.pool_dataset[pool_idx]
+                    return img
+            
+            pool_dataset = PoolDataset(unlabeled_indices, self.pool_dataset)
+            # Use smaller batch size for pool to manage memory
+            pool_batch_size = min(self.batch_size, 32)
+            pool_loader = torch.utils.data.DataLoader(
+                pool_dataset, batch_size=pool_batch_size, shuffle=True, drop_last=True
+            )
+        else:
+            pool_loader = None
 
         device = state.metadata.get("device", "cpu")
         num_classes = int(
@@ -818,7 +847,15 @@ class SwiftThief(BaseAttack):
                     count = class_counts.get(label, 1)
                     weights[i] = float(max_count) / float(max(count, 1))
 
-                loss_match = (ce_losses * weights).mean()
+                # Use KL divergence for soft probabilities, CE for hard labels (paper parity)
+                if y_batch.ndim > 1:  # soft probabilities
+                    # KL divergence: p * log(p/q) where p=victim, q=substitute
+                    victim_probs = y_batch
+                    substitute_probs = F.softmax(logits, dim=1)
+                    kl_losses = F.kl_div(substitute_probs.log(), victim_probs, reduction='none')
+                    loss_match = (kl_losses * weights).mean()
+                else:  # hard labels
+                    loss_match = (ce_losses * weights).mean()
 
                 # Build perturbation for sharpness regularizer (FGSM)
                 x_adv = x_batch.detach().requires_grad_(True)
@@ -828,18 +865,45 @@ class SwiftThief(BaseAttack):
                 grad = torch.autograd.grad(loss_adv, x_adv, retain_graph=False, create_graph=False)[0]
                 x_pert = (x_adv + self.fgsm_epsilon * torch.sign(grad.detach())).detach()
 
-                # Two views for contrastive learning
-                x_view1, x_view2 = self._apply_two_crops(x_batch.detach(), device, state)
-                f1 = substitute.features(x_view1)
-                f2 = substitute.features(x_view2)
-                z1 = self.projection_head(f1)
-                z2 = self.projection_head(f2)
-                p1 = self.predictor_head(z1)
-                p2 = self.predictor_head(z2)
-
-                loss_self = 0.5 * (
-                    self._neg_cosine_similarity(p1, z2) + self._neg_cosine_similarity(p2, z1)
-                )
+# L_self: Contrastive learning on UNQUERIED POOL U (critical fix for paper parity)
+                if pool_loader is not None:
+                    # Sample from unqueried pool for L_self computation
+                    try:
+                        x_pool_batch = next(iter(pool_loader))
+                    except StopIteration:
+                        # Recreate pool loader if exhausted
+                        pool_loader = torch.utils.data.DataLoader(
+                            pool_dataset, batch_size=pool_batch_size, shuffle=True, drop_last=True
+                        )
+                        x_pool_batch = next(iter(pool_loader))
+                    
+                    x_pool_batch = x_pool_batch.to(device)
+                    
+                    # Two views from pool data for self-supervised learning
+                    x_pool_view1, x_pool_view2 = self._apply_two_crops(x_pool_batch, device, state)
+                    f1_pool = substitute.features(x_pool_view1)
+                    f2_pool = substitute.features(x_pool_view2)
+                    z1_pool = self.projection_head(f1_pool)
+                    z2_pool = self.projection_head(f2_pool)
+                    p1_pool = self.predictor_head(z1_pool)
+                    p2_pool = self.predictor_head(z2_pool)
+                    
+                    loss_self = 0.5 * (
+                        self._neg_cosine_similarity(p1_pool, z2_pool) + self._neg_cosine_similarity(p2_pool, z1_pool)
+                    )
+                else:
+                    # Fallback: use queried data (not paper-faithful but prevents crash)
+                    x_view1, x_view2 = self._apply_two_crops(x_batch.detach(), device, state)
+                    f1 = substitute.features(x_view1)
+                    f2 = substitute.features(x_view2)
+                    z1 = self.projection_head(f1)
+                    z2 = self.projection_head(f2)
+                    p1 = self.predictor_head(z1)
+                    p2 = self.predictor_head(z2)
+                    
+                    loss_self = 0.5 * (
+                        self._neg_cosine_similarity(p1, z2) + self._neg_cosine_similarity(p2, z1)
+                    )
 
                 loss_soft = torch.tensor(0.0, device=device)
                 if y_batch.ndim > 1:

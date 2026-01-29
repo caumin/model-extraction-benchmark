@@ -232,7 +232,7 @@ class SurrogateDataset(Dataset):
 def get_test_dataloader(
     name: str,
     batch_size: int = 128,
-    num_workers: int = 2,
+    num_workers: int = 0,  # Default to 0 for Windows safety
 ) -> DataLoader:
     """Get test dataloader for victim dataset."""
     if name == "CIFAR10":
@@ -310,9 +310,11 @@ def create_dataloader(
     else:
         raise ValueError(f"Unknown data_mode: {data_mode}")
 
+    num_workers = config.get("num_workers", 0)  # Default to 0 for safety
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=2,
+        num_workers=num_workers,
     )
