@@ -39,7 +39,8 @@ class InverseNet(BaseAttack):
         
         # Paper commonly uses top-1 truncation.
         self.truncation_k = int(config.get("truncation_k", 1))
-        self.max_pool_eval = int(config.get("max_pool_eval", 2000))
+        max_pool_eval = config.get("max_pool_eval")
+        self.max_pool_eval = None if max_pool_eval is None else int(max_pool_eval)
         self.coreset_seed = int(config.get("coreset_seed", 20))
         self.hcss_xi = float(config.get("hcss_xi", 0.02))
 
@@ -59,6 +60,7 @@ class InverseNet(BaseAttack):
         state.attack_state["phase"] = 1
         state.attack_state["substitute"] = None
         state.attack_state["coreset_centers"] = []
+        state.attack_state["inversion_trained"] = False
 
     def _get_dataset_config(self, state: BenchmarkState) -> dict:
         dataset_config = self.config.get("attack", {}).get("dataset")
@@ -103,6 +105,9 @@ class InverseNet(BaseAttack):
         self._update_phase(state)
         phase = state.attack_state["phase"]
 
+        if phase == 3:
+            self._ensure_inversion_trained_for_phase3(state)
+
         if phase == 3 and self.inversion_model is not None:
             # Paper Phase 3: "Average" samples per class.
             # Generate synthetic vectors: one-hot (1.0) and variations (0.9, 0.8)
@@ -117,14 +122,9 @@ class InverseNet(BaseAttack):
             for c in range(self.num_classes):
                 for conf in confidences:
                     y = torch.zeros(self.num_classes, device=device)
-                    if conf == 1.0:
-                        y[c] = 1.0
-                    else:
-                        # Distribute remainder uniformly to keep sum=1.0 (valid probability)
-                        # This matches the distribution of _truncate_logits outputs used in training
-                        remainder = (1.0 - conf) / (self.num_classes - 1 + 1e-8)
-                        y.fill_(remainder)
-                        y[c] = conf
+                    # Paper uses truncated vectors (m=1): non-top entries are zeros.
+                    # We vary the top entry value to generate multiple inversions per class.
+                    y[c] = float(conf)
                     templates.append(y)
             
             # 3. Sample from these templates to fill batch k
@@ -176,13 +176,7 @@ class InverseNet(BaseAttack):
             state.attack_state["inversion_x"].append(query_batch.x.detach().cpu())
             trunc = self._truncate_logits(oracle_output.y.detach().cpu())
             state.attack_state["inversion_y"].append(trunc)
-            # Inversion model is trained at end of Phase 2 logic (using accumulated data)
-            # But paper implies training G_V using HCSS samples (phase 2 data).
-            # We train continuously or once at end? Paper: "train G_V using S_I" (accumulated).
-            # For efficiency, we can train incrementally or at end of phase.
-            # To match protocol strictly: Train G_V after Phase 2 completion?
-            # Current implementation: Online updates to G_V. Kept for now as G_V needs to be ready for Phase 3.
-            self._train_inversion(state)
+            # Paper: train G_V once after Phase 2 completion.
 
         if phase == 3:
             self._train_substitute_on_batch(query_batch.x, oracle_output.y, state)
@@ -226,6 +220,20 @@ class InverseNet(BaseAttack):
                 loss = F.mse_loss(recon, x_batch)
                 loss.backward()
                 self.inversion_optimizer.step()
+
+        state.attack_state["inversion_trained"] = True
+
+    def _ensure_inversion_trained_for_phase3(self, state: BenchmarkState) -> None:
+        if state.attack_state.get("inversion_trained") is True:
+            return
+
+        # Train once (paper) using accumulated Phase 2 data.
+        if len(state.attack_state.get("inversion_x", [])) == 0:
+            return
+        if len(state.attack_state.get("inversion_y", [])) == 0:
+            return
+
+        self._train_inversion(state)
 
     def _train_substitute_on_batch(
         self,
@@ -361,7 +369,11 @@ class InverseNet(BaseAttack):
             else:
                 available = all_indices
                 
-            candidate_count = min(len(available), self.max_pool_eval)
+            max_eval = self.max_pool_eval
+            if max_eval is None or max_eval <= 0:
+                candidate_count = len(available)
+            else:
+                candidate_count = min(len(available), max_eval)
             if candidate_count == 0:
                 candidates = []
             else:
@@ -373,7 +385,11 @@ class InverseNet(BaseAttack):
             return self._hcss_select(k, candidates, substitute)
 
         # Phase 1 (Coreset) or others: Select from full pool
-        candidate_count = min(len(self.pool_dataset), self.max_pool_eval)
+        max_eval = self.max_pool_eval
+        if max_eval is None or max_eval <= 0:
+            candidate_count = len(self.pool_dataset)
+        else:
+            candidate_count = min(len(self.pool_dataset), max_eval)
         candidates = np.random.choice(len(self.pool_dataset), candidate_count, replace=False).tolist()
 
         if phase == 1:
@@ -427,7 +443,7 @@ class InverseNet(BaseAttack):
         for idx in candidates:
             img, _ = self.pool_dataset[idx]
             x = img.unsqueeze(0).to(device)
-            perturb = self._deepfool_distance(substitute, x)
+            perturb = self._deepfool_distance(substitute, x, overshoot=self.hcss_xi)
             score = (1.0 + self.hcss_xi) * perturb
             scores.append((idx, score))
 

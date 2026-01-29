@@ -32,12 +32,14 @@ class GAME(BaseAttack):
         self.base_channels = int(config.get("base_channels", 64))
         self.acs_strategy = config.get("acs_strategy", "uncertainty")
 
-        self.beta1 = float(config.get("beta1", 1.0))
-        self.beta2 = float(config.get("beta2", 1.0))
-        self.beta3 = float(config.get("beta3", 1.0))
-        self.beta4 = float(config.get("beta4", 1.0))
+        self.beta1 = float(config.get("beta1", 1.0)) # l_res
+        self.beta2 = float(config.get("beta2", 1.0)) # l_bou
+        self.beta3 = float(config.get("beta3", 1.0)) # l_adv
+        self.beta4 = float(config.get("beta4", 1.0)) # l_dif
 
-        self.tdl_steps = int(config.get("tdl_steps", 1))
+        # TDL: Training Discriminator and Generator with proxy data.
+        # Paper implies iterative training. default to 20 epochs/steps.
+        self.tdl_steps = int(config.get("tdl_steps", 20))
         self.agu_steps = int(config.get("agu_steps", 1))
         self.gmd_steps = int(config.get("gmd_steps", 1))
         self.use_acgan = bool(config.get("use_acgan", True))
@@ -156,12 +158,46 @@ class GAME(BaseAttack):
         else:
             victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
 
+        # Update per-class average victim probability cache for ACS
+        self._update_victim_stats(state, victim_probs, query_batch.meta.get("y_g"))
+
         state.attack_state["last_victim_probs"] = victim_probs.detach().cpu()
         self._agu_phase(query_batch.x, victim_probs, device, query_batch.meta.get("z"), query_batch.meta.get("y_g"))
         self._gmd_phase(query_batch.x, victim_probs)
 
         state.attack_state["step"] += 1
         state.attack_state["substitute"] = self.student
+
+    def _update_victim_stats(self, state, victim_probs, labels):
+        if labels is None:
+            return
+        
+        cache = state.attack_state.get("victim_class_avg_prob")
+        counts = state.attack_state.get("victim_class_counts")
+        
+        if cache is None:
+            cache = torch.zeros(self.num_classes, self.num_classes, device=victim_probs.device)
+            # Init with uniform to avoid log(0)
+            cache.fill_(1.0 / self.num_classes)
+            counts = torch.zeros(self.num_classes, device=victim_probs.device)
+            
+        labels = labels.to(victim_probs.device)
+        
+        for c in range(self.num_classes):
+            mask = (labels == c)
+            if mask.any():
+                n_new = mask.sum()
+                mean_new = victim_probs[mask].mean(dim=0)
+                
+                prev_n = counts[c]
+                prev_mean = cache[c]
+                
+                new_mean = (prev_mean * prev_n + mean_new * n_new) / (prev_n + n_new)
+                cache[c] = new_mean
+                counts[c] += n_new
+                
+        state.attack_state["victim_class_avg_prob"] = cache
+        state.attack_state["victim_class_counts"] = counts
 
     def _next_proxy_batch(self, device: str) -> torch.Tensor:
         try:
@@ -263,11 +299,22 @@ class GAME(BaseAttack):
         l_bou = torch.mean(top2[:, 0] - top2[:, 1])
         pseudo_labels = torch.argmax(student_probs, dim=1)
         l_adv = -F.cross_entropy(student_logits, pseudo_labels)
-        l_dif = -F.kl_div(
-            F.log_softmax(student_logits, dim=1),
-            victim_probs,
-            reduction="batchmean",
-        )
+        
+        # l_dif = KL( student || victim ) as per Eq. 13 and Eq. 9
+        # F.kl_div(p, q) computes KL(q || p). We need KL(p || q).
+        student_log_probs = F.log_softmax(student_logits, dim=1)
+        # KL(P||Q) = sum P * (logP - logQ)
+        # Note: victim_probs are already softmax probabilities.
+        # student_log_probs is logP.
+        # We need logQ = log(victim_probs).
+        victim_log_probs = torch.log(victim_probs + 1e-10)
+        
+        # Manual implementation of KL(pS || pV)
+        # kl = (student_probs * (student_log_probs - victim_log_probs)).sum(dim=1).mean()
+        # Alternatively, use F.kl_div by swapping and using log_target=True if available, 
+        # but manual is clearer for fidelity.
+        l_dif_val = (student_probs * (student_log_probs - victim_log_probs)).sum(dim=1).mean()
+        l_dif = -l_dif_val
 
         total = (
             self.beta1 * l_res
@@ -311,28 +358,91 @@ class GAME(BaseAttack):
             self._train_generator(z_cpu, y_cpu, victim_probs, device)
 
     def _gmd_phase(self, x: torch.Tensor, victim_probs: torch.Tensor) -> None:
+        # Check if victim output is effectively hard-label (max prob > 0.999)
+        # Or if config explicitly flags hard-label scenario.
+        # Paper GMD soft-label branch: if hard label, use discriminator soft output as target.
+        
+        # Determine if we should use discriminator soft labels
+        # Heuristic: if entropy of victim_probs is very low (~0), it's hard label.
+        entropy = -(victim_probs * torch.log(victim_probs + 1e-10)).sum(dim=1).mean()
+        is_hard_label = entropy < 0.01 
+        
+        target = victim_probs
+        if is_hard_label and self.discriminator is not None:
+            # Use Discriminator's class head as soft label source?
+            # GAME paper Section 4.3: "We use the soft output of the discriminator as the ground truth."
+            # The discriminator has an auxiliary classifier C.
+            # We feed x to D, get C(x).
+            with torch.no_grad():
+                d_out = self.discriminator(x)
+                if isinstance(d_out, tuple):
+                    _, d_class = d_out
+                    if d_class is not None:
+                        # Softmax of auxiliary classifier
+                        target = F.softmax(d_class, dim=1)
+        
         for _ in range(self.gmd_steps):
-            self._train_student(x, victim_probs)
+            self._train_student(x, target)
 
     def _compute_class_distribution(self, state: BenchmarkState, device: str) -> torch.Tensor:
         if self.student is None:
             return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
 
+        victim_config = self.state.metadata.get("victim_config", {})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
+        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
+        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        def _norm(img):
+            return (img * 0.5 + 0.5 - norm_mean) / norm_std
+
         z = torch.randn(self.num_classes, self.noise_dim, device=device)
         class_ids = torch.arange(self.num_classes, device=device)
         with torch.no_grad():
             x = self.generator(z, class_ids)
-            student_logits = self.student(x)
+            student_logits = self.student(_norm(x))
             student_probs = F.softmax(student_logits, dim=1)
 
         if self.acs_strategy == "deviation" and "last_victim_probs" in state.attack_state:
-            victim_probs = state.attack_state["last_victim_probs"].to(device)
-            victim_mean = victim_probs.mean(dim=0)
-            score = F.kl_div(
-                torch.log(student_probs + 1e-6),
-                victim_mean.unsqueeze(0).expand_as(student_probs),
-                reduction="none",
-            ).sum(dim=1)
+            # Paper Eq. 9: d_i = KL(N_S(x_i) || N_V(x_i))
+            # BUT we need victim probabilities for these specific generated x_i.
+            # Using last_victim_probs (mean over batch) is incorrect if batch isn't class-aligned.
+            # Correct approach:
+            # We assume we cannot query victim for free.
+            # The paper says: "Estimate d_i by current samples or cached samples."
+            # Since we generate x_i here without querying victim, we must rely on historical average P_V for class i?
+            # Or perhaps we should use "uncertainty" if we can't afford queries.
+            
+            # If we strictly follow paper, we need N_V(x_i). 
+            # If we don't query, we can't compute exact Eq 9 deviation.
+            # "Approximation: Use average victim confidence for class i observed so far?"
+            # Let's check cached victim outputs per class.
+            
+            # Fallback to Uncertainty (entropy) if no per-class history.
+            # To fix "Correct GAME ACS deviation-distance (Eq. 9)":
+            # We need to track victim outputs per class in state.
+            
+            cached_p_v = state.attack_state.get("victim_class_avg_prob") # shape [C, C]
+            
+            if cached_p_v is not None:
+                cached_p_v = cached_p_v.to(device)
+                # student_probs: [C, C] (diagonal dominant hopefully)
+                # cached_p_v: [C, C] (average victim response for class i)
+                
+                # KL(S||V)
+                # We want vector of scores d_i for each class i
+                # d_i = KL( S(x_i) || V_avg_i )
+                
+                s_log = torch.log(student_probs + 1e-10)
+                v_log = torch.log(cached_p_v + 1e-10)
+                
+                # KL = sum S * (logS - logV)
+                kl_div = (student_probs * (s_log - v_log)).sum(dim=1)
+                score = kl_div
+            else:
+                # Fallback to uncertainty 
+                score = 1.0 - student_probs.max(dim=1).values
         else:
             score = 1.0 - student_probs.max(dim=1).values
 

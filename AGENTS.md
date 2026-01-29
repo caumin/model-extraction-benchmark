@@ -393,7 +393,7 @@ seed,checkpoint_B,track,acc_gt,agreement,attack,data_mode,output_mode,victim_id,
 - **학습 루프**: TBD
 - **하이퍼파라미터**: TBD
 
-### ActiveThief (based on activethief.md)
+### ActiveThief (based on docs/reference/activethief_details.md)
 
 **알고리즘 루프**
 1. 초기화: Thief dataset에서 랜덤 초기 시드 S0 선택
@@ -504,7 +504,7 @@ Output: Substitute Model f_tilde
     D_labeled = D_labeled + D_new
 ```
 
-### DFME (based on DFME.md)
+### DFME (based on docs/reference/dfme_details.md)
 
 **알고리즘 루프**
 Generator(G)와 Student(S)의 적대적 학습 (Min-Max Game):

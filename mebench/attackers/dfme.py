@@ -43,8 +43,8 @@ class DFME(BaseAttack):
         self.batch_size = int(config.get("batch_size", 256))
         self.student_lr = float(config.get("student_lr", 0.1))
         self.student_weight_decay = float(config.get("student_weight_decay", 5e-4))
-        # Official DFME repo commonly uses lr_G=1e-4.
-        self.generator_lr = float(config.get("generator_lr", 1e-4))
+        # Official DFME repo commonly uses lr_G=1e-4, but paper specifies 5e-4.
+        self.generator_lr = float(config.get("generator_lr", 5e-4))
         self.lr_steps = config.get("lr_steps", [0.1, 0.3, 0.5])
         self.lr_scale = float(config.get("lr_scale", 0.3))
         self.n_g_steps = int(config.get("n_g_steps", 1))  # Generator steps
@@ -382,9 +382,7 @@ class DFME(BaseAttack):
     ) -> None:
         """Update G and S based on oracle response.
 
-        Performs one training iteration:
-        1. G-step (n_G times): Maximize disagreement using gradient estimation
-        2. S-step (n_S times): Minimize L1 loss
+        Performs training iterations (n_G and n_S steps) as interleaved in the query batch.
 
         Args:
             query_batch: The query batch that was sent
@@ -396,28 +394,15 @@ class DFME(BaseAttack):
         z_cpu = query_batch.meta.get("z")
         directions_cpu = query_batch.meta.get("directions")
         m_per_base_cpu = query_batch.meta.get("m_per_base")
+        step_types_cpu = query_batch.meta.get("step_types") # 1=G, 2=S
 
-        if z_cpu is None or directions_cpu is None or m_per_base_cpu is None:
+        if z_cpu is None or directions_cpu is None or m_per_base_cpu is None or step_types_cpu is None:
             return
 
         z = z_cpu.to(device)
         directions = directions_cpu.to(device)
         m_per_base = m_per_base_cpu.to(device)
-
-        bases = []
-        perturbed = []
-        cursor = 0
-        for i in range(int(m_per_base.numel())):
-            m_eff = int(m_per_base[i].item())
-            bases.append(x_all[cursor : cursor + 1])
-            cursor += 1
-            if m_eff > 0:
-                perturbed.append(x_all[cursor : cursor + m_eff])
-                cursor += m_eff
-        if cursor != x_all.size(0):
-            return
-        x_base = torch.cat(bases, dim=0)
-        x_perturbed = torch.cat(perturbed, dim=0) if perturbed else torch.empty(0, *x_all.shape[1:], device=device)
+        step_types = step_types_cpu.to(device)
 
         # Convert oracle output to logits if needed
         if oracle_output.kind == "soft_prob":
@@ -432,108 +417,15 @@ class DFME(BaseAttack):
             victim_logits = torch.zeros(oracle_output.y.shape[0], num_classes).to(device)
             victim_logits.scatter_(1, oracle_output.y.to(device).unsqueeze(1), 1.0)
 
-        # Match victim outputs to our unpacking.
-        victim_base = []
-        victim_perturbed = []
-        cursor = 0
-        for i in range(int(m_per_base.numel())):
-            m_eff = int(m_per_base[i].item())
-            victim_base.append(victim_logits[cursor : cursor + 1])
-            cursor += 1
-            if m_eff > 0:
-                victim_perturbed.append(victim_logits[cursor : cursor + m_eff])
-                cursor += m_eff
-        victim_base = torch.cat(victim_base, dim=0)
-        victim_perturbed = (
-            torch.cat(victim_perturbed, dim=0)
-            if victim_perturbed
-            else torch.empty(0, victim_logits.size(1), device=device)
-        )
-
-        # G-step: approximate gradient in input space then backprop through G
-        for _ in range(self.n_g_steps):
-            self.generator_optimizer.zero_grad()
-            gen_out = self.generator(z, return_pre_tanh=True)
-            if isinstance(gen_out, tuple):
-                pre_tanh_base, x_base_grad = gen_out
-            else:
-                pre_tanh_base = gen_out
-                x_base_grad = gen_out
-            student_base = self.student(x_base_grad)
-            loss_base = torch.mean(torch.abs(student_base - victim_base), dim=1)
-
-            if x_perturbed.numel() > 0:
-                student_pert = self.student(x_perturbed.detach())
-                loss_pert_all = torch.mean(torch.abs(student_pert - victim_perturbed), dim=1)
-            else:
-                loss_pert_all = torch.empty(0, device=device)
-
-            grad_est = torch.zeros_like(pre_tanh_base)
-            cursor_pert = 0
-            for i in range(pre_tanh_base.size(0)):
-                m_eff = int(m_per_base[i].item())
-                if m_eff <= 0:
-                    continue
-                loss_i = loss_base[i]
-                loss_p = loss_pert_all[cursor_pert : cursor_pert + m_eff]
-                dirs = directions[i, :m_eff].view(m_eff, -1)
-                loss_diff = (loss_p - loss_i) / float(self.grad_approx_epsilon)
-                g = torch.sum(loss_diff.view(m_eff, 1) * dirs, dim=0)
-                grad_est[i] = g.view_as(grad_est[i])
-                cursor_pert += m_eff
-
-            # Gradient Ascent: Negate gradient to maximize disagreement
-            pre_tanh_base.backward(-grad_est)
-            self.generator_optimizer.step()
-
-        # Update G and S based on oracle response.
-        # Strict paper implementation:
-        # We iterate through the batch, identifying G-steps and S-steps based on 'step_types' metadata.
-        # Since we pre-generated the sequence in propose(), we just execute the updates in order.
-
-        # Unpack metadata
-        step_types_cpu = query_batch.meta.get("step_types") # 1=G, 2=S
-        if step_types_cpu is None:
-             # Fallback for old/legacy batches? Or return.
-             return
-
-        step_types = step_types_cpu.to(device)
-        
-        # We need to reconstruct the "stream" of samples.
-        # x_all contains flat queries.
-        # z, directions, m_per_base correspond to "bases" (one base = 1 z).
-        # We iterate through 'bases'.
-        
         num_bases = len(z)
-        
-        # Cursor for x_all / victim_logits
         cursor = 0
-        
-        # We process the stream base-by-base (since step_type is per base).
-        # But optimization steps (optimizer.step()) happen per BATCH.
-        # So we accumulate gradients until we hit batch_size or change of step type?
-        # No, the paper loop is:
-        # For i = 1 to n_G:
-        #    Sample batch z
-        #    Update G
-        # For i = 1 to n_S:
-        #    Sample batch z
-        #    Update S
-        
-        # Our stream in propose() was generated exactly in this order:
-        # n_G batches of type 1
-        # n_S batches of type 2
-        # Repeat...
-        
-        # So we just need to group bases by batch_size.
-        
         base_idx = 0
+
         while base_idx < num_bases:
             # Determine current step type
             current_type = int(step_types[base_idx].item())
             
             # Collect a batch of bases for this step
-            # We take up to batch_size bases, but MUST stop if type changes
             batch_indices = []
             batch_m = []
             batch_z = []
@@ -550,31 +442,10 @@ class DFME(BaseAttack):
             
             if not batch_indices: break
 
-            # Now extract the actual samples (x, victim_out) corresponding to these bases
-            # Each base 'i' consumes (1 + m_i) samples in the flat list.
-            # We need to locate them.
-            
-            # Since 'cursor' tracks position in flat list (x_all), and bases are ordered,
-            # we just advance cursor for each base in the batch.
-            
             # Processing G-step (type 1)
             if current_type == 1:
-                # We need gradients for G.
-                # G update requires: z, directions, victim_base, victim_pert
-                
-                # Accumulate gradients over the batch
                 self.generator_optimizer.zero_grad()
-                total_grad_est = [] # We need to sum gradients? 
-                # Actually, standard approach: compute loss -> backward.
-                # But here we have custom gradient estimation.
-                # We can compute grad_est for each sample, stack them, and backward.
-                
-                # Let's collect batch tensors
-                # We need to know which sample maps to which z
-                
-                # Optimization: Process the whole batch at once if possible.
-                # But m_eff might vary per sample (if end of budget).
-                # So we iterate inside the batch.
+                self.student.eval() # Student is frozen during G-step
                 
                 for k_idx, local_m in enumerate(batch_m):
                     local_base_idx = batch_indices[k_idx]
@@ -582,11 +453,9 @@ class DFME(BaseAttack):
                     local_dirs = directions[local_base_idx] # [max_m, ...]
                     
                     # Extract victim outputs
-                    # Base
                     v_base = victim_logits[cursor : cursor+1]
                     cursor += 1
                     
-                    # Perturbed
                     v_pert = None
                     if local_m > 0:
                         v_pert = victim_logits[cursor : cursor+local_m]
@@ -597,90 +466,44 @@ class DFME(BaseAttack):
                     pre_tanh, x_base_recon = self.generator(local_z, return_pre_tanh=True)
                     
                     # 2. Student output on base
-                    s_base = self.student(x_base_recon)
-                    loss_base = torch.mean(torch.abs(s_base - v_base), dim=1)
+                    # Paper Eq. 5 disagreement: sum of absolute differences in logits
+                    s_base = self.student(self._normalize_dfme(x_base_recon))
+                    loss_base = torch.sum(torch.abs(s_base - v_base), dim=1)
                     
-                    # 3. Student output on perturbed (if any)
                     grad_est = torch.zeros_like(pre_tanh)
                     
                     if local_m > 0:
-                        # Reconstruct perturbed x? No, we have v_pert.
-                        # We need x_pert to pass through student? 
-                        # Wait, we used x_pert in propose to get v_pert.
-                        # Now we need student(x_pert).
-                        # We can regenerate x_pert from z + dirs.
-                        
-                        # Recover dirs
-                        active_dirs = local_dirs[:local_m]
-                        
-                        # Re-generate x_pert to be safe (or store it? x_all has it but detached?)
-                        # x_all in observe is detached from graph.
-                        # Student needs to backprop? No, G update needs backprop to G.
-                        # Grad est formula: (Loss(S(x+d)) - Loss(S(x))) * d
-                        # We need numerical values of Loss.
-                        # So we don't need graph for S(x_pert). We just need value.
-                        # We can use x_all[...].
-                        
-                        # But wait, cursor logic above advanced past perturbed.
-                        # Let's peek back.
-                        # x_pert_tensor = x_all[cursor-local_m : cursor]
-                        
-                        # Actually, we need to pass gradients to G.
-                        # The zeroth order method gives us dL/dz (approx).
-                        # We do: pre_tanh.backward(-grad_est)
-                        
-                        # So we just need scalar values of losses.
-                        # S(x_pert) - v_pert
-                        
-                        # We can use the x_all directly since we don't differentiate through S here.
-                        # We only differentiate through G's backward(-grad_est).
-                        
-                        # Recalculate S(x_pert)
-                        # We need to access x_all. It is flat.
-                        # We tracked cursor.
+                        # Corresponds to perturbed samples in flat x_all
                         x_pert_tensor = x_all[cursor-local_m : cursor]
                         
                         with torch.no_grad():
+                             # Consistent preprocessing for student
                              s_pert = self.student(self._normalize_dfme(x_pert_tensor))
-                             loss_pert = torch.mean(torch.abs(s_pert - v_pert), dim=1)
+                             loss_pert = torch.sum(torch.abs(s_pert - v_pert), dim=1)
                         
                         # Calculate diff
                         loss_diff = (loss_pert - loss_base) / self.grad_approx_epsilon
                         
-                        # g = sum( diff * dir )
-                        # active_dirs: [m, shape]
-                        # loss_diff: [m]
-                        
-                        # Flatten dirs for dot product
-                        # active_dirs_flat = active_dirs.view(local_m, -1)
-                        # g_flat = torch.sum(loss_diff.view(local_m, 1) * active_dirs_flat, dim=0)
-                        # grad_est = g_flat.view_as(pre_tanh)
-                        
+                        # Calculate input dimension d (pre-tanh space)
+                        d = pre_tanh.view(pre_tanh.size(0), -1).shape[1]
+
+                        # Eq. 6: g = (d/m) * sum( loss_diff * dir )
                         for di in range(local_m):
-                            grad_est += loss_diff[di] * active_dirs[di].unsqueeze(0)
+                            grad_est += loss_diff[di] * local_dirs[di].unsqueeze(0)
                         
-                        grad_est /= local_m
+                        grad_est = (grad_est / local_m) * d
                     
-                    # Backward with estimated gradient (Gradient Ascent -> maximize disagreement)
-                    # We minimize negative disagreement
+                    # Gradient Ascent: Maximize disagreement (minimize negative disagreement)
                     pre_tanh.backward(-grad_est)
                 
-                # Step G optimizer after accumulating batch gradients
                 self.generator_optimizer.step()
-            
             
             # Processing S-step (type 2)
             elif current_type == 2:
-                # S update requires: x_base, victim_base
-                # We minimize L1(S(x), V(x))
-                
-                # Collect all bases in this batch
                 x_batch_list = []
                 v_batch_list = []
                 
                 for k_idx, local_m in enumerate(batch_m):
-                    # For S-step, m is always 0.
-                    # Base
                     x_batch_list.append(x_all[cursor : cursor+1])
                     v_batch_list.append(victim_logits[cursor : cursor+1])
                     cursor += 1
@@ -688,12 +511,20 @@ class DFME(BaseAttack):
                 x_batch = torch.cat(x_batch_list, dim=0)
                 v_batch = torch.cat(v_batch_list, dim=0)
                 
+                self.student.train()
                 # Update S
                 self.student_optimizer.zero_grad()
                 s_out = self.student(self._normalize_dfme(x_batch.detach()))
-                loss = torch.mean(torch.abs(s_out - v_batch))
+                # S-step also uses sum of abs differences per Eq. 5
+                loss = torch.mean(torch.sum(torch.abs(s_out - v_batch), dim=1))
                 loss.backward()
                 self.student_optimizer.step()
+
+        # Update step counter
+        state.attack_state["step"] += num_bases // self.batch_size
+        
+        self._maybe_step_lr(state)
+        state.attack_state["substitute"] = self.student
 
         # Update step counter (approximate, since we did multiple steps)
         # We count 1 step per full cycle? Or just increment.
@@ -704,7 +535,11 @@ class DFME(BaseAttack):
 
 
     def _normalize_dfme(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize images for student model."""
+        """Normalize images for student model.
+        
+        Note: Generator outputs [-1, 1], but standard normalization expects [0, 1].
+        We shift before normalizing.
+        """
         victim_config = self.state.metadata.get("victim_config", {})
         normalization = victim_config.get("normalization")
         if normalization is None:
@@ -714,7 +549,10 @@ class DFME(BaseAttack):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
         
-        return (x - norm_mean) / norm_std
+        # Shift [-1, 1] -> [0, 1]
+        x_01 = (x + 1) / 2
+        
+        return (x_01 - norm_mean) / norm_std
 
     def _maybe_step_lr(self, state: BenchmarkState) -> None:
         if self.student_optimizer is None or self.generator_optimizer is None:

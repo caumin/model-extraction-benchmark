@@ -41,7 +41,7 @@ def test_blackbox_dissector_variant_selection_uses_original_label(monkeypatch) -
     variant_b = torch.ones(3, 32, 32)
     variants = itertools.cycle([variant_a, variant_b])
 
-    def _fake_cam_erase(img, model, erase_ratio=0.5):
+    def _fake_cam_erase(img, model, **_kwargs):
         return next(variants)
 
     monkeypatch.setattr(dis_mod, "cam_erase", _fake_cam_erase)
