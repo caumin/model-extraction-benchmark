@@ -52,8 +52,11 @@ class KnockoffNets(BaseAttack):
         state.attack_state["unqueried_indices"] = []
         state.attack_state["policy_weights"] = torch.zeros(self.num_classes)
         state.attack_state["coarse_policy_weights"] = torch.zeros(0)
+        state.attack_state["action_counts"] = torch.zeros(self.num_classes)
+        state.attack_state["coarse_action_counts"] = torch.zeros(0)
         state.attack_state["reward_baseline"] = 0.0
         state.attack_state["recent_victim_probs"] = deque(maxlen=self.reward_window)
+        state.attack_state["recent_rewards"] = deque(maxlen=self.reward_window)
         state.attack_state["query_data_x"] = []
         state.attack_state["query_data_y"] = []
         state.attack_state["substitute"] = None
@@ -195,6 +198,7 @@ class KnockoffNets(BaseAttack):
         state.attack_state["class_to_coarse"] = class_to_coarse
         state.attack_state["coarse_to_classes"] = coarse_to_classes
         state.attack_state["coarse_policy_weights"] = torch.zeros(k)
+        state.attack_state["coarse_action_counts"] = torch.zeros(k)
 
     def _sample_class_with_policy(self, state: BenchmarkState) -> int:
         class_weights = state.attack_state["policy_weights"].clone().float()
@@ -297,8 +301,9 @@ class KnockoffNets(BaseAttack):
 
         if len(recent_probs) > 0:
             mean_recent = torch.stack(list(recent_probs)).mean(dim=0)
-            # Diversity reward: encourage dissimilarity to recent average posterior.
-            diversity_reward = 1.0 - F.cosine_similarity(probs, mean_recent.unsqueeze(0).expand_as(probs), dim=1)
+            # Strict implementation of Eq. 5: sum(max(0, y_t - y_bar))
+            diff = probs - mean_recent.unsqueeze(0)
+            diversity_reward = torch.clamp(diff, min=0).sum(dim=1)
         else:
             diversity_reward = torch.zeros(probs.size(0))
 
@@ -318,34 +323,50 @@ class KnockoffNets(BaseAttack):
             + self.reward_loss_weight * loss_reward
         )
 
-        baseline = float(state.attack_state["reward_baseline"])
         reward_mean = float(rewards.mean().item()) if rewards.numel() > 0 else 0.0
-        baseline = 0.9 * baseline + 0.1 * reward_mean
+        state.attack_state["recent_rewards"].append(reward_mean)
+        if len(state.attack_state["recent_rewards"]) > 0:
+            baseline = float(np.mean(state.attack_state["recent_rewards"]))
+        else:
+            baseline = 0.0
         state.attack_state["reward_baseline"] = baseline
 
         classes = query_batch.meta.get("classes", [])
         weights = state.attack_state["policy_weights"].clone().float()
         coarse_weights = state.attack_state["coarse_policy_weights"].clone().float()
         class_to_coarse = state.attack_state["class_to_coarse"]
+        
         # Gradient bandit update: w_i <- w_i + alpha * (r - b) * (1[i=a] - pi_i)
+        # alpha = 1 / N(z)
         pi = torch.softmax(weights, dim=0)
         for idx, class_id in enumerate(classes):
             if class_id < 0 or class_id >= weights.numel():
                 continue
+            
+            # Update counts
+            state.attack_state["action_counts"][class_id] += 1
+            count = state.attack_state["action_counts"][class_id].item()
+            alpha = 1.0 / count
+
             adv = float(rewards[idx]) - baseline
             grad = -pi
             grad[class_id] = 1.0 - pi[class_id]
-            weights = weights + self.policy_lr * adv * grad
+            weights = weights + alpha * adv * grad
 
             pi = torch.softmax(weights, dim=0)
 
             if class_id in class_to_coarse and coarse_weights.numel() > 0:
                 coarse_id = int(class_to_coarse[class_id])
                 if 0 <= coarse_id < coarse_weights.numel():
+                    # Update coarse counts
+                    state.attack_state["coarse_action_counts"][coarse_id] += 1
+                    coarse_count = state.attack_state["coarse_action_counts"][coarse_id].item()
+                    coarse_alpha = 1.0 / coarse_count
+                    
                     coarse_pi = torch.softmax(coarse_weights, dim=0)
                     coarse_grad = -coarse_pi
                     coarse_grad[coarse_id] = 1.0 - coarse_pi[coarse_id]
-                    coarse_weights = coarse_weights + self.policy_lr * adv * coarse_grad
+                    coarse_weights = coarse_weights + coarse_alpha * adv * coarse_grad
         state.attack_state["policy_weights"] = weights
         if coarse_weights.numel() > 0:
             state.attack_state["coarse_policy_weights"] = coarse_weights

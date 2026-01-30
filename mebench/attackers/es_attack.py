@@ -35,7 +35,7 @@ class ESAttack(BaseAttack):
         self.syn_size = int(config.get("syn_size", 256))
         self.student_epochs = int(config.get("student_epochs", 10))
         self.synthesis_steps = int(config.get("synthesis_steps", 1))
-        self.mode_seeking_weight = float(config.get("mode_seeking_weight", 0.1))
+        self.mode_seeking_weight = float(config.get("mode_seeking_weight", 1.0))
         self.use_opt_augment = bool(config.get("use_opt_augment", True))
         self.use_class_conditional = bool(config.get("use_class_conditional", True))
         self.acgan_weight = float(config.get("acgan_weight", 1.0))
@@ -164,13 +164,31 @@ class ESAttack(BaseAttack):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(x.device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(x.device)
         
+        # Augmentation logic moved here (Step 4)
+        augmenter = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomAffine(degrees=15, translate=(0.05, 0.05)),
+            ]
+        )
+        
         # [FIX] Removed heuristic check. Input x is guaranteed to be [0, 1] by propose()
         def _norm(img):
             return (img - norm_mean) / norm_std
 
         for _ in range(self.student_epochs):
             self.student_optimizer.zero_grad()
-            logits = self.student(_norm(x))
+            
+            if self.use_opt_augment and self.synthesis_mode == "opt_syn":
+                 # Apply augmentation to input x which is in [0, 1]
+                 x_aug = augmenter(x)
+                 # Add noise
+                 x_aug = x_aug + torch.randn_like(x_aug) * 0.01
+                 x_input = torch.clamp(x_aug, 0.0, 1.0)
+            else:
+                 x_input = x
+
+            logits = self.student(_norm(x_input))
             loss = F.kl_div(
                 F.log_softmax(logits, dim=1),
                 victim_probs,
@@ -263,12 +281,17 @@ class ESAttack(BaseAttack):
             # DSGAN: Maximize d(G1, G2) / d(z1, z2).
             # So Loss = - d(G1, G2) / d(z1, z2).
             
+            # L_ms = dz / lz
+            # We want to MINIMIZE L_ms = dz / lz (according to correction plan)
+            # Paper Eq 5: L_DNN = L_img + lambda * L_ms
+            
             # Let's use L1 distance for images and z
             lz = torch.mean(torch.abs(x_gen_raw_1 - x_gen_raw_2).view(z1.size(0), -1), dim=1)
-            dz = torch.mean(torch.abs(z1 - z2).view(z1.size(0), -1), dim=1) + 1e-8
+            dz = torch.mean(torch.abs(z1 - z2).view(z1.size(0), -1), dim=1)
             
-            # We want to MAXIMIZE lz / dz. So MINIMIZE - (lz / dz)
-            l_ms = - torch.mean(lz / dz)
+            # Add epsilon to lz to prevent division by zero
+            epsilon = 1e-8
+            l_ms = torch.mean(dz / (lz + epsilon))
             
             # Total Loss
             loss = l_img + self.mode_seeking_weight * l_ms
@@ -290,17 +313,21 @@ class ESAttack(BaseAttack):
         x.requires_grad_(True)
         optimizer = optim.Adam([x], lr=self.opt_lr)
         
-        # [FIX] OPT-SYN Objective: Match a random hard label
-        # Paper: "randomly assign a label y to each data... optimize x to minimize the cross-entropy loss"
-        target_labels = torch.randint(0, self.num_classes, (x.size(0),), device=device)
+        # [FIX] OPT-SYN Objective: Match a Dirichlet distribution
+        # Paper: "sample alpha from Gaussian N(0,1), then y ~ Dirichlet(alpha)"
+        # Since Dirichlet requires alpha > 0, we use abs(alpha).
+        # We sample ONE alpha per batch or per sample? Paper implies per sample variability or per batch.
+        # "randomly sample the parameter alpha from a Gaussian distribution"
         
-        augmenter = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomAffine(degrees=15, translate=(0.05, 0.05)),
-            ]
-        )
+        # We sample a different alpha vector for each sample in the batch to encourage diversity
+        # alpha_vec = torch.randn(x.size(0), self.num_classes, device=device).abs()
+        # But commonly symmetric Dirichlet is used. Let's assume symmetric alpha sampled from Gaussian.
         
+        # Implementation: Sample alpha_val ~ |N(0,1)|, then y ~ Dirichlet(alpha_val * ones)
+        alpha_val = torch.randn(x.size(0), 1, device=device).abs()
+        dist = torch.distributions.Dirichlet(torch.ones(x.size(0), self.num_classes, device=device) * alpha_val)
+        y_target = dist.sample()
+
         # Student normalization
         victim_config = self.state.metadata.get("victim_config", {})
         normalization = victim_config.get("normalization")
@@ -312,23 +339,13 @@ class ESAttack(BaseAttack):
         for _ in range(self.opt_steps):
             optimizer.zero_grad()
             
-            # Ensure computation graph flows from 'x'
-            if self.use_opt_augment:
-                x_01 = x * 0.5 + 0.5
-                x_aug = augmenter(x_01)
-                x_input_raw = (x_aug - 0.5) / 0.5 # back to [-1, 1]
-                
-                noise = torch.randn_like(x_input_raw) * 0.01
-                x_input_raw = x_input_raw + noise
-            else:
-                x_input_raw = x
-
             # Forward pass: [-1, 1] -> [0, 1] -> Normalized
-            x_input_clamped = torch.clamp(x_input_raw, -1.0, 1.0)
+            # Note: No augmentation here as per Correction Plan Step 4
+            x_input_clamped = torch.clamp(x, -1.0, 1.0)
             logits = self.student((x_input_clamped * 0.5 + 0.5 - norm_mean) / norm_std)
             
-            # [FIX] Loss: Cross Entropy with Hard Targets
-            loss = F.cross_entropy(logits, target_labels)
+            # [FIX] Loss: KL Divergence with Dirichlet Targets
+            loss = F.kl_div(F.log_softmax(logits, dim=1), y_target, reduction='batchmean')
             
             loss.backward()
             optimizer.step()

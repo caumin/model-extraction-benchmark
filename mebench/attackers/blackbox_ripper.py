@@ -28,15 +28,20 @@ class BlackboxRipper(BaseAttack):
 
         # Paper: population 30, elite 10, max 10 iterations per image.
         self.noise_dim = int(config.get("noise_dim", 128))
-        self.latent_bound = float(config.get("latent_bound", 3.3))
+        self.latent_bound = float(config.get("latent_bound", 3.0))
         self.population_size = int(config.get("population_size", 30))
         self.elite_size = int(config.get("elite_size", 10))
-        self.mutation_scale = float(config.get("mutation_scale", 0.5))
+        # mutation_scale removed/fixed to 1.0 later for strict N(0,1).
+        # self.mutation_scale = float(config.get("mutation_scale", 1.0)) 
         self.fitness_threshold = float(config.get("fitness_threshold", 0.02))
         self.max_evolve_iters = int(config.get("max_evolve_iters", 10))
         
+        # Parallel slots limit for budget fairness
+        self.max_slots_per_round = int(config.get("max_slots_per_round", 1))
+        
         total_budget = int(state.metadata.get("max_budget", 10000))
-        self.train_every = int(config.get("train_every", max(256, total_budget // 10)))
+        # train_every removed in favor of end-of-budget training.
+        # self.train_every = int(config.get("train_every", max(256, total_budget // 10)))
         
         self.pretrain_steps = int(config.get("pretrain_steps", 100))
         self.substitute_lr = float(config.get("substitute_lr", 0.01))
@@ -66,13 +71,14 @@ class BlackboxRipper(BaseAttack):
         self._initialize_state(state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
-        state.attack_state["population"] = None
-        state.attack_state["targets"] = None
-        state.attack_state["evolve_iter"] = 0
-        state.attack_state["reset_population"] = False
+        state.attack_state["active_populations"] = {}  # index -> population tensor
+        state.attack_state["active_targets"] = {}      # index -> target label
+        state.attack_state["evolve_iters"] = {}        # index -> iteration count
         state.attack_state["query_data_x"] = []
         state.attack_state["query_data_y"] = []
         state.attack_state["substitute"] = None
+        state.attack_state["total_queries"] = 0
+        state.attack_state["substitute_trained"] = False
 
     def _init_models(self, state: BenchmarkState) -> None:
         device = state.metadata.get("device", "cpu")
@@ -128,45 +134,67 @@ class BlackboxRipper(BaseAttack):
     def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
         self._init_models(state)
         device = state.metadata.get("device", "cpu")
-
-        population_size = max(k, self.population_size)
-        population = state.attack_state.get("population")
-        targets = state.attack_state.get("targets")
-
-        if population is not None:
-            population = population.to(device)
-        if targets is not None:
-            targets = targets.to(device)
-
-        evolve_iter = int(state.attack_state.get("evolve_iter", 0))
-        reset_population = bool(state.attack_state.get("reset_population", False))
-
-        if (
-            population is None
-            or targets is None
-            or population.size(0) != population_size
-            or reset_population
-            or evolve_iter >= self.max_evolve_iters
-        ):
-            u = float(self.latent_bound)
-            population = (torch.rand(population_size, self.noise_dim, device=device) * 2.0 - 1.0) * u
-            targets = torch.randint(0, self.num_classes, (population_size,), device=device)
-            state.attack_state["population"] = population.detach().cpu()
-            state.attack_state["targets"] = targets.detach().cpu()
-            state.attack_state["evolve_iter"] = 0
-            state.attack_state["reset_population"] = False
-
-        with torch.no_grad():
-            x_raw = self.generator(population)[:k]
         
-        # [FIX] Normalization: [-1, 1] -> [0, 1] (Required for Benchmark Contract)
+        active_populations = state.attack_state["active_populations"]
+        active_targets = state.attack_state["active_targets"]
+        evolve_iters = state.attack_state["evolve_iters"]
+        
+        # Calculate how many full populations (slots) we can afford with budget k.
+        # k is the query budget for THIS call.
+        pop_size = self.population_size
+        slots_budget = k // pop_size
+        
+        if slots_budget == 0:
+            # Not enough budget for even one full population evaluation.
+            # Return empty to signal atomic constraint. Do NOT return noise.
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            return QueryBatch(
+                x=torch.empty((0, *input_shape), device=device),
+                meta={"slot_ids": [], "batch_size": 0}
+            )
+            
+        # Cap parallel slots to ensure fair comparison
+        slots_to_process = min(slots_budget, self.max_slots_per_round)
+        
+        # Fill/Refresh active slots up to capacity
+        current_active_keys = list(active_populations.keys())
+        needed = max(0, slots_to_process - len(current_active_keys))
+        
+        next_id = max(current_active_keys, default=-1) + 1
+        
+        for _ in range(needed):
+            # Initialize new population for a new slot
+            u = float(self.latent_bound)
+            pop = (torch.rand(self.population_size, self.noise_dim, device=device) * 2.0 - 1.0) * u
+            target = torch.randint(0, self.num_classes, (1,), device=device).item()
+            
+            active_populations[next_id] = pop
+            active_targets[next_id] = target
+            evolve_iters[next_id] = 0
+            next_id += 1
+            
+        # Select exactly slots_to_process slots to query
+        # Since we just filled 'needed', we have at least 'slots_to_process' slots.
+        # We take the first available ones.
+        # Note: dict keys are insertion ordered in modern python, but list(...) is safer.
+        final_batch_ids = list(active_populations.keys())[:slots_to_process]
+        
+        batch_pop_list = []
+        meta_indices = []
+        
+        for slot_id in final_batch_ids:
+            pop = active_populations[slot_id].to(device)
+            batch_pop_list.append(pop)
+            meta_indices.extend([slot_id] * self.population_size)
+            
+        x_raw = self.generator(torch.cat(batch_pop_list, dim=0))
         x = x_raw * 0.5 + 0.5
         
         meta = {
-            "population": population.detach().cpu(),
-            "targets": targets.detach().cpu(),
-            "population_size": population_size,
+            "slot_ids": meta_indices, # Defines which slot each image belongs to
+            "batch_size": len(meta_indices)
         }
+        
         return QueryBatch(x=x, meta=meta)
 
     def observe(
@@ -178,64 +206,153 @@ class BlackboxRipper(BaseAttack):
         if self.generator is None:
             return
 
-        state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
-        state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
+        slot_ids = query_batch.meta.get("slot_ids", [])
+        if not slot_ids:
+            return
 
-        population = query_batch.meta.get("population")
-        targets = query_batch.meta.get("targets")
-        if population is not None and targets is not None:
-            self._evolve_population(
-                population.to(query_batch.x.device),
-                targets.to(query_batch.x.device),
-                oracle_output,
-                state,
+        device = state.metadata.get("device", "cpu")
+        active_populations = state.attack_state["active_populations"]
+        active_targets = state.attack_state["active_targets"]
+        evolve_iters = state.attack_state["evolve_iters"]
+        
+        if oracle_output.kind == "soft_prob":
+            all_probs = oracle_output.y.to(device)
+        else:
+            all_probs = F.one_hot(
+                oracle_output.y, num_classes=self.num_classes
+            ).float().to(device)
+
+        # Group by slot_id
+        unique_slots = sorted(list(set(slot_ids)))
+        
+        # We need to map linear index in batch to slot
+        # Robust way: iterate unique slots and use list comprehension masking
+        
+        start_idx = 0
+        for slot_id in unique_slots:
+            # Find all indices in the batch belonging to this slot
+            # Note: We assume propose() keeps them contiguous, but we should be robust.
+            # However, batch is ordered by slot_ids metadata.
+            # slot_ids is a list matching x_batch order.
+            
+            # Efficient masking:
+            indices = [i for i, sid in enumerate(slot_ids) if sid == slot_id]
+            count = len(indices)
+            
+            # Strict check: Must process exactly K teacher outputs per slot
+            if count != self.population_size:
+                raise RuntimeError(f"Expected {self.population_size} outputs for slot {slot_id}, got {count}")
+            
+            # Extract probs for this slot
+            # If contiguous (which it is from propose), slice is faster.
+            # If we want to be paranoid-robust:
+            # probs = all_probs[indices]
+            
+            # Let's check contiguous assumption to be safe, but fallback to indexing
+            is_contiguous = (indices == list(range(indices[0], indices[0]+count)))
+            if is_contiguous:
+                probs = all_probs[indices[0] : indices[0]+count]
+            else:
+                probs = all_probs[indices]
+                
+            current_pop = active_populations[slot_id].to(device)
+            target_cls = active_targets[slot_id]
+            
+            # Evolution Step
+            best_z, best_score, new_pop, best_idx_in_pop = self._evolve_single_slot(
+                current_pop, target_cls, probs
             )
+            
+            # Update state
+            active_populations[slot_id] = new_pop.cpu()
+            evolve_iters[slot_id] += 1
+            
+            # Check convergence or max iters
+            if evolve_iters[slot_id] >= self.max_evolve_iters or best_score >= -self.fitness_threshold:
+                # Add best sample to training data
+                with torch.no_grad():
+                    best_img = self.generator(best_z.unsqueeze(0)) * 0.5 + 0.5
+                    
+                state.attack_state["query_data_x"].append(best_img.cpu())
+                
+                # Use best_idx_in_pop to get exactly the probability vector corresponding to best_z
+                best_prob = probs[best_idx_in_pop]
+                state.attack_state["query_data_y"].append(best_prob.cpu().unsqueeze(0))
+                
+                # Remove from active set to make room for new
+                del active_populations[slot_id]
+                del active_targets[slot_id]
+                del evolve_iters[slot_id]
+            
+            # Note: start_idx logic not needed if using indices map
 
-        if state.query_count % self.train_every == 0 and state.query_count > 0:
+        # Policy A: Train once at end of budget.
+        # Check if we can afford another full population step.
+        max_budget = int(state.metadata.get("max_budget", 0))
+        remaining = max_budget - int(state.query_count)
+        
+        # If remaining budget < population_size, we can't do another step.
+        # So we trigger final training.
+        if (not state.attack_state.get("substitute_trained")) and (remaining < self.population_size):
             self._train_substitute(state)
+            state.attack_state["substitute_trained"] = True
 
-    def _evolve_population(
+    def _evolve_single_slot(
         self,
         population: torch.Tensor,
-        targets: torch.Tensor,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        if oracle_output.kind == "soft_prob":
-            victim_probs = oracle_output.y.to(population.device)
-        else:
-            victim_probs = F.one_hot(
-                oracle_output.y, num_classes=self.num_classes
-            ).float().to(population.device)
-
-        targets = targets[: victim_probs.size(0)].to(population.device)
-        target_onehot = F.one_hot(targets, num_classes=self.num_classes).float()
+        target_cls: int,
+        victim_probs: torch.Tensor
+    ):
+        device = population.device
+        target_onehot = F.one_hot(torch.tensor(target_cls), num_classes=self.num_classes).float().to(device)
+        
+        # Fitness = -Objective (Minimize Objective)
+        # Eq. (2) Objective: L(x) = || F(x) - t ||^2  (Sum of squared differences)
+        # Paper usually implies L2 norm squared.
         diff = victim_probs - target_onehot
-        mse = (diff * diff).mean(dim=1)
-        fitness = -mse
-
-        if mse.numel() > 0 and float(mse.min().item()) <= float(self.fitness_threshold):
-            state.attack_state["reset_population"] = True
-
-        elite_count = max(1, min(int(self.elite_size), population.size(0)))
-        elite_idx = torch.topk(fitness, elite_count).indices
-        elite = population[elite_idx]
-
-        mutated_1 = elite + torch.randn_like(elite) * self.mutation_scale
-        mutated_2 = elite + torch.randn_like(elite) * self.mutation_scale
-        new_population = torch.cat([elite, mutated_1, mutated_2], dim=0)
-        if new_population.size(0) < population.size(0):
-            pad = population.size(0) - new_population.size(0)
-            u = float(self.latent_bound)
-            pad_z = (torch.rand(pad, self.noise_dim, device=population.device) * 2.0 - 1.0) * u
-            new_population = torch.cat([new_population, pad_z], dim=0)
-        new_population = new_population[: population.size(0)]
-        if self.latent_bound > 0:
-            new_population = new_population.clamp(-self.latent_bound, self.latent_bound)
-
-        state.attack_state["population"] = new_population.detach().cpu()
-        state.attack_state["targets"] = targets.detach().cpu()
-        state.attack_state["evolve_iter"] = int(state.attack_state.get("evolve_iter", 0)) + 1
+        mse_sum = (diff * diff).sum(dim=1)
+        fitness = -mse_sum
+        
+        # Select Elites
+        elite_count = min(self.elite_size, population.size(0))
+        topk = torch.topk(fitness, elite_count)
+        elite_indices = topk.indices
+        best_score = topk.values[0].item() # This is -mse_sum
+        best_idx_in_pop = elite_indices[0].item()
+        
+        elites = population[elite_indices]
+        best_z = elites[0]
+        
+        # Mutation (Algorithm 1 Step 6)
+        # "Generate offspring by adding random noise to the elite samples."
+        # Implementation: Sample (K-k) parents from elites uniformly with replacement.
+        needed = self.population_size - elite_count
+        
+        offspring = []
+        if needed > 0:
+            parent_indices = torch.randint(0, elite_count, (needed,), device=device)
+            parents = elites[parent_indices]
+            
+            # Mutate all parents: child = parent + noise
+            # Note: Paper says "adding random noise". 
+            # Freeze mutation to strictly N(0,1) for reproducibility/fairness.
+            # mutation_scale controls the magnitude (sigma).
+            # noise = torch.randn_like(parents) * self.mutation_scale
+            noise = torch.randn_like(parents)
+            offspring_tensor = parents + noise
+            
+            new_population = torch.cat([elites, offspring_tensor], dim=0)
+        else:
+            new_population = elites
+            
+        # Clip is removed for strict fidelity to paper text unless code proves otherwise.
+        # Paper doesn't explicitly mention clamping latent vector after mutation.
+        # However, if latent_bound is used for initialization, it might be implied?
+        # "Zero Tolerance": If not in text/algorithm, don't add it.
+        # if self.latent_bound > 0:
+        #     new_population = new_population.clamp(-self.latent_bound, self.latent_bound)
+            
+        return best_z, best_score, new_population, best_idx_in_pop
 
     def _next_proxy_batch(self, device: str) -> torch.Tensor:
         try:
@@ -268,6 +385,30 @@ class BlackboxRipper(BaseAttack):
             self.gen_optimizer.step()
 
     def _train_substitute(self, state: BenchmarkState) -> None:
+        # Strict fidelity: Train from scratch for 200 epochs on current data.
+        # This aligns with "Train the substitute for 200 epochs" on the dataset.
+        # Repeated training on checkpoints ensures Track B is valid.
+        
+        # Reset model to scratch?
+        # If we continue training, it's > 200 epochs effectively.
+        # Paper implies "Offline" training.
+        # So we should reset.
+        
+        device = state.metadata.get("device", "cpu")
+        sub_config = state.metadata.get("substitute_config", {})
+        opt_params = sub_config.get("optimizer", {})
+        
+        self.substitute = create_substitute(
+            arch=sub_config.get("arch", "resnet18"),
+            num_classes=self.num_classes,
+            input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+        ).to(device)
+        
+        self.substitute_optimizer = optim.Adam(
+            self.substitute.parameters(),
+            lr=float(opt_params.get("lr", self.substitute_lr)),
+        )
+
         query_x = state.attack_state["query_data_x"]
         query_y = state.attack_state["query_data_y"]
         if len(query_x) == 0:
@@ -287,29 +428,6 @@ class BlackboxRipper(BaseAttack):
             def __getitem__(self, idx):
                 return self.x[idx], self.y[idx]
 
-        loader = torch.utils.data.DataLoader(
-            QueryDataset(x_all, y_all),
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=0,
-        )
-
-        device = state.metadata.get("device", "cpu")
-        if self.substitute is None:
-            sub_config = state.metadata.get("substitute_config", {})
-            opt_params = sub_config.get("optimizer", {})
-            self.substitute = create_substitute(
-                arch=sub_config.get("arch", "resnet18"),
-                num_classes=self.num_classes,
-                input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
-            ).to(device)
-            self.substitute_optimizer = optim.SGD(
-                self.substitute.parameters(),
-                lr=float(opt_params.get("lr", self.substitute_lr)),
-                momentum=float(opt_params.get("momentum", 0.9)),
-                weight_decay=float(opt_params.get("weight_decay", 5e-4))
-            )
-
         self.substitute.train()
         output_mode = self.config.get("output_mode", "soft_prob")
         victim_config = state.metadata.get("victim_config", {})
@@ -320,9 +438,19 @@ class BlackboxRipper(BaseAttack):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
         
+        # Paper: "We train the substitute model for 200 epochs using the Adam optimizer."
+        # Setup implies batch size 64.
+        
+        train_loader = torch.utils.data.DataLoader(
+            QueryDataset(x_all, y_all),
+            batch_size=64, # Explicitly 64 as per paper setup
+            shuffle=True,
+            num_workers=0,
+        )
+        
         epochs = max(1, int(self.substitute_epochs))
         for _ in range(epochs):
-            for x_batch, y_batch in loader:
+            for x_batch, y_batch in train_loader:
                 x_batch = x_batch.to(device)
                 x_batch = (x_batch - norm_mean) / norm_std
                 
@@ -330,9 +458,11 @@ class BlackboxRipper(BaseAttack):
                 logits = self.substitute(x_batch)
                 if output_mode == "soft_prob":
                     y_batch = y_batch.to(device)
-                    loss = F.kl_div(
-                        F.log_softmax(logits, dim=1), y_batch, reduction="batchmean"
-                    )
+                    # Use exact Cross-Entropy form for soft labels as per paper logic
+                    # H(p, q) = -sum p(x) log q(x)
+                    log_probs = F.log_softmax(logits, dim=1)
+                    # Note: y_batch are the target probabilities (teacher)
+                    loss = -(y_batch * log_probs).sum(dim=1).mean()
                 else:
                     y_batch = y_batch.long().to(device)
                     loss = F.cross_entropy(logits, y_batch)

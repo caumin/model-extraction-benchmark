@@ -961,4 +961,3 @@ class SwiftThief(BaseAttack):
                 all_targets.extend(targets)
 
         return f1_score(all_targets, all_preds, average="macro")
-
