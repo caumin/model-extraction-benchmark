@@ -1,14 +1,17 @@
 """InverseNet attack implementation."""
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Optional
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
@@ -16,7 +19,7 @@ from mebench.models.substitute_factory import create_substitute
 from mebench.models.inversion import InversionGenerator
 
 
-class InverseNet(BaseAttack):
+class InverseNet(AttackRunner):
     """InverseNet with minimal inversion and retraining pipeline."""
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -39,8 +42,6 @@ class InverseNet(BaseAttack):
         
         # Paper commonly uses top-1 truncation.
         self.truncation_k = int(config.get("truncation_k", 1))
-        max_pool_eval = config.get("max_pool_eval")
-        self.max_pool_eval = None if max_pool_eval is None else int(max_pool_eval)
         self.coreset_seed = int(config.get("coreset_seed", 20))
         self.hcss_xi = float(config.get("hcss_xi", 0.02))
 
@@ -51,6 +52,97 @@ class InverseNet(BaseAttack):
         self.substitute_optimizer: torch.optim.Optimizer | None = None
 
         self._initialize_state(state)
+
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        device = self.state.metadata.get("device", "cpu")
+        total_budget = self.state.budget_remaining
+        pbar = tqdm(total=total_budget, desc="[InverseNet] Extracting")
+        
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            x_query, meta = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(x_query, meta=meta)
+            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
+            pbar.update(x_query.size(0))
+        pbar.close()
+
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
+        if self.pool_dataset is None:
+            self._load_pool(state)
+
+        self._update_phase(state)
+        phase = state.attack_state["phase"]
+
+        if phase == 3:
+            self._ensure_inversion_trained_for_phase3(state)
+
+        if phase == 3 and self.inversion_model is not None:
+            device = state.metadata.get("device", "cpu")
+
+            confidences = [1.0, 0.9, 0.8]
+            templates = []
+
+            for c in range(self.num_classes):
+                for conf in confidences:
+                    y = torch.zeros(self.num_classes, device=device)
+                    y[c] = float(conf)
+                    templates.append(y)
+
+            templates = torch.stack(templates)
+            idx = torch.randint(0, templates.size(0), (k,))
+            y_sample = templates[idx]
+
+            with torch.no_grad():
+                x = self.inversion_model(y_sample)
+
+            x = self._augment_inversion(x)
+            meta = {"phase": phase, "synthetic": True, "augmented": True}
+            return x, meta
+
+        if len(self.pool_dataset) == 0:
+            raise ValueError(
+                f"Query pool exhausted for {self.__class__.__name__}. "
+                f"Cannot select {k} more queries."
+            )
+
+        indices = self._select_phase_indices(k, state, phase)
+        x_list = [self.pool_dataset[idx][0] for idx in indices]
+        if len(x_list) < k:
+            raise ValueError(
+                f"Query pool exhausted for {self.__class__.__name__}. "
+                f"Requested {k}, found {len(x_list)}."
+            )
+        x = torch.stack(x_list)
+        meta = {"indices": indices, "phase": phase}
+        return x, meta
+
+    def _handle_oracle_output(
+        self,
+        x_query: torch.Tensor,
+        meta: dict,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        if oracle_output.kind != "soft_prob":
+            raise ValueError("InverseNet requires soft_prob output mode")
+
+        state.attack_state["query_data_x"].append(x_query.detach().cpu())
+        state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
+        self._update_phase(state)
+        phase = state.attack_state["phase"]
+
+        if phase == 2 and not self.train_phase_1:
+            self._train_substitute_from_queries(state)
+            self.train_phase_1 = True
+
+        if phase == 2:
+            state.attack_state["inversion_x"].append(x_query.detach().cpu())
+            trunc = self._truncate_logits(oracle_output.y.detach().cpu())
+            state.attack_state["inversion_y"].append(trunc)
+
+        if phase == 3:
+            self._train_substitute_on_batch(x_query, oracle_output.y, state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["query_data_x"] = []
@@ -98,92 +190,6 @@ class InverseNet(BaseAttack):
         else:
             state.attack_state["phase"] = 3
 
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
-        if self.pool_dataset is None:
-            self._load_pool(state)
-
-        self._update_phase(state)
-        phase = state.attack_state["phase"]
-
-        if phase == 3:
-            self._ensure_inversion_trained_for_phase3(state)
-
-        if phase == 3 and self.inversion_model is not None:
-            # Paper Phase 3: "Average" samples per class.
-            # Generate synthetic vectors: one-hot (1.0) and variations (0.9, 0.8)
-            # instead of sampling from historical victim outputs.
-            device = state.metadata.get("device", "cpu")
-            
-            # 1. Define confidence levels for diversity
-            confidences = [1.0, 0.9, 0.8]
-            templates = []
-            
-            # 2. Generate target vectors for each class
-            for c in range(self.num_classes):
-                for conf in confidences:
-                    y = torch.zeros(self.num_classes, device=device)
-                    # Paper uses truncated vectors (m=1): non-top entries are zeros.
-                    # We vary the top entry value to generate multiple inversions per class.
-                    y[c] = float(conf)
-                    templates.append(y)
-            
-            # 3. Sample from these templates to fill batch k
-            templates = torch.stack(templates)
-            idx = torch.randint(0, templates.size(0), (k,))
-            y_sample = templates[idx]
-
-            with torch.no_grad():
-                x = self.inversion_model(y_sample)
-            
-            # Paper Phase 3: augmentation happens before victim re-query.
-            x = self._augment_inversion(x)
-            meta = {"phase": phase, "synthetic": True, "augmented": True}
-            return QueryBatch(x=x, meta=meta)
-
-        if len(self.pool_dataset) == 0:
-            input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            x = torch.randn(k, *input_shape)
-            return QueryBatch(x=x, meta={"phase": phase, "pool_exhausted": True})
-
-        indices = self._select_phase_indices(k, state, phase)
-        x_list = [self.pool_dataset[idx][0] for idx in indices]
-        if len(x_list) < k:
-            x_list.extend([torch.randn_like(x_list[0]) for _ in range(k - len(x_list))])
-        x = torch.stack(x_list)
-        meta = {"indices": indices, "phase": phase}
-        return QueryBatch(x=x, meta=meta)
-
-    def observe(
-        self,
-        query_batch: QueryBatch,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        if oracle_output.kind != "soft_prob":
-            raise ValueError("InverseNet requires soft_prob output mode")
-
-        state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
-        state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
-        self._update_phase(state)
-        phase = state.attack_state["phase"]
-
-        # Train substitute at end of Phase 1
-        if phase == 2 and not self.train_phase_1:
-            self._train_substitute_from_queries(state)
-            self.train_phase_1 = True
-
-        if phase == 2:
-            state.attack_state["inversion_x"].append(query_batch.x.detach().cpu())
-            trunc = self._truncate_logits(oracle_output.y.detach().cpu())
-            state.attack_state["inversion_y"].append(trunc)
-            # Paper: train G_V once after Phase 2 completion.
-
-        if phase == 3:
-            self._train_substitute_on_batch(query_batch.x, oracle_output.y, state)
-            # Phase 3 is retraining loop.
-            
-        # Removed periodic training to match paper protocol (2-stage training)
-
     def _train_inversion(self, state: BenchmarkState) -> None:
         if self.inversion_model is None:
             device = state.metadata.get("device", "cpu")
@@ -211,7 +217,9 @@ class InverseNet(BaseAttack):
         device = state.metadata.get("device", "cpu")
         self.inversion_model.train()
         epochs = max(1, int(self.inversion_epochs))
-        for _ in range(epochs):
+        inv_pbar = tqdm(range(epochs), desc="[InverseNet] Training Inversion", leave=False)
+        for _ in inv_pbar:
+            epoch_loss = 0.0
             for x_batch, y_batch in loader:
                 x_batch = x_batch.to(device)
                 y_batch = y_batch.to(device)
@@ -220,6 +228,8 @@ class InverseNet(BaseAttack):
                 loss = F.mse_loss(recon, x_batch)
                 loss.backward()
                 self.inversion_optimizer.step()
+                epoch_loss += loss.item()
+            inv_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}"})
 
         state.attack_state["inversion_trained"] = True
 
@@ -342,7 +352,9 @@ class InverseNet(BaseAttack):
 
         self.substitute.train()
         epochs = max(1, int(self.substitute_epochs))
-        for _ in range(epochs):
+        sub_pbar = tqdm(range(epochs), desc="[InverseNet] Training Substitute", leave=False)
+        for _ in sub_pbar:
+            epoch_loss = 0.0
             for x_batch, y_batch in loader:
                 x_batch = x_batch.to(device)
                 y_batch = y_batch.to(device)
@@ -352,8 +364,12 @@ class InverseNet(BaseAttack):
                 loss = F.kl_div(log_probs, y_batch, reduction="batchmean")
                 loss.backward()
                 self.substitute_optimizer.step()
+                epoch_loss += loss.item()
+            sub_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}"})
 
         state.attack_state["substitute"] = self.substitute
+        self.logger.info("InverseNet substitute trained from queries.")
+        self._evaluate_current_substitute(self.substitute, device)
 
     def _select_phase_indices(self, k: int, state: BenchmarkState, phase: int) -> List[int]:
         if len(self.pool_dataset) == 0:
@@ -365,32 +381,22 @@ class InverseNet(BaseAttack):
             coreset_centers = state.attack_state.get("coreset_centers", [])
             
             if len(coreset_centers) > 0:
-                available = np.setdiff1d(all_indices, np.array(coreset_centers))
+                available = np.setdiff1d(all_indices, np.array(coreset_centers)).tolist()
             else:
-                available = all_indices
+                available = all_indices.tolist()
                 
-            max_eval = self.max_pool_eval
-            if max_eval is None or max_eval <= 0:
-                candidate_count = len(available)
-            else:
-                candidate_count = min(len(available), max_eval)
-            if candidate_count == 0:
-                candidates = []
-            else:
-                candidates = np.random.choice(available, candidate_count, replace=False).tolist()
+            # Use ENTIRE available pool (Strict Protocol)
+            candidates = available
+            if not candidates:
+                return []
 
             substitute = state.attack_state.get("substitute")
             if substitute is None:
                 return candidates[: min(k, len(candidates))]
             return self._hcss_select(k, candidates, substitute)
 
-        # Phase 1 (Coreset) or others: Select from full pool
-        max_eval = self.max_pool_eval
-        if max_eval is None or max_eval <= 0:
-            candidate_count = len(self.pool_dataset)
-        else:
-            candidate_count = min(len(self.pool_dataset), max_eval)
-        candidates = np.random.choice(len(self.pool_dataset), candidate_count, replace=False).tolist()
+        # Phase 1 (Coreset) or others: Select from full pool (Strict Protocol)
+        candidates = list(range(len(self.pool_dataset)))
 
         if phase == 1:
             return self._coreset_select(k, candidates, state)

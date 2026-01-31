@@ -3,11 +3,19 @@
 import argparse
 import sys
 import yaml
+import logging
 from mebench.core.engine import run_experiment
 
 
 def main():
     """Main CLI entry point."""
+    # Configure logging to show INFO level and above to console
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+
     parser = argparse.ArgumentParser(description="Model Extraction Benchmark")
     parser.add_argument("command", choices=["run"], help="Command to run")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")

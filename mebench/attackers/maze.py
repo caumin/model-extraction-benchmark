@@ -1,20 +1,23 @@
 """MAZE (Model Stealing via Zeroth-Order Gradient Estimation) attack."""
 
-from typing import List
+from typing import Dict, Any, List, Tuple, Optional
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DCGANGenerator
 from mebench.models.substitute_factory import create_substitute
 
 
-class MAZE(BaseAttack):
+class MAZE(AttackRunner):
     """MAZE attack with zeroth-order generator updates and replay buffer."""
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -44,6 +47,30 @@ class MAZE(BaseAttack):
         self.generator_scheduler: optim.lr_scheduler.CosineAnnealingLR | None = None
 
         self._initialize_state(state)
+
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        device = self.state.metadata.get("device", "cpu")
+        total_budget = self.state.budget_remaining
+        pbar = tqdm(total=total_budget, desc="[MAZE] Extracting")
+        
+        last_eval_queries = 0
+        eval_interval = total_budget // 10
+
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            query_batch = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(query_batch.x, meta=getattr(query_batch, "meta", None))
+            self._handle_oracle_output(query_batch, oracle_output, self.state)
+            pbar.update(query_batch.x.size(0))
+            
+            # Periodic evaluation
+            queries_done = total_budget - ctx.budget_remaining
+            if queries_done - last_eval_queries >= eval_interval:
+                self._evaluate_current_substitute(self.clone, device)
+                last_eval_queries = queries_done
+        
+        pbar.close()
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["step"] = 0
@@ -79,7 +106,7 @@ class MAZE(BaseAttack):
             input_channels=input_channels,
         )
 
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         device = state.metadata.get("device", "cpu")
         max_budget = state.metadata.get("max_budget", 1)
         
@@ -196,16 +223,15 @@ class MAZE(BaseAttack):
             return QueryBatch(x=x, meta={"type": "NOISE"})
 
         x_final = torch.cat(x_all, dim=0)
-        # If engine requested more than we produced (due to batching), fill with noise
+        # [P0 FIX] Remove random noise padding - return fewer samples instead of invalid padding
         if x_final.size(0) < int(k):
-            pad = int(k) - x_final.size(0)
-            x_pad = torch.randn(pad, *x_final.shape[1:], device=device)
-            x_final = torch.cat([x_final, x_pad], dim=0)
-            batch_meta.append({"type": "NOISE", "pad": pad})
+            # Better to return fewer valid samples than padded invalid ones
+            x_final = x_final[:int(k)]
+            batch_meta.append({"adjusted": f"requested {k}, got {x_final.size(0)}"})
 
         return QueryBatch(x=x_final, meta={"blocks": batch_meta})
 
-    def observe(
+    def _handle_oracle_output(
         self,
         query_batch: QueryBatch,
         oracle_output: OracleOutput,
@@ -261,6 +287,8 @@ class MAZE(BaseAttack):
                     
                     if len(pending["pert_y"]) == self.grad_approx_m:
                         self._update_generator(state, pending, _normalize_maze)
+                        if self.generator_scheduler is not None:
+                            self.generator_scheduler.step()
                         state.attack_state["pending_g"] = None
                         
             elif block["type"] == "C_BASE":
@@ -274,19 +302,16 @@ class MAZE(BaseAttack):
                 )
                 loss.backward()
                 self.clone_optimizer.step()
+                if self.clone_scheduler is not None:
+                    self.clone_scheduler.step()
                 
                 # Experience Replay storage (Step 14)
                 self._append_replay(x_batch.detach(), y_batch.detach(), state)
                 
                 # Algorithm 1: Replay training (Steps 15-17)
                 # Paper implies this happens after NC loop, but here we do it per C_BASE block 
-                # to maintain the NR ratio if multiple C_BASE blocks are in one observe.
+                # to maintain the NR ratio if multiple C_BASE blocks are in one handler pass.
                 self._replay_train(state, device, _normalize_maze)
-
-        if self.clone_scheduler is not None:
-            self.clone_scheduler.step()
-        if self.generator_scheduler is not None:
-            self.generator_scheduler.step()
 
         state.attack_state["step"] += 1
         state.attack_state["substitute"] = self.clone

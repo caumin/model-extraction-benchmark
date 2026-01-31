@@ -61,7 +61,7 @@ def test_blackbox_dissector_variant_selection_uses_original_label(monkeypatch) -
     state.attack_state["substitute"] = DummySub()
 
     np.random.seed(0)
-    qb = attack.propose(3, state)
+    qb = attack._select_query_batch(3, state)
 
     chosen = state.attack_state["best_variant_img"][0]
     assert torch.allclose(chosen, variant_b)
@@ -89,13 +89,13 @@ def test_inversenet_phase3_augment_before_query_and_train_on_oracle(monkeypatch)
 
     monkeypatch.setattr(attack, "_augment_inversion", lambda x: x * 0.0)
 
-    qb = attack.propose(2, state)
+    qb = attack._select_query_batch(2, state)
     assert qb.meta.get("phase") == 3
     assert qb.meta.get("augmented") is True
     assert float(qb.x.abs().sum().item()) == 0.0
 
     probs = torch.softmax(torch.randn(2, 4), dim=1)
-    attack.observe(qb, OracleOutput(kind="soft_prob", y=probs), state)
+    attack._handle_oracle_output(qb.x, qb.meta, OracleOutput(kind="soft_prob", y=probs), state)
     assert state.attack_state.get("substitute") is not None
 
 

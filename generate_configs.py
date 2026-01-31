@@ -82,6 +82,13 @@ def generate_configs():
             elif attack == "activethief":
                 attack_strategy = "dfal_k_center"
 
+            # Clean victim ID for filenames (e.g., mnist_lenet instead of mnist_lenet_mnist)
+            victim_arch_clean = setup['victim_arch']
+            if victim_arch_clean == 'lenet_mnist':
+                victim_arch_clean = 'lenet'
+            
+            victim_id = f"{setup['victim_dataset'].lower()}_{victim_arch_clean}"
+            
             output_mode = "hard_top1" if attack == "blackbox_dissector" else "soft_prob"
             data_mode = "data_free" if attack_name in BATCH_FREE_ATTACKS else "surrogate"
 
@@ -108,12 +115,12 @@ def generate_configs():
                             "device": "cuda:0"
                         },
                         "victim": {
-                            "victim_id": f"{setup['victim_dataset'].lower()}_{setup['victim_arch']}",
+                            "victim_id": victim_id,
                             "arch": setup['victim_arch'],
                             "channels": setup['channels'],
                             "num_classes": 10 if setup['victim_dataset'] != "GTSRB" else 43,
                             "input_size": [setup['size'], setup['size']],
-                            "checkpoint_ref": f"runs/victims/{setup['victim_dataset'].lower()}_{setup['victim_arch']}_seed0.pt",
+                            "checkpoint_ref": f"runs/victims/{victim_id}_seed0.pt",
                             "normalization": None,
                             "output_mode": output_mode,
                             "temperature": 1.0

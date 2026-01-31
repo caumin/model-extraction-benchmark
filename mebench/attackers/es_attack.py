@@ -1,19 +1,23 @@
 """ES Attack (Estimate & Synthesize) implementation."""
 
+from typing import Dict, Any, List, Tuple, Optional
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.transforms as transforms
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
-from mebench.models.gan import DCGANGenerator
+from mebench.models.gan import DCGANGenerator, ACGANGenerator
 from mebench.models.substitute_factory import create_substitute
 
 
-class ESAttack(BaseAttack):
+class ESAttack(AttackRunner):
     """Estimate & Synthesize attack with DNN-SYN or OPT-SYN."""
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -48,6 +52,76 @@ class ESAttack(BaseAttack):
 
         self._initialize_state(state)
 
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        device = self.state.metadata.get("device", "cpu")
+        total_budget = self.state.budget_remaining
+        pbar = tqdm(total=total_budget, desc="[ESAttack] Extracting")
+        
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            x_query, meta = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(x_query, meta=meta)
+            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
+            pbar.update(x_query.size(0))
+        pbar.close()
+
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
+        self._init_models(state)
+        device = state.metadata.get("device", "cpu")
+
+        if self.synthesis_mode == "opt_syn":
+            x, indices = self._sample_syn_batch(k)
+            self._optimize_syn_batch(indices, device)
+            x = self.syn_data[indices].to(device)
+            x_query = x * 0.5 + 0.5
+            meta = {"synthetic": True, "mode": "opt_syn", "indices": indices.cpu()}
+            return x_query, meta
+
+        z = torch.randn(k, self.noise_dim, device=device)
+        with torch.no_grad():
+            if self.use_class_conditional:
+                y_g = torch.randint(0, self.num_classes, (k,), device=device)
+                x_raw = self.generator(z, y_g)
+                meta = {
+                    "synthetic": True,
+                    "mode": "dnn_syn",
+                    "z": z.cpu(),
+                    "y_g": y_g.cpu(),
+                }
+            else:
+                x_raw = self.generator(z)
+                meta = {"synthetic": True, "mode": "dnn_syn", "z": z.cpu()}
+
+        x_query = x_raw * 0.5 + 0.5
+        return x_query, meta
+
+    def _handle_oracle_output(
+        self,
+        x_query: torch.Tensor,
+        meta: dict,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        if self.student is None:
+            return
+
+        device = x_query.device
+        if oracle_output.kind == "soft_prob":
+            victim_probs = oracle_output.y.to(device)
+        else:
+            victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
+
+        self._train_student(x_query, victim_probs)
+
+        if self.synthesis_mode == "dnn_syn" and self.generator is not None:
+            self._train_generator(meta.get("z"), meta.get("y_g"), device)
+        elif self.synthesis_mode == "opt_syn":
+            pass
+
+        state.attack_state["step"] += 1
+        state.attack_state["substitute"] = self.student
+
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["step"] = 0
         state.attack_state["syn_index"] = 0
@@ -75,13 +149,27 @@ class ESAttack(BaseAttack):
 
         if self.generator is None and self.synthesis_mode == "dnn_syn":
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            self.generator = DCGANGenerator(
-                noise_dim=self.noise_dim,
-                output_channels=int(self.config.get("output_channels", input_shape[0])),
-                base_channels=self.base_channels,
-                num_classes=self.num_classes if self.use_class_conditional else None,
-                output_size=int(input_shape[1]),
-            ).to(device)
+            
+            # [P0 ARCHITECTURE ENFORCEMENT] ES-Attack requires ACGAN
+            if self.use_class_conditional:
+                if not hasattr(self, 'generator') or self.generator is None:
+                    self.generator = ACGANGenerator(
+                        noise_dim=self.noise_dim,
+                        output_channels=int(self.config.get("output_channels", input_shape[0])),
+                        base_channels=self.base_channels,
+                        num_classes=self.num_classes,
+                        output_size=int(input_shape[1]),
+                        dropout_prob=0.25,  # Paper-mandated dropout
+                    ).to(device)
+            else:
+                if not hasattr(self, 'generator') or self.generator is None:
+                    self.generator = DCGANGenerator(
+                        noise_dim=self.noise_dim,
+                        output_channels=int(self.config.get("output_channels", input_shape[0])),
+                        base_channels=self.base_channels,
+                        num_classes=None,
+                        output_size=int(input_shape[1]),
+                    ).to(device)
             self.generator_optimizer = optim.Adam(
                 self.generator.parameters(), lr=self.generator_lr
             )
@@ -91,70 +179,6 @@ class ESAttack(BaseAttack):
             self.syn_data = torch.randn(self.syn_size, c, h, w, device=device)
             # Init syn_data in [-1, 1] for optimization, but we will clamp/normalize when using
             self.syn_data = self.syn_data.clamp(-1.0, 1.0)
-
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
-        self._init_models(state)
-        device = state.metadata.get("device", "cpu")
-        
-        # [FIX] ESAttack Normalization: Generator outputs [-1, 1], but Benchmark expects [0, 1].
-        # We explicitly convert before returning query batch.
-        
-        if self.synthesis_mode == "opt_syn":
-            x, indices = self._sample_syn_batch(k)
-            # Synthesis-before-query: optimize selected synthetic batch before querying.
-            self._optimize_syn_batch(indices, device)
-            x = self.syn_data[indices].to(device)
-            
-            # Convert [-1, 1] -> [0, 1]
-            x_query = x * 0.5 + 0.5
-            
-            meta = {"synthetic": True, "mode": "opt_syn", "indices": indices.cpu()}
-            return QueryBatch(x=x_query, meta=meta)
-
-        z = torch.randn(k, self.noise_dim, device=device)
-        with torch.no_grad():
-            if self.use_class_conditional:
-                y_g = torch.randint(0, self.num_classes, (k,), device=device)
-                x_raw = self.generator(z, y_g)
-                meta = {
-                    "synthetic": True,
-                    "mode": "dnn_syn",
-                    "z": z.cpu(),
-                    "y_g": y_g.cpu(),
-                }
-            else:
-                x_raw = self.generator(z)
-                meta = {"synthetic": True, "mode": "dnn_syn", "z": z.cpu()}
-        
-        # Convert [-1, 1] -> [0, 1]
-        x_query = x_raw * 0.5 + 0.5
-        return QueryBatch(x=x_query, meta=meta)
-
-    def observe(
-        self,
-        query_batch: QueryBatch,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        if self.student is None:
-            return
-
-        device = query_batch.x.device
-        if oracle_output.kind == "soft_prob":
-            victim_probs = oracle_output.y.to(device)
-        else:
-            victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
-
-        self._train_student(query_batch.x, victim_probs)
-
-        if self.synthesis_mode == "dnn_syn" and self.generator is not None:
-            self._train_generator(query_batch.meta.get("z"), query_batch.meta.get("y_g"), device)
-            # Refresh pool if needed (omitted for dnn_syn as it samples fresh z)
-        elif self.synthesis_mode == "opt_syn":
-            pass
-
-        state.attack_state["step"] += 1
-        state.attack_state["substitute"] = self.student
 
     def _train_student(self, x: torch.Tensor, victim_probs: torch.Tensor) -> None:
         victim_config = self.state.metadata.get("victim_config", {})
@@ -172,30 +196,47 @@ class ESAttack(BaseAttack):
             ]
         )
         
-        # [FIX] Removed heuristic check. Input x is guaranteed to be [0, 1] by propose()
+        # [FIX] Removed heuristic check. Input x is guaranteed to be [0, 1] by selection.
         def _norm(img):
             return (img - norm_mean) / norm_std
 
-        for _ in range(self.student_epochs):
-            self.student_optimizer.zero_grad()
+        sub_pbar = tqdm(range(self.student_epochs), desc="[ESAttack] Training Student", leave=False)
+        for _ in sub_pbar:
+            epoch_loss = 0.0
             
-            if self.use_opt_augment and self.synthesis_mode == "opt_syn":
-                 # Apply augmentation to input x which is in [0, 1]
-                 x_aug = augmenter(x)
-                 # Add noise
-                 x_aug = x_aug + torch.randn_like(x_aug) * 0.01
-                 x_input = torch.clamp(x_aug, 0.0, 1.0)
-            else:
-                 x_input = x
+            # Create a dataloader for the query data to support proper batching
+            dataset = torch.utils.data.TensorDataset(x, victim_probs)
+            # Ensure strict batch size from config, or default 128
+            train_bs = min(len(x), 128)
+            loader = torch.utils.data.DataLoader(dataset, batch_size=train_bs, shuffle=True)
+            
+            for batch_x, batch_y in loader:
+                batch_x, batch_y = batch_x.to(x.device), batch_y.to(x.device)
+                self.student_optimizer.zero_grad()
+                
+                if self.use_opt_augment and self.synthesis_mode == "opt_syn":
+                     # Apply augmentation to input x which is in [0, 1]
+                     x_aug = augmenter(batch_x)
+                     # Add noise
+                     x_aug = x_aug + torch.randn_like(x_aug) * 0.01
+                     x_input = torch.clamp(x_aug, 0.0, 1.0)
+                else:
+                     x_input = batch_x
 
-            logits = self.student(_norm(x_input))
-            loss = F.kl_div(
-                F.log_softmax(logits, dim=1),
-                victim_probs,
-                reduction="batchmean",
-            )
-            loss.backward()
-            self.student_optimizer.step()
+                logits = self.student(_norm(x_input))
+                loss = F.kl_div(
+                    F.log_softmax(logits, dim=1),
+                    batch_y,
+                    reduction="batchmean",
+                )
+                loss.backward()
+                self.student_optimizer.step()
+                epoch_loss += loss.item()
+            
+            sub_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}"})
+
+        self.logger.info(f"ESAttack substitute trained at step {self.state.attack_state['step']}")
+        self._evaluate_current_substitute(self.student, x.device)
 
     def _train_generator(
         self,
@@ -209,7 +250,7 @@ class ESAttack(BaseAttack):
         for _ in range(self.synthesis_steps):
             if z_cpu is None:
                 # Need batch_size pairs of (z, z2) for mode seeking
-                # But here we are given one batch 'z_cpu' from propose() usually.
+                # But here we are given one batch 'z_cpu' from selection usually.
                 # If dnn_syn, we sample fresh z.
                 z1 = torch.randn(self.batch_size, self.noise_dim, device=device)
             else:
@@ -258,9 +299,9 @@ class ESAttack(BaseAttack):
             logits_1 = self.student(_norm(x_gen_1))
             
             if y is not None:
+                # [P0 FIX] Paper Equation 6 mandates Cross-Entropy, NOT KL Divergence
                 # ACGAN style: maximize prob of specific class y
-                # We want to MINIMIZE CrossEntropy(S(G(z)), y) 
-                # wait, if S is fixed, and we want G(z) to be classified as y by S.
+                # We want to MINIMIZE CrossEntropy(S(G(z)), y)
                 l_img = F.cross_entropy(logits_1, y)
             else:
                 # Unconditional: Maximize confidence of ANY class (entropy minimization)

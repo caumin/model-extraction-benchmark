@@ -2,18 +2,22 @@
 
 from typing import Dict, Any, List, Tuple, Optional
 import copy
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import f1_score
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
-from mebench.data.loaders import create_dataloader
+from mebench.data.loaders import create_dataloader, get_test_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.eval.metrics import evaluate_substitute
 
 
 def generate_gradcam_heatmap(
@@ -245,7 +249,7 @@ def cam_erase(
     return erased
 
 
-class BlackboxDissector(BaseAttack):
+class BlackboxDissector(AttackRunner):
     """Black-box Dissector: CAM-driven erasing for hard-label victims.
 
     Algorithm loop:
@@ -295,6 +299,8 @@ class BlackboxDissector(BaseAttack):
         self.max_epochs = int(config.get("max_epochs", 1000))
         self.patience = int(config.get("patience", 100))
         self.dropout = float(config.get("dropout", 0.1))
+        # [P0 FIX] Paper mandates 200 epochs for BlackBox Dissector
+        self.max_epochs = int(config.get("max_epochs", 200))
         self.l2_reg = float(config.get("l2_reg", 5e-4))
 
         # Algorithm 2 (outer loop) iterative max-budget sequence.
@@ -302,10 +308,93 @@ class BlackboxDissector(BaseAttack):
         self.iterative_budgets = config.get("iterative_budgets")
 
         # Initialize attack state
+        # Pool dataset (loaded during selection/init)
+        self.pool_dataset = None
         self._initialize_state(state)
+
+    def run(self, ctx: BenchmarkContext) -> None:
+        # Ensure CUDA context is initialized to prevent cuBLAS warnings during GradCAM
+        if torch.cuda.is_available():
+            torch.cuda.init()
+            # Trigger a real backward pass to fully establish context for autograd cuBLAS handles
+            device = self.state.metadata.get("device", "cuda:0")
+            dummy_x = torch.ones((1, 1), device=device, requires_grad=True)
+            (dummy_x ** 2).sum().backward()
+
+        self.victim = ctx.oracle.model
+
+        pbar = tqdm(total=self.state.budget_remaining, desc="[BlackboxDissector] Extracting")
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            query_batch = self._select_query_batch(step_size, self.state)
+            if int(query_batch.x.size(0)) == 0:
+                if query_batch.meta.get("stage") == "noop":
+                    self._advance_iteration_if_needed(self.state)
+                continue
+            oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+            self._handle_oracle_output(query_batch, oracle_output, self.state)
+            pbar.update(query_batch.x.size(0))
+        pbar.close()
 
         # Pool dataset
         self.pool_dataset = None
+
+    def _advance_iteration_if_needed(self, state: BenchmarkState) -> None:
+        target_q = int(state.attack_state.get("iter_target_q", 0))
+        if target_q > 0 and int(state.query_count) >= target_q:
+            self.train_substitute(state)
+
+            ptr = int(state.attack_state.get("iter_ptr", 0))
+            targets = state.attack_state.get("iter_targets", [])
+            if ptr < len(targets) - 1:
+                state.attack_state["iter_prev_q"] = target_q
+                state.attack_state["iter_ptr"] = ptr + 1
+                state.attack_state["iter_target_q"] = int(targets[ptr + 1])
+                self._reset_iteration_stage_budgets(state)
+            else:
+                # If we reached the last milestone but budget remains,
+                # extend the last milestone to consume all remaining budget
+                max_b = int(state.metadata.get("max_budget", 0))
+                if max_b > target_q:
+                    state.attack_state["iter_prev_q"] = target_q
+                    state.attack_state["iter_target_q"] = max_b
+                    self._reset_iteration_stage_budgets(state)
+
+    def _handle_oracle_output(
+        self,
+        query_batch: QueryBatch,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        if oracle_output.kind != "hard_top1":
+            raise ValueError("blackbox_dissector requires hard_top1")
+
+        x_batch = query_batch.x
+        y_batch = oracle_output.y
+
+        stage = query_batch.meta.get("stage")
+        indices = [int(x) for x in query_batch.meta.get("indices", [])]
+        variant_types = query_batch.meta.get("variant_types", [])
+
+        if stage == "A":
+            victim_labels: dict[int, int] = state.attack_state.get("victim_labels", {})
+            for i, idx in enumerate(indices):
+                if idx < 0:
+                    continue
+                label_i = int(y_batch[i].item())
+                victim_labels[idx] = label_i
+            state.attack_state["victim_labels"] = victim_labels
+            state.attack_state["D_T_x"].append(x_batch.detach().cpu())
+            state.attack_state["D_T_y"].append(y_batch.detach().cpu().long())
+        elif stage == "B":
+            state.attack_state["D_E_x"].append(x_batch.detach().cpu())
+            state.attack_state["D_E_y"].append(y_batch.detach().cpu().long())
+
+        state.attack_state["query_data_x"].append(x_batch.detach().cpu())
+        state.attack_state["query_data_y"].append(y_batch.detach().cpu())
+        state.attack_state["query_data_indices"].append(torch.tensor(indices))
+
+        self._advance_iteration_if_needed(state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         """Initialize attack-specific state.
@@ -313,22 +402,20 @@ class BlackboxDissector(BaseAttack):
         Args:
             state: Global benchmark state to update
         """
-        dataset_config = state.metadata.get("dataset_config", {})
-        config_dataset = self.config.get("dataset", {})
-        if dataset_config:
-            pool_config = dataset_config
-        elif config_dataset:
-            pool_config = config_dataset
-        else:
-            pool_config = {}
+        # Load pool dataset to get actual size
+        if self.pool_dataset is None:
+            dataset_config = state.metadata.get("dataset_config", {})
+            if "data_mode" not in dataset_config:
+                dataset_config = {"data_mode": "seed", **dataset_config}
+            if "name" not in dataset_config:
+                dataset_config = {"name": "CIFAR10", **dataset_config}
+            self.pool_dataset = create_dataloader(
+                dataset_config,
+                batch_size=1,
+                shuffle=False,
+            ).dataset
 
-        pool_size = pool_config.get("pool_size")
-        if pool_size is None:
-            if "seed_size" in pool_config:
-                pool_size = pool_config["seed_size"]
-            else:
-                pool_size = 10000
-
+        pool_size = len(self.pool_dataset)
         state.attack_state["labeled_indices"] = []
         state.attack_state["unlabeled_indices"] = list(range(pool_size))
         state.attack_state["query_data_x"] = []
@@ -389,18 +476,18 @@ class BlackboxDissector(BaseAttack):
         state.attack_state["stage_b_remaining"] = b
         state.attack_state["iter_stage"] = "A"
 
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         """Algorithm 2 query proposal.
 
         This implementation preserves paper-faithful separation:
         - Stage A: query originals from D_U and add to D_T
         - Stage B: query erased samples selected from D_T and add to D_E
 
-        propose(k) may return fewer than k samples to stop exactly at iteration
+        Selection may return fewer than k samples to stop exactly at iteration
         milestones (paper max-budget sequence).
         """
         if k <= 0:
-            raise ValueError("BlackboxDissector propose(k) requires k>0")
+            raise ValueError("BlackboxDissector select(k) requires k>0")
 
         unlabeled_indices = state.attack_state["unlabeled_indices"]
 
@@ -437,7 +524,7 @@ class BlackboxDissector(BaseAttack):
         target_q = int(state.attack_state.get("iter_target_q", 0))
         remaining_to_target = max(0, target_q - int(state.query_count))
         if remaining_to_target == 0:
-            # No-op until observe() advances the iteration.
+            # No-op until the handler advances the iteration.
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             x = torch.empty((0, *input_shape), device=device)
             return QueryBatch(x=x, meta={"stage": "noop", "indices": [], "variant_types": []})
@@ -466,13 +553,13 @@ class BlackboxDissector(BaseAttack):
             k_eff = min(int(k), budget_rem, remaining_to_target)
             if k_eff <= 0:
                 state.attack_state["iter_stage"] = "B"
-                return self.propose(k, state)
+                return self._select_query_batch(k, state)
 
             k_eff = min(k_eff, len(unlabeled_indices))
             if k_eff <= 0:
                 # Can't sample from D_U; move to stage B.
                 state.attack_state["iter_stage"] = "B"
-                return self.propose(k, state)
+                return self._select_query_batch(k, state)
 
             selected = np.random.choice(unlabeled_indices, k_eff, replace=False).tolist()
             for idx in selected:
@@ -501,19 +588,12 @@ class BlackboxDissector(BaseAttack):
             # No budget left for this stage; try other stage or fall back to consuming remaining budget.
             if int(state.attack_state.get("stage_a_remaining", 0)) > 0:
                 state.attack_state["iter_stage"] = "A"
-                return self.propose(k, state)
+                return self._select_query_batch(k, state)
 
             if remaining_to_target > 0:
-                input_shape = state.metadata.get("input_shape", (3, 32, 32))
-                k_noise = min(int(k), remaining_to_target)
-                x = torch.rand((k_noise, *input_shape), device=device)
-                return QueryBatch(
-                    x=x,
-                    meta={
-                        "stage": "noise",
-                        "indices": [-1] * k_noise,
-                        "variant_types": ["noise"] * k_noise,
-                    },
+                raise ValueError(
+                    f"Query pool exhausted for {self.__class__.__name__}. "
+                    f"Cannot select more queries to reach target {target_q}."
                 )
 
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
@@ -566,7 +646,7 @@ class BlackboxDissector(BaseAttack):
         if k_eff <= 0:
             # Can't form erased queries; fall back to querying unlabeled originals.
             state.attack_state["iter_stage"] = "A"
-            return self.propose(min(int(k), remaining_to_target), state)
+            return self._select_query_batch(min(int(k), remaining_to_target), state)
 
         selected = [idx for idx, _ in scored[:k_eff]]
         x_list = [state.attack_state["best_variant_img"][idx] for idx in selected]
@@ -583,67 +663,6 @@ class BlackboxDissector(BaseAttack):
             },
         )
 
-    def observe(
-        self,
-        query_batch: QueryBatch,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        """Observe oracle response and update internal state.
-
-        Args:
-            query_batch: The query batch that was sent
-            oracle_output: Oracle response
-            state: Current benchmark state
-        """
-        if oracle_output.kind != "hard_top1":
-            raise ValueError("blackbox_dissector requires hard_top1")
-
-        x_batch = query_batch.x
-        y_batch = oracle_output.y
-
-        stage = query_batch.meta.get("stage")
-        indices = [int(x) for x in query_batch.meta.get("indices", [])]
-        variant_types = query_batch.meta.get("variant_types", [])
-
-        if stage == "A":
-            victim_labels: dict[int, int] = state.attack_state.get("victim_labels", {})
-            # Record victim labels for originals in D_T.
-            for i, idx in enumerate(indices):
-                if idx < 0:
-                    continue
-                label_i = int(y_batch[i].item())
-                victim_labels[idx] = label_i
-            state.attack_state["victim_labels"] = victim_labels
-            state.attack_state["D_T_x"].append(x_batch.detach().cpu())
-            state.attack_state["D_T_y"].append(y_batch.detach().cpu().long())
-        elif stage == "B":
-            state.attack_state["D_E_x"].append(x_batch.detach().cpu())
-            state.attack_state["D_E_y"].append(y_batch.detach().cpu().long())
-
-        # Store query data for generic logging/debug
-        state.attack_state["query_data_x"].append(x_batch.detach().cpu())
-        state.attack_state["query_data_y"].append(y_batch.detach().cpu())
-        state.attack_state["query_data_indices"].append(torch.tensor(indices))
-
-        # Note: Pseudo-label generation logic for Self-KD has been moved 
-        # to train_substitute to correctly use Unlabeled Data (D_U).
-        # The previous logic here only used the query batch (D_T), which was incorrect.
-
-        # Algorithm 2: train from scratch at each iteration milestone.
-        target_q = int(state.attack_state.get("iter_target_q", 0))
-        if target_q > 0 and int(state.query_count) >= target_q:
-            self.train_substitute(state)
-
-            # Advance iteration.
-            ptr = int(state.attack_state.get("iter_ptr", 0))
-            targets = state.attack_state.get("iter_targets", [])
-            if ptr < len(targets) - 1:
-                state.attack_state["iter_prev_q"] = target_q
-                state.attack_state["iter_ptr"] = ptr + 1
-                state.attack_state["iter_target_q"] = int(targets[ptr + 1])
-                self._reset_iteration_stage_budgets(state)
-
     def train_substitute(self, state: BenchmarkState) -> None:
         """Train substitute model with Self-KD on Unlabeled Data.
 
@@ -652,6 +671,7 @@ class BlackboxDissector(BaseAttack):
         Args:
             state: Current benchmark state
         """
+        device = state.metadata.get("device", "cpu")
         d_t_x = state.attack_state.get("D_T_x", [])
         d_t_y = state.attack_state.get("D_T_y", [])
         d_e_x = state.attack_state.get("D_E_x", [])
@@ -688,7 +708,7 @@ class BlackboxDissector(BaseAttack):
         # Create unlabeled dataset (D_U)
         unlabeled_indices = state.attack_state.get("unlabeled_indices", [])
         if self.pool_dataset is None:
-             # Should be initialized in propose, but safe check
+             # Should be initialized in selection, but safe check
              dataset_config = state.metadata.get("dataset_config", {})
              if "data_mode" not in dataset_config:
                  dataset_config = {"data_mode": "seed", **dataset_config}
@@ -748,9 +768,11 @@ class BlackboxDissector(BaseAttack):
                 drop_last=True, # Drop last to avoid tiny batches
             )
             unlabeled_iter = iter(unlabeled_loader)
+            unlabeled_desc = tqdm(total=len(train_loader), desc="[BlackboxDissector] Predicting Pool", leave=False)
         else:
             unlabeled_loader = None
             unlabeled_iter = None
+            unlabeled_desc = None
 
         # Teacher model = frozen copy of previous substitute (Eq. 7)
         teacher_model = state.attack_state.get("substitute")
@@ -800,11 +822,14 @@ class BlackboxDissector(BaseAttack):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
 
-        for epoch in range(self.max_epochs):
+        epoch_pbar = tqdm(range(self.max_epochs), desc="[BlackboxDissector] Training Substitute", leave=False)
+        for epoch in epoch_pbar:
             model.train()
             train_loss = 0.0
 
             for x_batch, y_batch in train_loader:
+                if unlabeled_desc is not None:
+                    unlabeled_desc.update(1)
                 x_batch = x_batch.to(device)
                 y_batch = y_batch.to(device)
                 
@@ -879,6 +904,10 @@ class BlackboxDissector(BaseAttack):
 
             # Validation
             val_f1 = self._compute_f1(model, val_loader, device, norm_mean, norm_std)
+            epoch_pbar.set_postfix({"Loss": f"{train_loss/len(train_loader):.4f}", "F1": f"{val_f1:.4f}"})
+
+            if unlabeled_desc is not None:
+                unlabeled_desc.reset()
 
             if val_f1 > best_f1:
                 best_f1 = val_f1
@@ -887,14 +916,14 @@ class BlackboxDissector(BaseAttack):
             else:
                 patience_counter += 1
 
-            if epoch % 10 == 0:
-                print(
-                    f"Dissector Epoch {epoch}: Loss: {train_loss/len(train_loader):.4f}, Val F1: {val_f1:.4f}"
-                )
+            # if epoch % 10 == 0:
+            #     print(
+            #         f"Dissector Epoch {epoch}: Loss: {train_loss/len(train_loader):.4f}, Val F1: {val_f1:.4f}"
+            #     )
 
             # Early stopping
             if patience_counter >= self.patience:
-                print(f"Dissector Early stopping at epoch {epoch}")
+                self.logger.info(f"Dissector Early stopping at epoch {epoch}")
                 break
 
         # Load best model
@@ -903,7 +932,12 @@ class BlackboxDissector(BaseAttack):
 
         # Store in state
         state.attack_state["substitute"] = model
-        print(f"Dissector substitute trained. Best F1: {best_f1:.4f}")
+        self.logger.info(f"Dissector substitute trained. Best Val F1: {best_f1:.4f}")
+        if unlabeled_desc is not None:
+            unlabeled_desc.close()
+
+        # Round Evaluation
+        # self._evaluate_current_substitute(model, device)
 
     def _compute_f1(
         self,

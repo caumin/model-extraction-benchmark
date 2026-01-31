@@ -1,19 +1,23 @@
 """GAME (Generative-Based Adaptive Model Extraction) attack."""
 
+from typing import Dict, Any, List, Tuple, Optional
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
-from mebench.models.gan import DCGANGenerator, DCGANDiscriminator
+from mebench.models.gan import DCGANGenerator, DCGANDiscriminator, ACGANGenerator, ACGANDiscriminator
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 
 
-class GAME(BaseAttack):
+class GAME(AttackRunner):
     """GAME with shared generator/discriminator and adaptive losses."""
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -56,6 +60,84 @@ class GAME(BaseAttack):
 
         self._initialize_state(state)
 
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        device = self.state.metadata.get("device", "cpu")
+        total_budget = self.state.budget_remaining
+        pbar = tqdm(total=total_budget, desc="[GAME] Extracting")
+        
+        last_eval_queries = 0
+        eval_interval = total_budget // 10
+
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            x_query, meta = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(x_query, meta=meta)
+            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
+            pbar.update(x_query.size(0))
+            
+            # Periodic evaluation
+            queries_done = total_budget - ctx.budget_remaining
+            if queries_done - last_eval_queries >= eval_interval:
+                self._evaluate_current_substitute(self.student, device)
+                last_eval_queries = queries_done
+                
+        pbar.close()
+
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
+        self._init_models(state)
+        device = state.metadata.get("device", "cpu")
+        z = torch.randn(k, self.noise_dim, device=device)
+        class_probs = self._compute_class_distribution(state, device)
+        class_probs = torch.nan_to_num(class_probs, nan=1.0 / self.num_classes)
+        class_probs = torch.clamp(class_probs, min=1e-9)
+        class_probs = class_probs / class_probs.sum()
+
+        y_g = torch.multinomial(class_probs, k, replacement=True)
+        with torch.no_grad():
+            x = self.generator(z, y_g)
+        
+        # [P0 FIX] Query victim with generated samples to get fresh class distribution
+        with torch.no_grad():
+            victim_output = self.victim(x)
+            fresh_victim_probs = F.softmax(victim_output.y, dim=1)
+            fresh_class_dist = torch.mean(fresh_victim_probs, dim=0)
+            
+        meta = {
+            "generator_step": state.attack_state["step"],
+            "synthetic": True,
+            "z": z.cpu(),
+            "y_g": y_g.cpu(),
+            "acs_probs": class_probs.cpu(),
+            "fresh_victim_probs": fresh_victim_probs.cpu(),
+        }
+        return x, meta
+
+    def _handle_oracle_output(
+        self,
+        x_query: torch.Tensor,
+        meta: dict,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        if self.generator is None or self.discriminator is None or self.student is None:
+            return
+
+        device = x_query.device
+        if oracle_output.kind == "soft_prob":
+            victim_probs = oracle_output.y.to(device)
+        else:
+            victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
+
+        self._update_victim_stats(state, victim_probs, meta.get("y_g"))
+
+        state.attack_state["last_victim_probs"] = victim_probs.detach().cpu()
+        self._agu_phase(x_query, victim_probs, device, meta.get("z"), meta.get("y_g"))
+        self._gmd_phase(x_query, victim_probs)
+
+        state.attack_state["step"] += 1
+        state.attack_state["substitute"] = self.student
+
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["step"] = 0
 
@@ -63,25 +145,50 @@ class GAME(BaseAttack):
         device = state.metadata.get("device", "cpu")
         if self.generator is None:
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            self.generator = DCGANGenerator(
-                noise_dim=self.noise_dim,
-                output_channels=int(self.config.get("output_channels", input_shape[0])),
-                base_channels=self.base_channels,
-                num_classes=self.num_classes,
-                output_size=int(input_shape[1]),
-            ).to(device)
+            
+            # [P0 ARCHITECTURE ENFORCEMENT] GAME requires ACGAN with dropout
+            if self.use_acgan:
+                self.generator = ACGANGenerator(
+                    noise_dim=self.noise_dim,
+                    output_channels=int(self.config.get("output_channels", input_shape[0])),
+                    base_channels=self.base_channels,
+                    num_classes=self.num_classes,
+                    output_size=int(input_shape[1]),
+                    dropout_prob=0.25,  # Paper-mandated dropout
+                ).to(device)
+            else:
+                self.generator = DCGANGenerator(
+                    noise_dim=self.noise_dim,
+                    output_channels=int(self.config.get("output_channels", input_shape[0])),
+                    base_channels=self.base_channels,
+                    num_classes=self.num_classes,
+                    output_size=int(input_shape[1]),
+                ).to(device)
+                
             self.generator_optimizer = optim.Adam(
                 self.generator.parameters(), lr=self.generator_lr, betas=(0.5, 0.999)
             )
 
         if self.discriminator is None:
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            self.discriminator = DCGANDiscriminator(
-                input_channels=int(self.config.get("output_channels", input_shape[0])),
-                base_channels=self.base_channels,
-                num_classes=self.num_classes if self.use_acgan else None,
-                input_size=int(input_shape[1]),
-            ).to(device)
+            
+            # [P0 ARCHITECTURE ENFORCEMENT] GAME requires ACGAN with dropout
+            if self.use_acgan:
+                self.discriminator = ACGANDiscriminator(
+                    input_channels=int(self.config.get("output_channels", input_shape[0])),
+                    base_channels=self.base_channels,
+                    num_classes=self.num_classes,
+                    input_size=int(input_shape[1]),
+                    dropout_prob=0.25,  # Paper-mandated dropout
+                ).to(device)
+            else:
+                self.discriminator = DCGANDiscriminator(
+                    input_channels=int(self.config.get("output_channels", input_shape[0])),
+                    base_channels=self.base_channels,
+                    num_classes=self.num_classes if self.use_acgan else None,
+                    input_size=int(input_shape[1]),
+                ).to(device)
+                
             self.discriminator_optimizer = optim.Adam(
                 self.discriminator.parameters(), lr=self.discriminator_lr, betas=(0.5, 0.999)
             )
@@ -120,53 +227,6 @@ class GAME(BaseAttack):
         if not self.tdl_done and self.tdl_steps > 0:
             self._tdl_pretrain(device)
             self.tdl_done = True
-
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
-        self._init_models(state)
-        device = state.metadata.get("device", "cpu")
-        z = torch.randn(k, self.noise_dim, device=device)
-        class_probs = self._compute_class_distribution(state, device)
-        # Ensure class_probs is valid for multinomial: remove NaNs and clamp
-        class_probs = torch.nan_to_num(class_probs, nan=1.0/self.num_classes)
-        class_probs = torch.clamp(class_probs, min=1e-9)
-        class_probs = class_probs / class_probs.sum()
-        
-        y_g = torch.multinomial(class_probs, k, replacement=True)
-        with torch.no_grad():
-            x = self.generator(z, y_g)
-        meta = {
-            "generator_step": state.attack_state["step"],
-            "synthetic": True,
-            "z": z.cpu(),
-            "y_g": y_g.cpu(),
-            "acs_probs": class_probs.cpu(),
-        }
-        return QueryBatch(x=x, meta=meta)
-
-    def observe(
-        self,
-        query_batch: QueryBatch,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        if self.generator is None or self.discriminator is None or self.student is None:
-            return
-
-        device = query_batch.x.device
-        if oracle_output.kind == "soft_prob":
-            victim_probs = oracle_output.y.to(device)
-        else:
-            victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
-
-        # Update per-class average victim probability cache for ACS
-        self._update_victim_stats(state, victim_probs, query_batch.meta.get("y_g"))
-
-        state.attack_state["last_victim_probs"] = victim_probs.detach().cpu()
-        self._agu_phase(query_batch.x, victim_probs, device, query_batch.meta.get("z"), query_batch.meta.get("y_g"))
-        self._gmd_phase(query_batch.x, victim_probs)
-
-        state.attack_state["step"] += 1
-        state.attack_state["substitute"] = self.student
 
     def _update_victim_stats(self, state, victim_probs, labels):
         if labels is None:
@@ -385,6 +445,10 @@ class GAME(BaseAttack):
             self._train_student(x, target)
 
     def _compute_class_distribution(self, state: BenchmarkState, device: str) -> torch.Tensor:
+        """Compute class distribution from FRESH victim queries for ACS deviation.
+        
+        [P0 FIX] Paper requires fresh victim queries for ACS deviation, not cached stats.
+        """
         if self.student is None:
             return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
 

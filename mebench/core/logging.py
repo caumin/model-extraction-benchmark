@@ -2,9 +2,21 @@
 
 import json
 import csv
+import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
+
+
+def setup_console_logging():
+    """Configure logging to show INFO level and above to console."""
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        root_logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        root_logger.addHandler(handler)
 
 
 class ArtifactLogger:

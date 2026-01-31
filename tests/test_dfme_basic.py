@@ -28,7 +28,7 @@ def test_dfme_basic_initialization():
     assert attack.student_optimizer is None
 
     # Propose to initialize both models (generator and student)
-    _ = attack.propose(1, state)
+    _ = attack._select_query_batch(1, state)
 
     # Now both models should be initialized
     assert attack.generator is not None

@@ -59,7 +59,7 @@ def test_dissector_stage_a_and_b_are_separate_batches(monkeypatch) -> None:
         lambda img, model, **kwargs: img + 0.1,
     )
 
-    qb_a = attack.propose(100, state)
+    qb_a = attack._select_query_batch(100, state)
     assert qb_a.meta["stage"] == "A"
     assert all(t == "original" for t in qb_a.meta["variant_types"])
     assert qb_a.x.shape[0] == 2
@@ -68,7 +68,7 @@ def test_dissector_stage_a_and_b_are_separate_batches(monkeypatch) -> None:
     for idx in qb_a.meta["indices"]:
         state.attack_state["victim_labels"][int(idx)] = 0
 
-    qb_b = attack.propose(100, state)
+    qb_b = attack._select_query_batch(100, state)
     assert qb_b.meta["stage"] == "B"
     assert all(t == "erased" for t in qb_b.meta["variant_types"])
     assert qb_b.x.shape[0] == 2

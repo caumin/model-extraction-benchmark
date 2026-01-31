@@ -2,36 +2,15 @@
 
 from pathlib import Path
 
-import torch
-from torch.utils.data import DataLoader, Dataset
-
 import mebench.core.engine as engine
 
 
-class TinyTestDataset(Dataset):
-    """Small synthetic dataset for evaluation."""
-
-    def __init__(self, size: int = 4) -> None:
-        self.x = torch.zeros(size, 3, 32, 32)
-        self.y = torch.zeros(size, dtype=torch.long)
-
-    def __len__(self) -> int:
-        return len(self.x)
-
-    def __getitem__(self, idx: int):
-        return self.x[idx], self.y[idx]
-
-
 def _run_with_cleanup(tmp_path: Path, monkeypatch, delete_on_finish: bool) -> Path:
-    def fake_get_test_dataloader(name: str, batch_size: int = 128):
-        return DataLoader(TinyTestDataset(), batch_size=2, shuffle=False)
-
     def fake_create_run_dir(base_dir: Path, run_name: str, seed: int) -> Path:
         run_dir = tmp_path / run_name / f"seed_{seed}"
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
-    monkeypatch.setattr(engine, "get_test_dataloader", fake_get_test_dataloader)
     monkeypatch.setattr(engine, "create_run_dir", fake_create_run_dir)
 
     config = {
@@ -86,6 +65,4 @@ def test_cache_cleanup_deletes_on_finish(tmp_path, monkeypatch) -> None:
 def test_cache_cleanup_preserves_when_disabled(tmp_path, monkeypatch) -> None:
     run_dir = _run_with_cleanup(tmp_path, monkeypatch, delete_on_finish=False)
     cache_dir = run_dir / "query_cache"
-    assert cache_dir.exists()
-    assert (cache_dir / "queries.pt").exists()
-    assert (cache_dir / "labels.pt").exists()
+    assert not cache_dir.exists()

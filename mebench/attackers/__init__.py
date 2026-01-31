@@ -1,6 +1,6 @@
 """Attack implementations."""
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
 from mebench.attackers.activethief import ActiveThief
 from mebench.attackers.dfme import DFME
 from mebench.attackers.maze import MAZE
@@ -16,7 +16,7 @@ from mebench.attackers.inversenet import InverseNet
 from mebench.attackers.knockoff_nets import KnockoffNets
 
 __all__ = [
-    "BaseAttack",
+    "AttackRunner",
     "ActiveThief",
     "DFME",
     "MAZE",

@@ -1,18 +1,21 @@
+from typing import Dict, Any, List, Tuple, Optional
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import torchvision.transforms as transforms
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 
 
-class CopycatCNN(BaseAttack):
+class CopycatCNN(AttackRunner):
     """CopycatCNN attack using non-problem domain data."""
 
     def __init__(self, config: dict, state: BenchmarkState) -> None:
@@ -40,6 +43,58 @@ class CopycatCNN(BaseAttack):
         self.substitute_optimizer: torch.optim.Optimizer | None = None
 
         self._initialize_state(state)
+        
+        # [P0 FIX] Validate NPDD constraint in initialization
+        dataset_config = self._get_dataset_config(state)
+        if dataset_config.get("data_mode", "").lower() in ["cifar10", "svhn", "mnist", "fashionmnist"]:
+            raise ValueError(
+                f"CopycatCNN requires NPDD dataset, but '{dataset_config.get('data_mode')}' is problem-domain. "
+                f"Use datasets like ImageNet, Caltech101, or Textures for true NPDD evaluation."
+            )
+
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        device = self.state.metadata.get("device", "cpu")
+        total_budget = self.state.budget_remaining
+        pbar = tqdm(total=total_budget, desc="[CopycatCNN] Extracting")
+        
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            x, indices = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(x, meta={"indices": indices})
+            self._handle_oracle_output(x, oracle_output, self.state)
+            pbar.update(x.size(0))
+        pbar.close()
+
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, list[int]]:
+        if self.pool_dataset is None:
+            self._load_pool(state)
+
+        if len(self.pool_dataset) == 0:
+            raise ValueError("CopycatCNN requires a non-empty pool dataset (NPD).")
+
+        replace = k > len(self.pool_dataset)
+        indices = np.random.choice(len(self.pool_dataset), k, replace=replace).tolist()
+        x_list = [self.pool_dataset[idx][0] for idx in indices]
+        x = torch.stack(x_list)
+        return x, indices
+
+    def _handle_oracle_output(
+        self,
+        x_batch: torch.Tensor,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        if oracle_output.kind == "soft_prob":
+            labels = torch.argmax(oracle_output.y, dim=1)
+        else:
+            labels = oracle_output.y
+
+        state.attack_state["query_data_x"].append(x_batch.detach().cpu())
+        state.attack_state["query_data_y"].append(labels.detach().cpu())
+
+        if state.query_count in self.train_checkpoints and state.query_count > 0:
+            self._train_substitute(state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["query_data_x"] = []
@@ -65,40 +120,6 @@ class CopycatCNN(BaseAttack):
             batch_size=1,
             shuffle=False,
         ).dataset
-
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
-        if self.pool_dataset is None:
-            self._load_pool(state)
-
-        if len(self.pool_dataset) == 0:
-            raise ValueError("CopycatCNN requires a non-empty pool dataset (NPD).")
-
-        # CopycatCNN queries natural images from a non-problem domain pool.
-        # If k exceeds pool size, sample with replacement rather than using noise.
-        replace = k > len(self.pool_dataset)
-        indices = np.random.choice(len(self.pool_dataset), k, replace=replace).tolist()
-        x_list = [self.pool_dataset[idx][0] for idx in indices]
-        x = torch.stack(x_list)
-        meta = {"indices": indices}
-        return QueryBatch(x=x, meta=meta)
-
-    def observe(
-        self,
-        query_batch: QueryBatch,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        if oracle_output.kind == "soft_prob":
-            labels = torch.argmax(oracle_output.y, dim=1)
-        else:
-            labels = oracle_output.y
-
-        state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
-        state.attack_state["query_data_y"].append(labels.detach().cpu())
-
-        # Train only at specified checkpoints
-        if state.query_count in self.train_checkpoints and state.query_count > 0:
-            self._train_substitute(state)
 
     def _train_substitute(self, state: BenchmarkState) -> None:
         query_x = state.attack_state["query_data_x"]
@@ -245,12 +266,14 @@ class CopycatCNN(BaseAttack):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
         
-        for epoch in range(epochs):
+        epoch_pbar = tqdm(range(epochs), desc="[CopycatCNN] Training Substitute", leave=False)
+        for epoch in epoch_pbar:
             # Apply step-down LR schedule as per paper
             current_lr = self._get_current_lr(epoch, epochs)
             for param_group in self.substitute_optimizer.param_groups:
                 param_group['lr'] = current_lr
             
+            epoch_loss = 0.0
             for x_batch, y_batch in loader:
                 x_batch = x_batch.to(device)
                 # Normalize images for substitute
@@ -262,8 +285,12 @@ class CopycatCNN(BaseAttack):
                 loss = F.cross_entropy(logits, y_batch)
                 loss.backward()
                 self.substitute_optimizer.step()
+                epoch_loss += loss.item()
+            epoch_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}", "LR": f"{current_lr:.4e}"})
 
         state.attack_state["substitute"] = self.substitute
+        self.logger.info("CopycatCNN substitute trained.")
+        self._evaluate_current_substitute(self.substitute, device)
 
     def _get_current_lr(self, epoch: int, total_epochs: int) -> float:
         """Apply step-down LR schedule as per CopycatCNN paper."""

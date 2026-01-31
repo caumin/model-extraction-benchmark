@@ -1,6 +1,7 @@
 """CloudLeak attack implementation."""
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Optional
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,8 +9,10 @@ import numpy as np
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import f1_score
 from scipy.optimize import fmin_l_bfgs_b
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
@@ -77,14 +80,20 @@ class FeatureFool:
                     return module
         if "resnet" in model_name and hasattr(model, "avgpool"):
             return model.avgpool
+        
+        # For LeNet and others with 'classifier' Sequential
         if hasattr(model, "classifier"):
             classifier = model.classifier
             if isinstance(classifier, nn.Sequential):
-                # Prefer the last Linear before the final classifier head.
-                # VGG: classifier[3] is fc7 (Linear); AlexNet: classifier[4] is fc7 (Linear).
-                for idx in [4, 3, 2, 1, 0]:
-                    if idx < len(classifier) and isinstance(classifier[idx], nn.Linear):
-                        return classifier[idx]
+                # We want the second-to-last Linear layer if possible
+                linears = [(i, m) for i, m in enumerate(classifier) if isinstance(m, nn.Linear)]
+                if len(linears) >= 2:
+                    # Return the one before the last
+                    return linears[-2][1]
+                if len(linears) == 1:
+                    return linears[0][1]
+        
+        # Fallback to last linear
         last_linear = None
         for module in model.modules():
             if isinstance(module, nn.Linear):
@@ -115,20 +124,25 @@ class FeatureFool:
         self,
         x_source: torch.Tensor,
         x_target: torch.Tensor,
-        margin_m: torch.Tensor,
+        margin_m: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Generate a batch of adversarial examples.
 
         Args:
             x_source: Source images [B, C, H, W]
             x_target: Target images [B, C, H, W]
-            margin_m: Per-sample margins [B]
+            margin_m: Per-sample margins [B]. If None, uses self.margin_m.
 
         Returns:
             Adversarial examples [B, C, H, W]
         """
         B = x_source.size(0)
         self.model.eval()
+        
+        if margin_m is None:
+            margin_m = torch.full((B,), self.margin_m, device=self.device)
+        else:
+            margin_m = margin_m.to(self.device)
         
         # Setup persistent hook for the duration of optimization
         activations: List[torch.Tensor] = []
@@ -138,22 +152,26 @@ class FeatureFool:
         hook_handle = self._feature_layer.register_forward_hook(forward_hook)
         
         try:
+            x_source_dev = x_source.to(self.device)
             with torch.no_grad():
                 # Initial feature extraction
-                _ = self.model(x_source.to(self.device))
+                _ = self.model(x_source_dev)
                 phi_s = activations.pop(0).detach().view(B, -1)
                 
                 _ = self.model(x_target.to(self.device))
                 phi_t = activations.pop(0).detach().view(B, -1)
                 
-            # Optimize delta [B, C, H, W] with epsilon constraint (critical fix)
+            # Optimize delta [B, C, H, W] with epsilon constraint
             delta = torch.zeros_like(x_source, requires_grad=True, device=self.device)
             
-            # Box-constrained L-BFGS: enforce epsilon bound at each step
+            # Use L-BFGS
+            optimizer = torch.optim.LBFGS([delta], lr=1.0, max_iter=self.max_iters, history_size=10, line_search_fn="strong_wolfe")
+            
+            margin_m = margin_m.view(B, 1)
+            
             def closure():
                 optimizer.zero_grad()
-                
-                # Enforce epsilon constraint: clip delta to [-epsilon, +epsilon]
+                # Enforce epsilon constraint and box constraint
                 delta_clamped = torch.clamp(delta, -self.epsilon, self.epsilon)
                 x_adv = torch.clamp(x_source_dev + delta_clamped, 0.0, 1.0)
                 
@@ -162,40 +180,13 @@ class FeatureFool:
                 phi_adv = activations.pop(0).view(B, -1)
                 
                 # Per-sample triplet loss
-                dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1)
-                dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1)
+                dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1).view(B, 1)
+                dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1).view(B, 1)
                 
-                triplet = torch.clamp(dist_t - dist_s + margin_m.squeeze(), min=0.0)
+                triplet = torch.clamp(dist_t - dist_s + margin_m, min=0.0)
                 
                 # Visual loss: L2 norm squared of delta (as per paper)
-                visual_loss = torch.sum(delta_clamped ** 2, dim=(1, 2, 3))
-                
-                loss = torch.mean(visual_loss + self.lambda_adv * triplet)
-                loss.backward()
-                return loss
-            
-            # Use L-BFGS with explicit bounds via projection in closure
-            optimizer = torch.optim.LBFGS([delta], lr=1.0, max_iter=self.max_iters, history_size=10, line_search_fn="strong_wolfe")
-            
-            x_source_dev = x_source.to(self.device)
-            margin_m = margin_m.to(self.device).view(B, 1)
-            
-            def closure():
-                optimizer.zero_grad()
-                x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
-                
-                # Forward pass to trigger hook
-                _ = self.model(x_adv)
-                phi_adv = activations.pop(0).view(B, -1)
-                
-                # Per-sample triplet loss
-                dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1)
-                dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1)
-                
-                triplet = torch.clamp(dist_t - dist_s + margin_m.squeeze(), min=0.0)
-                
-                # Visual loss: Mean of squared L2 per sample
-                visual_loss = torch.sum(delta ** 2, dim=(1, 2, 3))
+                visual_loss = torch.sum(delta_clamped ** 2, dim=(1, 2, 3)).view(B, 1)
                 
                 loss = torch.mean(visual_loss + self.lambda_adv * triplet)
                 loss.backward()
@@ -203,7 +194,9 @@ class FeatureFool:
                 
             optimizer.step(closure)
             
-            x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
+            with torch.no_grad():
+                delta_final = torch.clamp(delta, -self.epsilon, self.epsilon)
+                x_adv = torch.clamp(x_source_dev + delta_final, 0.0, 1.0)
             return x_adv.detach().cpu()
         finally:
             hook_handle.remove()
@@ -218,7 +211,7 @@ class FeatureFool:
         return self.generate_batch(x_source.unsqueeze(0), x_target.unsqueeze(0), margin).squeeze(0)
 
 
-class CloudLeak(BaseAttack):
+class CloudLeak(AttackRunner):
     """CloudLeak: Adversarial active learning for model extraction.
 
     Algorithm loop:
@@ -282,6 +275,26 @@ class CloudLeak(BaseAttack):
 
         # Initialize attack state
         self._initialize_state(state)
+        
+        self.pool_dataset = None
+        self.featurefool = None
+        self._class_feature_cache: Dict[int, torch.Tensor] = {}
+        self._class_indices_cache: Dict[int, List[int]] = {}
+
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        device = self.state.metadata.get("device", "cpu")
+        total_budget = self.state.budget_remaining
+        pbar = tqdm(total=total_budget, desc="[CloudLeak] Extracting")
+        
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            x_query, meta = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(x_query, meta=meta)
+            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
+            pbar.update(x_query.size(0))
+        pbar.close()
+        # Final Evaluation (handled by engine)
 
         # Pool dataset
         self.pool_dataset = None
@@ -291,57 +304,9 @@ class CloudLeak(BaseAttack):
         self._class_feature_cache: Dict[int, torch.Tensor] = {}
         self._class_indices_cache: Dict[int, List[int]] = {}
 
-    def _initialize_state(self, state: BenchmarkState) -> None:
-        """Initialize attack-specific state.
-
-        Args:
-            state: Global benchmark state to update
-        """
-        # Load dataset config to get size
-        dataset_config = state.metadata.get("dataset_config", {})
-        if not dataset_config:
-            dataset_config = self.config.get("dataset", {})
-        
-        # We need actual dataset size to random sample
-        # Lazy loading or metadata check
-        if "size" in dataset_config:
-            total_size = dataset_config["size"]
-        else:
-            # Fallback: load dataset to check size (once)
-            temp_loader = create_dataloader(dataset_config, batch_size=1, shuffle=False)
-            total_size = len(temp_loader.dataset)
-
-        # Pool tracking: Randomly sample initial pool indices from entire dataset
-        # This fixes the bias of taking first N samples
-        if total_size > self.initial_pool_size:
-            pool_indices = np.random.choice(total_size, self.initial_pool_size, replace=False).tolist()
-        else:
-            pool_indices = list(range(total_size))
-            
-        state.attack_state["pool_indices"] = pool_indices
-
-        # Query tracking
-        state.attack_state["query_data_x"] = []
-        state.attack_state["query_data_y"] = []
-
-        # Synthetic sample tracking
-        state.attack_state["synthetic_indices"] = []  # Indices of generated samples
-
-        state.attack_state["substitute"] = None
-
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
-        """Propose k adversarial queries using FeatureFool.
-
-        Args:
-            k: Number of queries to propose
-            state: Current benchmark state
-
-        Returns:
-            QueryBatch with k adversarial queries
-        """
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
         pool_indices = state.attack_state["pool_indices"]
 
-        # Load pool dataset
         if self.pool_dataset is None:
             dataset_config = state.metadata.get("dataset_config", {})
             if "data_mode" not in dataset_config:
@@ -354,18 +319,17 @@ class CloudLeak(BaseAttack):
                 shuffle=False,
             ).dataset
 
-            # Ensure pool_indices matches actual dataset size
             if len(self.pool_dataset) < len(pool_indices):
-                print(f"Warning: Dataset size ({len(self.pool_dataset)}) is smaller than initialized pool size. Truncating pool_indices.")
+                self.logger.warning(
+                    "Dataset size (" + str(len(self.pool_dataset)) + ") is smaller than initialized pool size. Truncating pool_indices."
+                )
                 state.attack_state["pool_indices"] = list(range(len(self.pool_dataset)))
                 pool_indices = state.attack_state["pool_indices"]
 
-        # Generate adversarial samples
         substitute = state.attack_state["substitute"]
         device = state.metadata.get("device", "cpu")
 
         if substitute is None:
-            # No substitute yet, use random pool samples
             n_select = min(k, len(pool_indices))
             selected = np.random.choice(pool_indices, n_select, replace=False).tolist()
             x_list = []
@@ -375,14 +339,12 @@ class CloudLeak(BaseAttack):
 
             x = torch.stack(x_list)
             meta = {"indices": selected, "synthetic": False}
-            return QueryBatch(x=x, meta=meta)
+            return x, meta
 
-        # FeatureFool generation: Process the ENTIRE pool to find the most informative examples
         x_list = []
         selected_indices = []
         scored = []
 
-        # Initialize FeatureFool if needed
         if self.featurefool is None:
             self.featurefool = FeatureFool(
                 substitute,
@@ -395,96 +357,142 @@ class CloudLeak(BaseAttack):
                 device=device,
                 config=self.config,
             )
-            
+
         substitute.eval()
         
-        # Use all available pool indices as per paper's Adversarial Active Learning logic
+        # Use the ENTIRE pool for adversarial query generation (Strict Protocol)
         all_indices = pool_indices
         n_total = len(all_indices)
-        
-        print(f"\nGenerating adversarial queries for the ENTIRE pool ({n_total} samples) via FeatureFool...")
-        
-        # Pre-calculate margins and labels for the whole pool
-        all_labels = []
+
+        # print(
+        #     "\nGenerating adversarial queries for the ENTIRE pool (" + str(n_total) + " samples) via FeatureFool..."
+        # )
+
+        # Prepare label lookup and dissimilar indices for O(N) target selection
+        label_to_indices = {}
+        idx_to_label = {}
         for idx in all_indices:
             _, label = self.pool_dataset[idx]
-            all_labels.append(int(label))
+            l = int(label)
+            idx_to_label[idx] = l
+            if l not in label_to_indices:
+                label_to_indices[l] = []
+            label_to_indices[l].append(idx)
         
-        # Batch processing for the entire pool
+        all_labels_set = set(label_to_indices.keys())
+
         batch_size = int(self.config.get("attack", {}).get("gen_batch_size", 64))
-        for i in range(0, n_total, batch_size):
+        gen_pbar = tqdm(range(0, n_total, batch_size), desc="[CloudLeak] Generating Adversarial Queries", leave=False)
+        for i in gen_pbar:
             end_idx = min(i + batch_size, n_total)
             curr_indices = all_indices[i:end_idx]
-            curr_labels = all_labels[i:end_idx]
-            
-            # Select random targets for each source in the batch
-            # Paper: Guide image chosen to have different label
+
             s_imgs = []
             t_imgs = []
-            for j, s_idx in enumerate(curr_indices):
+            for s_idx in curr_indices:
                 s_img, _ = self.pool_dataset[s_idx]
                 s_imgs.append(s_img)
+
+                # O(1) target selection
+                source_label = idx_to_label[s_idx]
+                other_labels = list(all_labels_set - {source_label})
                 
-                # Find a target image with a different label for guidance (robust check)
-                source_label = all_labels[all_indices.index(s_idx)] if s_idx in all_indices else int(self.pool_dataset[s_idx][1])
-                different_label_indices = [idx for idx, label in zip(all_indices, all_labels) if label != source_label]
-                
-                if different_label_indices:
-                    target_idx = np.random.choice(different_label_indices)
+                if other_labels:
+                    target_label = np.random.choice(other_labels)
+                    target_idx = np.random.choice(label_to_indices[target_label])
                 else:
-                    # Fallback: if no different labels (edge case), pick any other index
+                    # Fallback to random if only one class (unlikely)
                     other_indices = [idx for idx in all_indices if idx != s_idx]
                     target_idx = np.random.choice(other_indices) if other_indices else s_idx
+                
                 t_img, _ = self.pool_dataset[target_idx]
                 t_imgs.append(t_img)
-            
+
             s_imgs = torch.stack(s_imgs)
             t_imgs = torch.stack(t_imgs)
-            
-            # Get margins for this batch
-            margins = torch.tensor([self._compute_margin_m(l, device) for l in curr_labels])
-            
-            # Generate adversarial batch for these pool samples
-            x_adv_batch = self.featurefool.generate_batch(s_imgs, t_imgs, margins)
-            
-            # Evaluate uncertainty (Entropy) on the synthetic examples
+
+            s_imgs = s_imgs.to(device)
+            t_imgs = t_imgs.to(device)
+
+            # [P0 FIX] Use per-class margin M instead of None
+            margin_m = self._compute_margin_m(curr_indices[j], device) if len(curr_indices) > 1 else None
+            s_imgs_adv = self.featurefool.generate_batch(s_imgs, t_imgs, margin_m=margin_m)
+
             with torch.no_grad():
-                logits = substitute(x_adv_batch.to(device))
+                logits = substitute(s_imgs_adv.to(device))
                 probs = F.softmax(logits, dim=1)
                 entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
-            
-            for j in range(len(curr_indices)):
-                scored.append((entropy[j].item(), x_adv_batch[j], int(curr_indices[j])))
-            
-            if (i + batch_size) % (batch_size * 5) == 0 or end_idx == n_total:
-                print(f"  Progress: {end_idx}/{n_total} pool samples processed")
 
-        # Select top-k most informative (highest entropy) examples from the entire perturbed pool
+            for j in range(s_imgs_adv.size(0)):
+                scored.append((float(entropy[j].item()), curr_indices[j], s_imgs_adv[j].detach().cpu()))
+
         scored.sort(key=lambda t: t[0], reverse=True)
-        top = scored[:k]
-        for _entropy, x_adv, idx in top:
-            x_list.append(x_adv)
-            selected_indices.append(idx)
+        top_scored = scored[:k]
+
+        for score, idx, adv_img in top_scored:
+            selected_indices.append(int(idx))
+            x_list.append(adv_img)
+
+        if len(x_list) == 0:
+            raise ValueError("CloudLeak selection produced empty batch.")
 
         x = torch.stack(x_list)
-        meta = {
-            "indices": selected_indices,
-            "synthetic": True,
-        }
+        meta = {"indices": selected_indices, "synthetic": True}
+        return x, meta
 
-        return QueryBatch(x=x, meta=meta)
-        top = scored[:k]
-        for _entropy, x_adv, pair in top:
-            x_list.append(x_adv)
-            selected_indices.append(pair)
+    def _handle_oracle_output(
+        self,
+        x_batch: torch.Tensor,
+        meta: dict,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        y_batch = oracle_output.y
 
-        x = torch.stack(x_list)
-        meta = {
-            "indices": selected_indices,
-            "synthetic": True,
-        }
+        state.attack_state["query_data_x"].append(x_batch.cpu())
+        state.attack_state["query_data_y"].append(y_batch.cpu())
 
-        return QueryBatch(x=x, meta=meta)
+        if meta.get("synthetic", False):
+            indices = meta.get("indices", [])
+            state.attack_state["synthetic_indices"].extend(indices)
+
+        query_count = sum(len(x) for x in state.attack_state["query_data_x"])
+        if query_count % self.round_size == 0 and query_count > 0:
+            self.train_substitute(state)
+
+    def _initialize_state(self, state: BenchmarkState) -> None:
+        """Initialize attack-specific state.
+
+        Args:
+            state: Global benchmark state to update
+        """
+        # Load dataset config to get size
+        dataset_config = state.metadata.get("dataset_config", {})
+        if not dataset_config:
+            dataset_config = self.config.get("dataset", {})
+        
+        # We need actual dataset size to initialize pool
+        if self.pool_dataset is None:
+            self.pool_dataset = create_dataloader(
+                dataset_config,
+                batch_size=1,
+                shuffle=False,
+            ).dataset
+        
+        total_size = len(self.pool_dataset)
+        
+        # CloudLeak starts with a full unlabeled pool and no initial labeled set
+        # unless specified. We treat the entire dataset as the pool.
+        state.attack_state["pool_indices"] = list(range(total_size))
+
+        # Query tracking
+        state.attack_state["query_data_x"] = []
+        state.attack_state["query_data_y"] = []
+
+        # Synthetic sample tracking
+        state.attack_state["synthetic_indices"] = []  # Indices of generated samples
+
+        state.attack_state["substitute"] = None
 
     def _compute_margin_m(self, class_id: int, device: str) -> float:
         if class_id in self._class_feature_cache:
@@ -501,15 +509,15 @@ class CloudLeak(BaseAttack):
                 if l not in self._class_indices_cache:
                     self._class_indices_cache[l] = []
                 self._class_indices_cache[l].append(idx)
-            print(f"Indexed pool dataset ({len(self.pool_dataset)} samples) for margin computation.")
+            # print(f"Indexed pool dataset ({len(self.pool_dataset)} samples) for margin computation.")
 
         class_indices = self._class_indices_cache.get(class_id, [])
 
         if len(class_indices) < 2:
             return float(self.margin_m)
 
-        max_samples = min(32, len(class_indices))
-        sampled = np.random.choice(class_indices, max_samples, replace=False).tolist()
+        # Use ALL samples in the class to compute average squared distance (Strict Protocol)
+        sampled = class_indices
         features = []
         for idx in sampled:
             img, _ = self.pool_dataset[idx]
@@ -533,37 +541,6 @@ class CloudLeak(BaseAttack):
         margin_m = alpha - mean_sq_dist
         self._class_feature_cache[class_id] = torch.tensor(margin_m)
         return float(margin_m)
-
-    def observe(
-        self,
-        query_batch: QueryBatch,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        """Observe oracle response and update internal state.
-
-        Args:
-            query_batch: The query batch that was sent
-            oracle_output: Oracle response
-            state: Current benchmark state
-        """
-        x_batch = query_batch.x
-        y_batch = oracle_output.y
-
-        # Store query data
-        state.attack_state["query_data_x"].append(x_batch.cpu())
-        state.attack_state["query_data_y"].append(y_batch.cpu())
-
-        # Track synthetic samples
-        if query_batch.meta.get("synthetic", False):
-            indices = query_batch.meta.get("indices", [])
-            state.attack_state["synthetic_indices"].extend(indices)
-
-        # Train substitute at the end of each round (paper protocol)
-        query_count = sum(len(x) for x in state.attack_state["query_data_x"])
-        # print(f"DEBUG: CloudLeak observe. query_count={query_count}, round_size={self.round_size}")
-        if query_count % self.round_size == 0 and query_count > 0:
-            self.train_substitute(state)
 
     def train_substitute(self, state: BenchmarkState) -> None:
         """Train substitute model via transfer learning.
@@ -662,7 +639,7 @@ class CloudLeak(BaseAttack):
         # Verify if any parameters are trainable
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         if not trainable_params:
-            print("Warning: No trainable parameters found with current head keywords. Unfreezing last parameter.")
+            self.logger.warning("No trainable parameters found with current head keywords. Unfreezing last parameter.")
             # Fallback: unfreeze the last layer's parameters
             all_params = list(model.parameters())
             if all_params:
@@ -687,7 +664,8 @@ class CloudLeak(BaseAttack):
         best_model_state = None
 
         # Training loop
-        for epoch in range(self.max_epochs):
+        epoch_pbar = tqdm(range(self.max_epochs), desc="[CloudLeak] Training Substitute", leave=False)
+        for epoch in epoch_pbar:
             model.train()
             train_loss = 0.0
 
@@ -712,6 +690,7 @@ class CloudLeak(BaseAttack):
 
             # Validation
             val_f1 = self._compute_f1(model, val_loader, device)
+            epoch_pbar.set_postfix({"Loss": f"{train_loss/len(train_loader):.4f}", "F1": f"{val_f1:.4f}"})
 
             if val_f1 > best_f1:
                 best_f1 = val_f1
@@ -720,14 +699,14 @@ class CloudLeak(BaseAttack):
             else:
                 patience_counter += 1
 
-            if epoch % 10 == 0:
-                print(
-                    f"CloudLeak Epoch {epoch}: Loss: {train_loss/len(train_loader):.4f}, Val F1: {val_f1:.4f}"
-                )
+            # if epoch % 10 == 0:
+            #     print(
+            #         f"CloudLeak Epoch {epoch}: Loss: {train_loss/len(train_loader):.4f}, Val F1: {val_f1:.4f}"
+            #     )
 
             # Early stopping
             if patience_counter >= self.patience:
-                print(f"CloudLeak Early stopping at epoch {epoch}")
+                self.logger.info(f"CloudLeak Early stopping at epoch {epoch}")
                 break
 
         # Load best model
@@ -736,6 +715,8 @@ class CloudLeak(BaseAttack):
 
         # Store in state
         state.attack_state["substitute"] = model
+        self.logger.info(f"CloudLeak substitute trained. Best Val F1: {best_f1:.4f}")
+        self._evaluate_current_substitute(model, device)
 
         # Update FeatureFool with new substitute and clear margin cache
         self._class_feature_cache = {}
@@ -748,8 +729,6 @@ class CloudLeak(BaseAttack):
             device=device,
             config=self.config,
         )
-
-        print(f"CloudLeak substitute trained. Best F1: {best_f1:.4f}")
 
     def _compute_f1(self, model: nn.Module, val_loader: DataLoader, device: str) -> float:
         """Compute F1 score on validation set.

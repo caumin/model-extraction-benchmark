@@ -25,8 +25,8 @@ def test_random_baseline_initialization():
     assert state.attack_state["queried_indices"] == []
 
 
-def test_random_baseline_propose_first_round():
-    """Test RandomBaseline propose method (first round - random selection)."""
+def test_random_baseline_select_first_round():
+    """Test RandomBaseline selection (first round - random sampling)."""
     config = {
         "dataset": {
             "data_mode": "seed",
@@ -40,9 +40,9 @@ def test_random_baseline_propose_first_round():
 
     attack = RandomBaseline(config, state)
 
-    # Propose 10 queries
+    # Select 10 queries
     k = 10
-    query_batch = attack.propose(k, state)
+    query_batch = attack._select_query_batch(k, state)
 
     # Check return type
     assert isinstance(query_batch, QueryBatch)
@@ -67,7 +67,7 @@ def test_random_baseline_pool_exhausted():
 
     # Propose from exhausted pool
     k = 10
-    query_batch = attack.propose(k, state)
+    query_batch = attack._select_query_batch(k, state)
 
     # Check synthetic queries returned
     # Note: pool_exhausted is only set if pool is empty when proposing
@@ -79,8 +79,8 @@ def test_random_baseline_pool_exhausted():
         assert query_batch.x.shape[0] == k
 
 
-def test_random_baseline_observe():
-    """Test RandomBaseline observe method."""
+def test_random_baseline_handle_output():
+    """Test RandomBaseline output handler."""
     config = {
         "dataset": {"data_mode": "seed", "name": "CIFAR10", "seed_size": 100},
         "batch_size": 128,
@@ -97,7 +97,7 @@ def test_random_baseline_observe():
     oracle_output = OracleOutput(kind="soft_prob", y=y_batch)
 
     # Observe should not raise
-    attack.observe(query_batch, oracle_output, state)
+    attack._handle_oracle_output(query_batch, oracle_output, state)
 
     # No error means it worked
     assert True

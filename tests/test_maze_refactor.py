@@ -31,7 +31,7 @@ def test_maze_algorithm_cycle():
     # 5 batches * 2 samples = 10 queries
     
     # Propose 10 queries (exactly one cycle)
-    qb = attack.propose(10, state)
+    qb = attack._select_query_batch(10, state)
     assert qb.x.shape[0] == 10
     assert "blocks" in qb.meta
     blocks = qb.meta["blocks"]
@@ -49,7 +49,7 @@ def test_maze_algorithm_cycle():
     oo = OracleOutput(kind="soft_prob", y=y)
     
     # Observe should update both models
-    attack.observe(qb, oo, state)
+    attack._handle_oracle_output(qb, oo, state)
     
     # C_BASE count = 2 blocks * 2 samples = 4.
     assert state.attack_state["replay_count"] == 4 

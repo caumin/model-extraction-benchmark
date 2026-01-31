@@ -1,11 +1,14 @@
+from typing import Dict, Any, List, Tuple, Optional
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import numpy as np
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import (
@@ -13,12 +16,15 @@ from mebench.models.gan import (
     DCGANDiscriminator,
     SNDCGANGenerator,
     SNDCGANDiscriminator,
+    ProGANGenerator,
+    ACGANGenerator,
+    ACGANDiscriminator,
 )
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 
 
-class BlackboxRipper(BaseAttack):
+class BlackboxRipper(AttackRunner):
     """Black-box Ripper attack with proxy GAN and evolutionary search."""
 
     def __init__(self, config: dict, state: BenchmarkState) -> None:
@@ -70,6 +76,147 @@ class BlackboxRipper(BaseAttack):
 
         self._initialize_state(state)
 
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        device = self.state.metadata.get("device", "cpu")
+        total_budget = self.state.budget_remaining
+        pbar = tqdm(total=total_budget, desc="[BlackboxRipper] Extracting")
+        
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            x_query, meta = self._select_query_batch(step_size, self.state)
+            if int(x_query.size(0)) == 0:
+                break
+            oracle_output = ctx.query(x_query, meta=meta)
+            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
+            pbar.update(x_query.size(0))
+        pbar.close()
+
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
+        self._init_models(state)
+        device = state.metadata.get("device", "cpu")
+
+        active_populations = state.attack_state["active_populations"]
+        active_targets = state.attack_state["active_targets"]
+        evolve_iters = state.attack_state["evolve_iters"]
+
+        pop_size = self.population_size
+        slots_budget = k // pop_size
+
+        if slots_budget == 0:
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            return torch.empty((0, *input_shape), device=device), {"slot_ids": [], "batch_size": 0}
+
+        # Process as many slots as the current budget k allows
+        slots_to_process = slots_budget
+
+        current_active_keys = list(active_populations.keys())
+        needed = max(0, slots_to_process - len(current_active_keys))
+
+        next_id = max(current_active_keys, default=-1) + 1
+
+        for _ in range(needed):
+            u = float(self.latent_bound)
+            pop = (torch.rand(self.population_size, self.noise_dim, device=device) * 2.0 - 1.0) * u
+            target = torch.randint(0, self.num_classes, (1,), device=device).item()
+
+            active_populations[next_id] = pop
+            active_targets[next_id] = target
+            evolve_iters[next_id] = 0
+            next_id += 1
+
+        final_batch_ids = list(active_populations.keys())[:slots_to_process]
+
+        batch_pop_list = []
+        meta_indices = []
+
+        for slot_id in final_batch_ids:
+            pop = active_populations[slot_id].to(device)
+            batch_pop_list.append(pop)
+            meta_indices.extend([slot_id] * self.population_size)
+
+        x_raw = self.generator(torch.cat(batch_pop_list, dim=0))
+        x = x_raw * 0.5 + 0.5
+
+        meta = {
+            "slot_ids": meta_indices,
+            "batch_size": len(meta_indices),
+        }
+        return x, meta
+
+    def _handle_oracle_output(
+        self,
+        x_query: torch.Tensor,
+        meta: dict,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        if self.generator is None:
+            return
+
+        slot_ids = meta.get("slot_ids", [])
+        if not slot_ids:
+            return
+
+        device = state.metadata.get("device", "cpu")
+        active_populations = state.attack_state["active_populations"]
+        active_targets = state.attack_state["active_targets"]
+        evolve_iters = state.attack_state["evolve_iters"]
+
+        if oracle_output.kind == "soft_prob":
+            all_probs = oracle_output.y.to(device)
+        else:
+            all_probs = F.one_hot(
+                oracle_output.y, num_classes=self.num_classes
+            ).float().to(device)
+
+        unique_slots = sorted(list(set(slot_ids)))
+
+        for slot_id in unique_slots:
+            indices = [i for i, sid in enumerate(slot_ids) if sid == slot_id]
+            count = len(indices)
+
+            if count != self.population_size:
+                raise RuntimeError(
+                    f"Expected {self.population_size} outputs for slot {slot_id}, got {count}"
+                )
+
+            is_contiguous = (indices == list(range(indices[0], indices[0] + count)))
+            if is_contiguous:
+                probs = all_probs[indices[0] : indices[0] + count]
+            else:
+                probs = all_probs[indices]
+
+            current_pop = active_populations[slot_id].to(device)
+            target_cls = active_targets[slot_id]
+
+            best_z, best_score, new_pop, best_idx_in_pop = self._evolve_single_slot(
+                current_pop, target_cls, probs
+            )
+
+            active_populations[slot_id] = new_pop.cpu()
+            evolve_iters[slot_id] += 1
+
+            if evolve_iters[slot_id] >= self.max_evolve_iters or best_score >= -self.fitness_threshold:
+                with torch.no_grad():
+                    best_img = self.generator(best_z.unsqueeze(0)) * 0.5 + 0.5
+
+                state.attack_state["query_data_x"].append(best_img.cpu())
+
+                best_prob = probs[best_idx_in_pop]
+                state.attack_state["query_data_y"].append(best_prob.cpu().unsqueeze(0))
+
+                del active_populations[slot_id]
+                del active_targets[slot_id]
+                del evolve_iters[slot_id]
+
+        max_budget = int(state.metadata.get("max_budget", 0))
+        remaining = max_budget - int(state.query_count)
+
+        if (not state.attack_state.get("substitute_trained")) and (remaining < self.population_size):
+            self._train_substitute(state)
+            state.attack_state["substitute_trained"] = True
+
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["active_populations"] = {}  # index -> population tensor
         state.attack_state["active_targets"] = {}      # index -> target label
@@ -84,9 +231,14 @@ class BlackboxRipper(BaseAttack):
         device = state.metadata.get("device", "cpu")
 
         if self.generator is None:
+            # [P0 ARCHITECTURE ENFORCEMENT] Blackbox Ripper requires ProGAN
             gen_cls = DCGANGenerator
             if self.gan_backbone in {"sngan", "sndcgan", "sn-dcgan"}:
                 gen_cls = SNDCGANGenerator
+            elif self.gan_backbone in {"progan", "pro-gan"}:
+                gen_cls = ProGANGenerator
+            elif self.gan_backbone not in {"dcgan", "sngan", "sndcgan", "sn-dcgan", "progan", "pro-gan"}:
+                raise ValueError(f"Blackbox Ripper requires ProGAN/SNGAN/DCGAN backbone, got {self.gan_backbone}")
 
             self.generator = gen_cls(
                 noise_dim=self.noise_dim,
@@ -130,172 +282,6 @@ class BlackboxRipper(BaseAttack):
         if not self.pretrained and self.pretrain_steps > 0:
             self._pretrain_gan(device)
             self.pretrained = True
-
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
-        self._init_models(state)
-        device = state.metadata.get("device", "cpu")
-        
-        active_populations = state.attack_state["active_populations"]
-        active_targets = state.attack_state["active_targets"]
-        evolve_iters = state.attack_state["evolve_iters"]
-        
-        # Calculate how many full populations (slots) we can afford with budget k.
-        # k is the query budget for THIS call.
-        pop_size = self.population_size
-        slots_budget = k // pop_size
-        
-        if slots_budget == 0:
-            # Not enough budget for even one full population evaluation.
-            # Return empty to signal atomic constraint. Do NOT return noise.
-            input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            return QueryBatch(
-                x=torch.empty((0, *input_shape), device=device),
-                meta={"slot_ids": [], "batch_size": 0}
-            )
-            
-        # Cap parallel slots to ensure fair comparison
-        slots_to_process = min(slots_budget, self.max_slots_per_round)
-        
-        # Fill/Refresh active slots up to capacity
-        current_active_keys = list(active_populations.keys())
-        needed = max(0, slots_to_process - len(current_active_keys))
-        
-        next_id = max(current_active_keys, default=-1) + 1
-        
-        for _ in range(needed):
-            # Initialize new population for a new slot
-            u = float(self.latent_bound)
-            pop = (torch.rand(self.population_size, self.noise_dim, device=device) * 2.0 - 1.0) * u
-            target = torch.randint(0, self.num_classes, (1,), device=device).item()
-            
-            active_populations[next_id] = pop
-            active_targets[next_id] = target
-            evolve_iters[next_id] = 0
-            next_id += 1
-            
-        # Select exactly slots_to_process slots to query
-        # Since we just filled 'needed', we have at least 'slots_to_process' slots.
-        # We take the first available ones.
-        # Note: dict keys are insertion ordered in modern python, but list(...) is safer.
-        final_batch_ids = list(active_populations.keys())[:slots_to_process]
-        
-        batch_pop_list = []
-        meta_indices = []
-        
-        for slot_id in final_batch_ids:
-            pop = active_populations[slot_id].to(device)
-            batch_pop_list.append(pop)
-            meta_indices.extend([slot_id] * self.population_size)
-            
-        x_raw = self.generator(torch.cat(batch_pop_list, dim=0))
-        x = x_raw * 0.5 + 0.5
-        
-        meta = {
-            "slot_ids": meta_indices, # Defines which slot each image belongs to
-            "batch_size": len(meta_indices)
-        }
-        
-        return QueryBatch(x=x, meta=meta)
-
-    def observe(
-        self,
-        query_batch: QueryBatch,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        if self.generator is None:
-            return
-
-        slot_ids = query_batch.meta.get("slot_ids", [])
-        if not slot_ids:
-            return
-
-        device = state.metadata.get("device", "cpu")
-        active_populations = state.attack_state["active_populations"]
-        active_targets = state.attack_state["active_targets"]
-        evolve_iters = state.attack_state["evolve_iters"]
-        
-        if oracle_output.kind == "soft_prob":
-            all_probs = oracle_output.y.to(device)
-        else:
-            all_probs = F.one_hot(
-                oracle_output.y, num_classes=self.num_classes
-            ).float().to(device)
-
-        # Group by slot_id
-        unique_slots = sorted(list(set(slot_ids)))
-        
-        # We need to map linear index in batch to slot
-        # Robust way: iterate unique slots and use list comprehension masking
-        
-        start_idx = 0
-        for slot_id in unique_slots:
-            # Find all indices in the batch belonging to this slot
-            # Note: We assume propose() keeps them contiguous, but we should be robust.
-            # However, batch is ordered by slot_ids metadata.
-            # slot_ids is a list matching x_batch order.
-            
-            # Efficient masking:
-            indices = [i for i, sid in enumerate(slot_ids) if sid == slot_id]
-            count = len(indices)
-            
-            # Strict check: Must process exactly K teacher outputs per slot
-            if count != self.population_size:
-                raise RuntimeError(f"Expected {self.population_size} outputs for slot {slot_id}, got {count}")
-            
-            # Extract probs for this slot
-            # If contiguous (which it is from propose), slice is faster.
-            # If we want to be paranoid-robust:
-            # probs = all_probs[indices]
-            
-            # Let's check contiguous assumption to be safe, but fallback to indexing
-            is_contiguous = (indices == list(range(indices[0], indices[0]+count)))
-            if is_contiguous:
-                probs = all_probs[indices[0] : indices[0]+count]
-            else:
-                probs = all_probs[indices]
-                
-            current_pop = active_populations[slot_id].to(device)
-            target_cls = active_targets[slot_id]
-            
-            # Evolution Step
-            best_z, best_score, new_pop, best_idx_in_pop = self._evolve_single_slot(
-                current_pop, target_cls, probs
-            )
-            
-            # Update state
-            active_populations[slot_id] = new_pop.cpu()
-            evolve_iters[slot_id] += 1
-            
-            # Check convergence or max iters
-            if evolve_iters[slot_id] >= self.max_evolve_iters or best_score >= -self.fitness_threshold:
-                # Add best sample to training data
-                with torch.no_grad():
-                    best_img = self.generator(best_z.unsqueeze(0)) * 0.5 + 0.5
-                    
-                state.attack_state["query_data_x"].append(best_img.cpu())
-                
-                # Use best_idx_in_pop to get exactly the probability vector corresponding to best_z
-                best_prob = probs[best_idx_in_pop]
-                state.attack_state["query_data_y"].append(best_prob.cpu().unsqueeze(0))
-                
-                # Remove from active set to make room for new
-                del active_populations[slot_id]
-                del active_targets[slot_id]
-                del evolve_iters[slot_id]
-            
-            # Note: start_idx logic not needed if using indices map
-
-        # Policy A: Train once at end of budget.
-        # Check if we can afford another full population step.
-        max_budget = int(state.metadata.get("max_budget", 0))
-        remaining = max_budget - int(state.query_count)
-        
-        # If remaining budget < population_size, we can't do another step.
-        # So we trigger final training.
-        if (not state.attack_state.get("substitute_trained")) and (remaining < self.population_size):
-            self._train_substitute(state)
-            state.attack_state["substitute_trained"] = True
 
     def _evolve_single_slot(
         self,
@@ -363,7 +349,8 @@ class BlackboxRipper(BaseAttack):
         return x_real.to(device)
 
     def _pretrain_gan(self, device: str) -> None:
-        for _ in range(self.pretrain_steps):
+        pre_pbar = tqdm(range(self.pretrain_steps), desc="[BlackboxRipper] Pre-training GAN", leave=False)
+        for _ in pre_pbar:
             real_x = self._next_proxy_batch(device)
             z = torch.randn(real_x.size(0), self.noise_dim, device=device)
             fake_x = self.generator(z) * 0.5 + 0.5
@@ -383,6 +370,7 @@ class BlackboxRipper(BaseAttack):
             loss_g = F.binary_cross_entropy_with_logits(fake_logits, real_labels)
             loss_g.backward()
             self.gen_optimizer.step()
+            pre_pbar.set_postfix({"Loss D": f"{loss_d.item():.4f}", "Loss G": f"{loss_g.item():.4f}"})
 
     def _train_substitute(self, state: BenchmarkState) -> None:
         # Strict fidelity: Train from scratch for 200 epochs on current data.
@@ -449,7 +437,9 @@ class BlackboxRipper(BaseAttack):
         )
         
         epochs = max(1, int(self.substitute_epochs))
-        for _ in range(epochs):
+        epoch_pbar = tqdm(range(epochs), desc="[BlackboxRipper] Training Substitute", leave=False)
+        for _ in epoch_pbar:
+            epoch_loss = 0.0
             for x_batch, y_batch in train_loader:
                 x_batch = x_batch.to(device)
                 x_batch = (x_batch - norm_mean) / norm_std
@@ -468,5 +458,9 @@ class BlackboxRipper(BaseAttack):
                     loss = F.cross_entropy(logits, y_batch)
                 loss.backward()
                 self.substitute_optimizer.step()
+                epoch_loss += loss.item()
+            epoch_pbar.set_postfix({"Loss": f"{epoch_loss/len(train_loader):.4f}"})
 
         state.attack_state["substitute"] = self.substitute
+        self.logger.info(f"BlackboxRipper substitute trained.")
+        self._evaluate_current_substitute(self.substitute, device)

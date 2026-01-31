@@ -1,49 +1,37 @@
 """Benchmark engine core."""
 
-import torch
-import torch.nn as nn
-from typing import Dict, Any, Optional
-import numpy as np
-import yaml
 from pathlib import Path
+from typing import Any, Dict
 
-from mebench.core.state import BenchmarkState
-from mebench.core.types import QueryBatch, OracleOutput
-from mebench.core.validate import validate_config
+from mebench.core.context import BenchmarkContext
+from mebench.core.logging import ArtifactLogger, create_run_dir, setup_console_logging
 from mebench.core.seed import set_seed
+from mebench.core.state import BenchmarkState
+from mebench.core.validate import validate_config
 from mebench.oracles.oracle import Oracle
 from mebench.oracles.victim_loader import load_victim_from_config
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
 from mebench.attackers.activethief import ActiveThief
-from mebench.attackers.dfme import DFME
-from mebench.attackers.maze import MAZE
-from mebench.attackers.dfms import DFMSHL
-from mebench.attackers.game import GAME
-from mebench.attackers.es_attack import ESAttack
-from mebench.attackers.random_baseline import RandomBaseline
-from mebench.attackers.swiftthief import SwiftThief
 from mebench.attackers.blackbox_dissector import BlackboxDissector
-from mebench.attackers.cloudleak import CloudLeak
 from mebench.attackers.blackbox_ripper import BlackboxRipper
+from mebench.attackers.cloudleak import CloudLeak
 from mebench.attackers.copycatcnn import CopycatCNN
+from mebench.attackers.dfme import DFME
+from mebench.attackers.dfms import DFMSHL
+from mebench.attackers.es_attack import ESAttack
+from mebench.attackers.game import GAME
 from mebench.attackers.inversenet import InverseNet
 from mebench.attackers.knockoff_nets import KnockoffNets
-from mebench.data.loaders import get_test_dataloader, create_dataloader
-from mebench.core.state import BenchmarkState
-from mebench.core.types import QueryBatch, OracleOutput
-from mebench.core.validate import validate_config
-from mebench.core.seed import set_seed
-from mebench.core.query_storage import create_query_storage
-from mebench.eval.evaluator import Evaluator
-from mebench.core.logging import ArtifactLogger, create_run_dir
-from mebench.models.substitute_factory import create_substitute
+from mebench.attackers.maze import MAZE
+from mebench.attackers.random_baseline import RandomBaseline
+from mebench.attackers.swiftthief import SwiftThief
 
 
-def create_attack(
+def create_runner(
     attack_name: str,
     config: Dict[str, Any],
     state: BenchmarkState,
-) -> BaseAttack:
+) -> AttackRunner:
     """Create attack instance from name.
 
     Args:
@@ -52,7 +40,7 @@ def create_attack(
         state: Global benchmark state
 
     Returns:
-        Attack instance
+        Attack runner instance
     """
     if attack_name == "activethief":
         return ActiveThief(config["attack"], state)
@@ -99,6 +87,9 @@ def run_experiment(
     # Validate config
     validate_config(config)
 
+    # Setup logging
+    setup_console_logging()
+
     # Run for each seed
     for seed in config["run"]["seeds"]:
         print(f"\n{'='*60}")
@@ -141,91 +132,26 @@ def run_experiment(
         oracle = Oracle(victim, config["victim"], state)
 
         # Initialize attack
-        attack = create_attack(config["attack"]["name"], config, state)
+        attack = create_runner(config["attack"]["name"], config, state)
 
-        # Load test dataloader
-        test_loader = get_test_dataloader(
-            name=config["dataset"]["name"],
-            batch_size=128,
-        )
+        # Context (Track B only)
+        ctx = BenchmarkContext(state=state, oracle=oracle, logger=logger, config=config)
 
-        # Initialize query storage for Track A
-        query_storage = create_query_storage(
-            run_dir,
-            output_mode=config["victim"]["output_mode"],
-        )
+        print("\nStarting attack run (Track B only)")
+        attack.run(ctx)
+        
+        # FINAL EVALUATION for Track B
+        substitute = state.attack_state.get("substitute")
+        if substitute is not None:
+            # Ensure victim is set in case run() finished early or skipped it
+            if attack.victim is None:
+                attack.victim = victim
+            attack._evaluate_current_substitute(substitute, device)
 
-        # Initialize evaluator
-        evaluator = Evaluator(config, state, query_storage)
-
-        # Save run config
-        logger.save_config(config)
-
-        # Main query collection loop
-        checkpoints = config["budget"]["checkpoints"]
-        max_budget = config["budget"]["max_budget"]
-
-        print(f"\nStarting query collection (max budget: {max_budget})")
-
-        while state.query_count < max_budget:
-            # Determine query batch size (default to 1000 or remaining budget)
-            # Attacks can suggest larger steps for efficiency.
-            step_size = min(1000, max_budget - state.query_count)
-
-            # Propose queries
-            query_batch = attack.propose(step_size, state)
-
-            # Query oracle
-            oracle_output = oracle.query(query_batch.x)
-
-            # Observe response
-            attack.observe(query_batch, oracle_output, state)
-
-            # Store queries for Track A training
-            query_storage.add_batch(query_batch.x, oracle_output.y)
-
-            print(f"\rQueries: {state.query_count}/{max_budget}", end="", flush=True)
-
-            # Check if we've reached a checkpoint
-            for checkpoint in checkpoints:
-                if state.query_count >= checkpoint and checkpoint not in state.attack_state.get("checkpoint_reached", []):
-                    print(f"\n\nCheckpoint reached: {checkpoint} queries")
-                    print("Evaluating...")
-
-                    # Evaluate at checkpoint
-                    results = evaluator.evaluate(victim, test_loader, checkpoint)
-
-                    # Log results
-                    for track in ["track_a", "track_b"]:
-                        if track not in results:
-                            continue
-                        logger.log_checkpoint(
-                            seed=seed,
-                            checkpoint=checkpoint,
-                            track=track,
-                            metrics=results[track],
-                        )
-                        print(f"{track}: {results[track]}")
-
-                    # Mark checkpoint as reached
-                    if "checkpoint_reached" not in state.attack_state:
-                        state.attack_state["checkpoint_reached"] = []
-                    state.attack_state["checkpoint_reached"].append(checkpoint)
-
-        print(f"\n\nQuery collection complete!")
-        print(f"Total queries: {state.query_count}")
+        print("\nAttack run complete!")
 
         # Finalize logging
         logger.finalize()
-
-        # Save query storage and optionally cleanup
-        query_storage.save()
-
-        # Clean up cache if configured
-        if config.get("cache", {}).get("delete_on_finish", True):
-            query_storage.cleanup()
-        else:
-            print(f"Query cache preserved at {query_storage.cache_dir}")
 
     print(f"\n{'='*60}")
     print("Experiment completed!")

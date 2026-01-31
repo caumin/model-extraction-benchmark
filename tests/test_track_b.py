@@ -79,7 +79,7 @@ def test_dfme_track_b_evaluation():
 
         for round_idx in range(num_rounds):
             # Propose
-            query_batch = attack.propose(k, state)
+            query_batch = attack._select_query_batch(k, state)
 
             # Simulate oracle response (placeholder victim)
             x = query_batch.x
@@ -91,7 +91,7 @@ def test_dfme_track_b_evaluation():
             oracle_output = OracleOutput(kind="soft_prob", y=victim_probs)
 
             # Observe (trains DFME internally)
-            attack.observe(query_batch, oracle_output, state)
+            attack._handle_oracle_output(query_batch, oracle_output, state)
 
             if (round_idx + 1) * k in [100, 500]:
                 print(f"Checkpoint reached at {state.attack_state['step']} queries")

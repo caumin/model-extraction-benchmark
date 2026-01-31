@@ -4,14 +4,14 @@ run:
   - 2
   device: cuda:0
 victim:
-  victim_id: mnist_lenet_mnist
+  victim_id: mnist_lenet
   arch: lenet_mnist
   channels: 1
   num_classes: 10
   input_size:
   - 28
   - 28
-  checkpoint_ref: runs/victims/mnist_lenet_mnist_seed0.pt
+  checkpoint_ref: runs/victims/mnist_lenet_seed0.pt
   normalization: null
   output_mode: hard_top1
   temperature: 1.0

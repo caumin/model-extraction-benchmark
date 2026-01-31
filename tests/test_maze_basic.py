@@ -17,14 +17,14 @@ def test_maze_basic_flow() -> None:
 
     attack = MAZE(config, state)
     # Use k large enough so MAZE packs >=2 base samples (avoids BN batch=1).
-    query_batch = attack.propose(12, state)
+    query_batch = attack._select_query_batch(12, state)
 
     assert isinstance(query_batch, QueryBatch)
-    # Engine contract: propose(k) returns exactly k images.
+    # Selection returns exactly k images.
     assert query_batch.x.shape[0] == 12
 
     probs = torch.softmax(torch.randn(query_batch.x.shape[0], 10), dim=1)
     oracle_output = OracleOutput(kind="soft_prob", y=probs)
-    attack.observe(query_batch, oracle_output, state)
+    attack._handle_oracle_output(query_batch, oracle_output, state)
 
     assert state.attack_state["substitute"] is not None

@@ -31,8 +31,8 @@ def test_activethief_initialization():
     print("ActiveThief initialized successfully")
 
 
-def test_activethief_propose_first_round():
-    """Test ActiveThief propose method (first round - random seed)."""
+def test_activethief_select_first_round():
+    """Test ActiveThief selection (first round - random seed)."""
     config = {
         "dataset": {
             "data_mode": "seed",
@@ -51,9 +51,9 @@ def test_activethief_propose_first_round():
 
     attack = ActiveThief(config, state)
 
-    # Propose 5 queries (less than initial seed size)
+    # Select 5 queries (less than initial seed size)
     k = 5
-    query_batch = attack.propose(k, state)
+    query_batch = attack._select_query_batch(k, state)
 
     # Check return type
     assert isinstance(query_batch, QueryBatch)
@@ -63,7 +63,7 @@ def test_activethief_propose_first_round():
     assert "strategy" in query_batch.meta
     assert len(state.attack_state["labeled_indices"]) == k
 
-    print(f"ActiveThief first round: {k} queries proposed")
+    print(f"ActiveThief first round: {k} queries selected")
 
 
 def test_activethief_uncertainty_strategy():
@@ -83,18 +83,18 @@ def test_activethief_uncertainty_strategy():
 
     # First, collect initial seed (10 queries)
     for _ in range(2):  # 2 rounds to get 10 queries
-        attack.propose(5, state)
+        attack._select_query_batch(5, state)
         # Simulate oracle response
         x = attack.pool_dataset[0][0].unsqueeze(0)  # Get first sample
         y = torch.randn(1, 10)  # Soft labels
-        attack.observe(QueryBatch(x=x), OracleOutput(kind="soft_prob", y=y), state)
+        attack._handle_oracle_output(QueryBatch(x=x), OracleOutput(kind="soft_prob", y=y), state)
 
     # Now train substitute
     attack.train_substitute(state)
 
     # Propose with uncertainty strategy (substitute now trained)
     k = 5
-    query_batch = attack.propose(k, state)
+    query_batch = attack._select_query_batch(k, state)
 
     assert query_batch.x.shape[0] == k
     assert len(state.attack_state["labeled_indices"]) == 15  # 10 + 5
@@ -119,14 +119,14 @@ def test_activethief_kcenter_strategy():
 
     # Collect initial seed
     for _ in range(2):
-        attack.propose(5, state)
+        attack._select_query_batch(5, state)
         x = attack.pool_dataset[0][0].unsqueeze(0)
         y = torch.randn(1, 10)
-        attack.observe(QueryBatch(x=x), OracleOutput(kind="soft_prob", y=y), state)
+        attack._handle_oracle_output(QueryBatch(x=x), OracleOutput(kind="soft_prob", y=y), state)
 
-    # Train and propose with k_center
+    # Train and select with k_center
     attack.train_substitute(state)
-    query_batch = attack.propose(5, state)
+    query_batch = attack._select_query_batch(5, state)
 
     assert query_batch.x.shape[0] == 5
     assert len(state.attack_state["labeled_indices"]) == 15
@@ -151,19 +151,36 @@ def test_activethief_dfal_strategy():
 
     # Collect initial seed
     for _ in range(2):
-        attack.propose(5, state)
+        attack._select_query_batch(5, state)
         x = attack.pool_dataset[0][0].unsqueeze(0)
         y = torch.randn(1, 10)
-        attack.observe(QueryBatch(x=x), OracleOutput(kind="soft_prob", y=y), state)
+        attack._handle_oracle_output(QueryBatch(x=x), OracleOutput(kind="soft_prob", y=y), state)
 
-    # Train and propose with dfal
+    # Train and select with dfal
     attack.train_substitute(state)
-    query_batch = attack.propose(5, state)
+    query_batch = attack._select_query_batch(5, state)
 
     assert query_batch.x.shape[0] == 5
     assert len(state.attack_state["labeled_indices"]) == 15
 
     print("ActiveThief DFAL strategy passed")
+
+
+def test_activethief_pool_exhausted():
+    """Test ActiveThief behavior when pool is exhausted."""
+    config = {
+        "strategy": "uncertainty",
+        "initial_seed_size": 10,
+    }
+    state = BenchmarkState()
+    attack = ActiveThief(config, state)
+    state.attack_state["unlabeled_indices"] = []  # Force empty pool
+
+    # Propose from exhausted pool should now raise ValueError
+    with pytest.raises(ValueError, match="Query pool exhausted"):
+        attack._select_query_batch(10, state)
+
+    print("ActiveThief pool exhausted test passed")
 
 
 if __name__ == "__main__":

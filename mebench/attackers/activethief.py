@@ -1,21 +1,25 @@
 """ActiveThief attack implementation."""
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import f1_score
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
-from mebench.data.loaders import create_dataloader
+from mebench.data.loaders import create_dataloader, get_test_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.eval.metrics import evaluate_substitute
 
 
-class ActiveThief(BaseAttack):
+class ActiveThief(AttackRunner):
     """ActiveThief: Pool-based active learning for model extraction.
 
     Algorithm loop:
@@ -59,11 +63,27 @@ class ActiveThief(BaseAttack):
         self.dropout = config.get("dropout", 0.1)
         self.l2_reg = config.get("l2_reg", 0.001)
 
-         # Initialize attack state
+        # Initialize logger
+        self.logger = logging.getLogger(__name__)
+
+        # Pool dataset (loaded during selection)
+        self.pool_dataset = None
+        self.test_loader = None
+        self.victim = None
+
+        # Initialize state (will set up indices but not load pool yet)
         self._initialize_state(state)
 
-        # Pool dataset (will be loaded in propose)
-        self.pool_dataset = None
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        pbar = tqdm(total=self.state.budget_remaining, desc="[ActiveThief] Extracting")
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            query_batch = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(query_batch.x, meta=getattr(query_batch, "meta", None))
+            self._handle_oracle_output(query_batch, oracle_output, self.state)
+            pbar.update(query_batch.x.size(0))
+        pbar.close()
 
     def _get_pool_dataset_config(self, state: BenchmarkState) -> dict:
         if "dataset" in self.config.get("attack", {}):
@@ -78,11 +98,11 @@ class ActiveThief(BaseAttack):
             dataset_config = {"surrogate_name": "SVHN", **dataset_config}
         return dataset_config
 
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         """Propose k queries using active learning strategy.
 
         Args:
-            k: Number of queries to propose
+        k: Number of queries to select
             state: Current benchmark state
 
         Returns:
@@ -110,11 +130,10 @@ class ActiveThief(BaseAttack):
 
         # Handle empty pool
         if len(unlabeled_indices) == 0:
-            # Pool exhausted, return synthetic random queries
-            input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            x = torch.randn(k, *input_shape)
-            meta = {"indices": [], "strategy": self.strategy, "pool_exhausted": True}
-            return QueryBatch(x=x, meta=meta)
+            raise ValueError(
+                f"Query pool exhausted for {self.__class__.__name__}. "
+                f"Cannot select {k} more queries."
+            )
 
         # First round: random selection for initial seed
         if len(labeled_indices) < self.initial_seed_size:
@@ -129,7 +148,8 @@ class ActiveThief(BaseAttack):
             elif self.strategy == "dfal":
                 selected = self._select_dfal(k, state)
             elif self.strategy in {"dfal_k_center", "dfal+k_center", "dfal_kcenter"}:
-                rho = int(self.config.get("dfal_rho", max(k, 10 * k)))
+                # Strict Protocol: Use the ENTIRE pool for DFAL pre-filter unless specified
+                rho = int(self.config.get("dfal_rho", len(unlabeled_indices)))
                 selected = self._select_dfal_k_center(k, rho, state)
             else:
                 raise ValueError(f"Unknown strategy: {self.strategy}")
@@ -157,8 +177,6 @@ class ActiveThief(BaseAttack):
         device = next(substitute.parameters()).device
         substitute.eval()
         
-        from tqdm import tqdm
-        
         # Create temporary dataloader for efficient batch inference
         subset = Subset(self.pool_dataset, indices)
         loader = DataLoader(subset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
@@ -168,7 +186,7 @@ class ActiveThief(BaseAttack):
         norm_std = self.norm_std.to(device)
         
         with torch.no_grad():
-            for x_batch, _ in tqdm(loader, desc="Approx Labeling", leave=False):
+            for x_batch, _ in tqdm(loader, desc="[ActiveThief] Predicting Pool", leave=False):
                 x_batch = x_batch.to(device)
                 x_batch = (x_batch - norm_mean) / norm_std
                 logits = substitute(x_batch)
@@ -187,6 +205,7 @@ class ActiveThief(BaseAttack):
 
         # Step 4: Get approximate labels for ALL unlabeled samples (Strict Protocol)
         # For huge datasets, one might sample a subset here, but we stick to strict full-scan.
+        self.logger.info(f"Scoring {len(unlabeled_indices)} pool samples via Uncertainty...")
         probs = self._get_approx_probs(unlabeled_indices, substitute)
         
         # Calculate entropy: H = -sum(p * log(p))
@@ -239,18 +258,19 @@ class ActiveThief(BaseAttack):
         
         # Initial distances from existing labeled set
         # Process in chunks to save memory
-        from tqdm import tqdm
-        chunk_size = 1000
         
-        # Initial distance calculation pbar
+        chunk_size = 1000
+
+        
+        # Initial distance calculation
         num_chunks = (x_l.size(0) + chunk_size - 1) // chunk_size
-        for i in tqdm(range(0, x_l.size(0), chunk_size), total=num_chunks, desc="K-Center Init", leave=False):
+        for i in range(0, x_l.size(0), chunk_size):
             chunk = x_l[i : i + chunk_size]
             dists = torch.cdist(x_u, chunk, p=2).min(dim=1).values
             min_dists = torch.minimum(min_dists, dists)
             
         selected_indices = []
-        for _ in tqdm(range(min(k, len(candidate_indices))), desc="K-Center Greedy", leave=False):
+        for _ in range(min(k, len(candidate_indices))):
             # Select point with max min_dist
             idx = torch.argmax(min_dists).item()
             selected_indices.append(candidate_indices[idx])
@@ -306,6 +326,7 @@ class ActiveThief(BaseAttack):
         # Strict implementation: Apply DFAL metric to ALL unlabeled samples.
         candidates = unlabeled_indices
 
+        self.logger.info(f"Scoring {len(candidates)} pool samples via DFAL...")
         device = next(substitute.parameters()).device
         substitute.eval()
         
@@ -319,9 +340,9 @@ class ActiveThief(BaseAttack):
         perturbation_scores = []
         cursor = 0
         
-        from tqdm import tqdm
-        for x_batch, _ in tqdm(loader, desc="DFAL Perturbation", leave=False):
+        for x_batch, _ in tqdm(loader, desc="[DFAL] Computing Perturbations", leave=False):
             x_batch = x_batch.to(device)
+
             
             # DeepFool requires gradient access, so we clone and detach for safety but enable grad
             # Note: _deepfool_perturbation_batch handles the loop internally per sample or batch?
@@ -425,7 +446,7 @@ class ActiveThief(BaseAttack):
             create_graph=False,
         )[0]
 
-    def observe(
+    def _handle_oracle_output(
         self,
         query_batch: QueryBatch,
         oracle_output: OracleOutput,
@@ -448,7 +469,9 @@ class ActiveThief(BaseAttack):
         # Train substitute periodically based on round step size
         labeled_count = len(state.attack_state["labeled_indices"])
         if labeled_count % self.step_size == 0 and labeled_count > 0:
+            self.logger.info(f"Round limit reached (Step: {self.step_size}). Training substitute...")
             self.train_substitute(state)
+            self.logger.info(f"Round Complete. Labeled: {labeled_count}, Budget Remaining: {state.budget_remaining}")
 
     def train_substitute(self, state: BenchmarkState) -> None:
         """Train substitute model from scratch on collected data.
@@ -456,6 +479,7 @@ class ActiveThief(BaseAttack):
         Args:
             state: Current benchmark state
         """
+        device = state.metadata.get("device", "cpu")
         # Check if we have query data
         query_data_x = state.attack_state["query_data_x"]
         query_data_y = state.attack_state["query_data_y"]
@@ -535,10 +559,10 @@ class ActiveThief(BaseAttack):
         # Optimizer with L2 regularization
         import torch.optim as optim
         opt_params = sub_config.get("optimizer", {})
-        optimizer = optim.SGD(
+        # [P0 FIX] Paper mandates Adam optimizer for ActiveThief
+        optimizer = optim.Adam(
             model.parameters(),
             lr=float(opt_params.get("lr", 0.001)),
-            momentum=float(opt_params.get("momentum", 0.9)),
             weight_decay=float(opt_params.get("weight_decay", self.l2_reg)),
         )
 
@@ -562,10 +586,9 @@ class ActiveThief(BaseAttack):
         best_model_state = None
 
         # Training loop (epoch-based)
-        from tqdm import tqdm
         
-        epochs_pbar = tqdm(range(self.max_epochs), desc="Training Substitute", leave=False)
-        for epoch in epochs_pbar:
+        epoch_pbar = tqdm(range(self.max_epochs), desc="[ActiveThief] Training Substitute", leave=False)
+        for epoch in epoch_pbar:
             model.train()
             train_loss = 0.0
 
@@ -599,6 +622,9 @@ class ActiveThief(BaseAttack):
 
             # Validation
             val_f1 = self._compute_f1(model, val_loader, device)
+            
+            # Update progress bar
+            epoch_pbar.set_postfix({"Loss": f"{train_loss/len(train_loader):.4f}", "F1": f"{val_f1:.4f}"})
 
             if val_f1 > best_f1:
                 best_f1 = val_f1
@@ -607,16 +633,9 @@ class ActiveThief(BaseAttack):
             else:
                 patience_counter += 1
 
-            epochs_pbar.set_postfix({
-                "loss": f"{train_loss/len(train_loader):.4f}", 
-                "val_f1": f"{val_f1:.4f}",
-                "queries": len(state.attack_state["labeled_indices"])
-            })
-
             # Early stopping
             if patience_counter >= self.patience:
-                epochs_pbar.close()
-                print(f"Early stopping at epoch {epoch}")
+                # print(f"Early stopping at epoch {epoch}")
                 break
 
         # Load best model
@@ -625,7 +644,10 @@ class ActiveThief(BaseAttack):
 
         # Store in state for Track B evaluation
         state.attack_state["substitute"] = model
-        print(f"ActiveThief substitute trained. Best F1: {best_f1:.4f}")
+        self.logger.info(f"ActiveThief substitute trained. Best Val F1: {best_f1:.4f}")
+
+        # Round Evaluation
+        # self._evaluate_current_substitute(model, device)
 
     def _compute_f1(self, model: nn.Module, val_loader: DataLoader, device: str) -> float:
         """Compute F1 score on validation set.
@@ -677,22 +699,16 @@ class ActiveThief(BaseAttack):
         Args:
             state: Global benchmark state to update
         """
-        dataset_config = state.metadata.get("dataset_config", {})
-        config_dataset = self.config.get("dataset", {})
-        if dataset_config:
-            pool_config = dataset_config
-        elif config_dataset:
-            pool_config = config_dataset
-        else:
-            pool_config = {}
+        # Load pool dataset to get actual size
+        if self.pool_dataset is None:
+            dataset_config = self._get_pool_dataset_config(state)
+            self.pool_dataset = create_dataloader(
+                dataset_config,
+                batch_size=1,
+                shuffle=False,
+            ).dataset
 
-        pool_size = pool_config.get("pool_size")
-        if pool_size is None:
-            if "seed_size" in pool_config:
-                pool_size = pool_config["seed_size"]
-            else:
-                pool_size = 10000
-
+        pool_size = len(self.pool_dataset)
         state.attack_state["labeled_indices"] = []
         state.attack_state["unlabeled_indices"] = list(range(pool_size))
         state.attack_state["query_data_x"] = []

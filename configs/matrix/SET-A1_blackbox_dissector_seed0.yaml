@@ -4,16 +4,16 @@ run:
   - 0
   device: cuda:0
 victim:
-  victim_id: mnist_lenet_mnist
+  victim_id: mnist_lenet
   arch: lenet_mnist
   channels: 1
   num_classes: 10
   input_size:
   - 28
   - 28
-  checkpoint_ref: runs/victims/mnist_lenet_mnist_seed0.pt
+  checkpoint_ref: runs/victims/mnist_lenet_seed0.pt
   normalization: null
-  output_mode: soft_prob
+  output_mode: hard_top1
   temperature: 1.0
 dataset:
   name: MNIST
@@ -22,7 +22,7 @@ dataset:
   train_split: true
 attack:
   name: blackbox_dissector
-  output_mode: soft_prob
+  output_mode: hard_top1
   max_budget: 20000
 substitute:
   arch: lenet_mnist

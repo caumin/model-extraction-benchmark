@@ -1,22 +1,25 @@
 """Knockoff Nets attack implementation."""
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Optional
 from collections import deque
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import models
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 
 
-class KnockoffNets(BaseAttack):
+class KnockoffNets(AttackRunner):
     """Knockoff Nets with a simple gradient-bandit policy."""
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -46,6 +49,175 @@ class KnockoffNets(BaseAttack):
         self.class_to_indices: Dict[int, List[int]] = {}
 
         self._initialize_state(state)
+
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        device = self.state.metadata.get("device", "cpu")
+        
+        pbar = tqdm(total=self.state.budget_remaining, desc="[KnockoffNets] Extracting")
+        while ctx.budget_remaining > 0:
+            step_size = self._default_step_size(ctx)
+            x, indices, classes = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(x, meta={"indices": indices, "classes": classes})
+            self._handle_oracle_output(x, oracle_output, classes, self.state)
+            pbar.update(x.size(0))
+        pbar.close()
+
+    def _select_query_batch(
+        self, k: int, state: BenchmarkState
+    ) -> tuple[torch.Tensor, list[int], list[int]]:
+        if self.pool_dataset is None:
+            self._load_pool(state)
+
+        unqueried = state.attack_state["unqueried_indices"]
+        if len(unqueried) == 0:
+            raise ValueError(
+                f"Query pool exhausted for {self.__class__.__name__}. "
+                f"Cannot select {k} more queries."
+            )
+
+        selected_indices: List[int] = []
+        selected_classes: List[int] = []
+
+        attempts = 0
+        while len(selected_indices) < k and attempts < k * 5:
+            attempts += 1
+            class_id = self._sample_class_with_policy(state)
+            pool_list = self.class_to_indices.get(class_id, [])
+            if not pool_list:
+                continue
+            idx = pool_list.pop()
+            if idx not in unqueried:
+                continue
+            unqueried.remove(idx)
+            state.attack_state["queried_indices"].append(idx)
+            selected_indices.append(idx)
+            selected_classes.append(class_id)
+
+        if len(selected_indices) < k:
+            remaining = [idx for idx in unqueried if idx not in selected_indices]
+            extra = min(k - len(selected_indices), len(remaining))
+            if extra > 0:
+                extra_indices = np.random.choice(remaining, extra, replace=False).tolist()
+                for idx in extra_indices:
+                    unqueried.remove(idx)
+                    state.attack_state["queried_indices"].append(idx)
+                    selected_indices.append(idx)
+                    selected_classes.append(-1)
+
+        x_list = []
+        for idx in selected_indices:
+            img, _ = self.pool_dataset[idx]
+            x_list.append(img)
+
+        if len(x_list) < k:
+            raise ValueError(
+                f"Query pool exhausted for {self.__class__.__name__}. "
+                f"Requested {k}, found {len(x_list)}."
+            )
+
+        x = torch.stack(x_list)
+        return x, selected_indices, selected_classes
+
+    def _handle_oracle_output(
+        self,
+        x_batch: torch.Tensor,
+        oracle_output: OracleOutput,
+        classes: List[int],
+        state: BenchmarkState,
+    ) -> None:
+        state.attack_state["query_data_x"].append(x_batch.detach().cpu())
+        state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
+        state.attack_state["query_count"] += x_batch.shape[0]
+
+        if oracle_output.kind == "soft_prob":
+            probs = oracle_output.y.detach().cpu()
+        else:
+            probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().cpu()
+
+        recent_probs = state.attack_state["recent_victim_probs"]
+        for row in probs:
+            recent_probs.append(row)
+
+        top2 = torch.topk(probs, k=2, dim=1).values
+        certainty_reward = top2[:, 0] - top2[:, 1]
+
+        if len(recent_probs) > 0:
+            mean_recent = torch.stack(list(recent_probs)).mean(dim=0)
+            diff = probs - mean_recent.unsqueeze(0)
+            diversity_reward = torch.clamp(diff, min=0).sum(dim=1)
+        else:
+            diversity_reward = torch.zeros(probs.size(0))
+
+        substitute = state.attack_state.get("substitute")
+        if substitute is not None:
+            substitute.eval()
+            with torch.no_grad():
+                logits = substitute(x_batch.to(state.metadata.get("device", "cpu")))
+                log_probs = F.log_softmax(logits, dim=1).cpu()
+                loss_reward = -(probs * log_probs).sum(dim=1)
+        else:
+            loss_reward = torch.zeros(probs.size(0))
+
+        # [P0 FIX] Normalize rewards to [0,1] range before aggregation
+        certainty_reward = torch.clamp(certainty_reward, 0.0, 1.0)
+        diversity_reward = torch.clamp(diversity_reward, 0.0, 1.0)
+        loss_reward = torch.clamp(loss_reward, 0.0, 1.0)
+        
+        rewards = (
+            self.reward_certainty_weight * certainty_reward
+            + self.reward_diversity_weight * diversity_reward
+            + self.reward_loss_weight * loss_reward
+        )
+
+        reward_mean = float(rewards.mean().item()) if rewards.numel() > 0 else 0.0
+        state.attack_state["recent_rewards"].append(reward_mean)
+        if len(state.attack_state["recent_rewards"]) > 0:
+            baseline = float(np.mean(state.attack_state["recent_rewards"]))
+        else:
+            baseline = 0.0
+        state.attack_state["reward_baseline"] = baseline
+
+        weights = state.attack_state["policy_weights"].clone().float()
+        coarse_weights = state.attack_state["coarse_policy_weights"].clone().float()
+        class_to_coarse = state.attack_state["class_to_coarse"]
+
+        pi = torch.softmax(weights, dim=0)
+        for idx, class_id in enumerate(classes):
+            if class_id < 0 or class_id >= weights.numel():
+                continue
+
+            state.attack_state["action_counts"][class_id] += 1
+            count = state.attack_state["action_counts"][class_id].item()
+            alpha = 1.0 / count
+
+            adv = float(rewards[idx]) - baseline
+            grad = -pi
+            grad[class_id] = 1.0 - pi[class_id]
+            weights = weights + alpha * adv * grad
+
+            pi = torch.softmax(weights, dim=0)
+
+            if class_id in class_to_coarse and coarse_weights.numel() > 0:
+                coarse_id = int(class_to_coarse[class_id])
+                if 0 <= coarse_id < coarse_weights.numel():
+                    state.attack_state["coarse_action_counts"][coarse_id] += 1
+                    coarse_count = state.attack_state["coarse_action_counts"][coarse_id].item()
+                    coarse_alpha = 1.0 / coarse_count
+
+                    coarse_pi = torch.softmax(coarse_weights, dim=0)
+                    coarse_grad = -coarse_pi
+                    coarse_grad[coarse_id] = 1.0 - coarse_pi[coarse_id]
+                    coarse_weights = coarse_weights + coarse_alpha * adv * coarse_grad
+
+        state.attack_state["policy_weights"] = weights
+        if coarse_weights.numel() > 0:
+            state.attack_state["coarse_policy_weights"] = coarse_weights
+
+        if state.attack_state["query_count"] % self.train_every == 0:
+            self.logger.info(f"Training substitute at query count {state.attack_state['query_count']}...")
+            self._train_substitute(state)
+            self._evaluate_current_substitute(state.attack_state.get("substitute"), state.metadata.get("device", "cpu"))
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["queried_indices"] = []
@@ -145,8 +317,9 @@ class KnockoffNets(BaseAttack):
             indices = self.class_to_indices.get(class_id, [])
             if not indices:
                 continue
-            sample_count = min(self.samples_per_class, len(indices))
-            sampled = np.random.choice(indices, sample_count, replace=False).tolist()
+            
+            # Use ALL samples per class for centroid computation (Strict Protocol)
+            sampled = indices
 
             features = []
             for start in range(0, len(sampled), self.batch_size):
@@ -221,159 +394,6 @@ class KnockoffNets(BaseAttack):
         class_probs = torch.softmax(class_weights[class_ids], dim=0).cpu().numpy()
         return int(np.random.choice(class_ids, p=class_probs))
 
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
-        if self.pool_dataset is None:
-            self._load_pool(state)
-
-        unqueried = state.attack_state["unqueried_indices"]
-        if len(unqueried) == 0:
-            x = torch.randn(k, *state.metadata.get("input_shape", (3, 32, 32)))
-            meta = {"indices": [], "classes": [], "pool_exhausted": True}
-            return QueryBatch(x=x, meta=meta)
-
-        weights = state.attack_state["policy_weights"].clone().float()
-        probs = torch.softmax(weights, dim=0).cpu().numpy()
-        class_ids = list(range(len(probs)))
-
-        selected_indices: List[int] = []
-        selected_classes: List[int] = []
-
-        attempts = 0
-        while len(selected_indices) < k and attempts < k * 5:
-            attempts += 1
-            class_id = self._sample_class_with_policy(state)
-            pool_list = self.class_to_indices.get(class_id, [])
-            if not pool_list:
-                continue
-            idx = pool_list.pop()
-            if idx not in unqueried:
-                continue
-            unqueried.remove(idx)
-            state.attack_state["queried_indices"].append(idx)
-            selected_indices.append(idx)
-            selected_classes.append(class_id)
-
-        if len(selected_indices) < k:
-            remaining = [idx for idx in unqueried if idx not in selected_indices]
-            extra = min(k - len(selected_indices), len(remaining))
-            if extra > 0:
-                extra_indices = np.random.choice(remaining, extra, replace=False).tolist()
-                for idx in extra_indices:
-                    unqueried.remove(idx)
-                    state.attack_state["queried_indices"].append(idx)
-                    selected_indices.append(idx)
-                    selected_classes.append(-1)
-
-        x_list = []
-        for idx in selected_indices:
-            img, _ = self.pool_dataset[idx]
-            x_list.append(img)
-
-        if len(x_list) < k:
-            x_list.extend([torch.randn_like(x_list[0]) for _ in range(k - len(x_list))])
-
-        x = torch.stack(x_list)
-        meta = {"indices": selected_indices, "classes": selected_classes}
-        return QueryBatch(x=x, meta=meta)
-
-    def observe(
-        self,
-        query_batch: QueryBatch,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
-        state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
-        state.attack_state["query_count"] += query_batch.x.shape[0]
-
-        if oracle_output.kind == "soft_prob":
-            probs = oracle_output.y.detach().cpu()
-        else:
-            probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().cpu()
-
-        recent_probs = state.attack_state["recent_victim_probs"]
-        for row in probs:
-            recent_probs.append(row)
-
-        top2 = torch.topk(probs, k=2, dim=1).values
-        # Certainty reward (paper): margin between top-1 and top-2 probabilities.
-        certainty_reward = top2[:, 0] - top2[:, 1]
-
-        if len(recent_probs) > 0:
-            mean_recent = torch.stack(list(recent_probs)).mean(dim=0)
-            # Strict implementation of Eq. 5: sum(max(0, y_t - y_bar))
-            diff = probs - mean_recent.unsqueeze(0)
-            diversity_reward = torch.clamp(diff, min=0).sum(dim=1)
-        else:
-            diversity_reward = torch.zeros(probs.size(0))
-
-        substitute = state.attack_state.get("substitute")
-        if substitute is not None:
-            substitute.eval()
-            with torch.no_grad():
-                logits = substitute(query_batch.x.to(state.metadata.get("device", "cpu")))
-                log_probs = F.log_softmax(logits, dim=1).cpu()
-                loss_reward = -(probs * log_probs).sum(dim=1)
-        else:
-            loss_reward = torch.zeros(probs.size(0))
-
-        rewards = (
-            self.reward_certainty_weight * certainty_reward
-            + self.reward_diversity_weight * diversity_reward
-            + self.reward_loss_weight * loss_reward
-        )
-
-        reward_mean = float(rewards.mean().item()) if rewards.numel() > 0 else 0.0
-        state.attack_state["recent_rewards"].append(reward_mean)
-        if len(state.attack_state["recent_rewards"]) > 0:
-            baseline = float(np.mean(state.attack_state["recent_rewards"]))
-        else:
-            baseline = 0.0
-        state.attack_state["reward_baseline"] = baseline
-
-        classes = query_batch.meta.get("classes", [])
-        weights = state.attack_state["policy_weights"].clone().float()
-        coarse_weights = state.attack_state["coarse_policy_weights"].clone().float()
-        class_to_coarse = state.attack_state["class_to_coarse"]
-        
-        # Gradient bandit update: w_i <- w_i + alpha * (r - b) * (1[i=a] - pi_i)
-        # alpha = 1 / N(z)
-        pi = torch.softmax(weights, dim=0)
-        for idx, class_id in enumerate(classes):
-            if class_id < 0 or class_id >= weights.numel():
-                continue
-            
-            # Update counts
-            state.attack_state["action_counts"][class_id] += 1
-            count = state.attack_state["action_counts"][class_id].item()
-            alpha = 1.0 / count
-
-            adv = float(rewards[idx]) - baseline
-            grad = -pi
-            grad[class_id] = 1.0 - pi[class_id]
-            weights = weights + alpha * adv * grad
-
-            pi = torch.softmax(weights, dim=0)
-
-            if class_id in class_to_coarse and coarse_weights.numel() > 0:
-                coarse_id = int(class_to_coarse[class_id])
-                if 0 <= coarse_id < coarse_weights.numel():
-                    # Update coarse counts
-                    state.attack_state["coarse_action_counts"][coarse_id] += 1
-                    coarse_count = state.attack_state["coarse_action_counts"][coarse_id].item()
-                    coarse_alpha = 1.0 / coarse_count
-                    
-                    coarse_pi = torch.softmax(coarse_weights, dim=0)
-                    coarse_grad = -coarse_pi
-                    coarse_grad[coarse_id] = 1.0 - coarse_pi[coarse_id]
-                    coarse_weights = coarse_weights + coarse_alpha * adv * coarse_grad
-        state.attack_state["policy_weights"] = weights
-        if coarse_weights.numel() > 0:
-            state.attack_state["coarse_policy_weights"] = coarse_weights
-
-        if state.attack_state["query_count"] % self.train_every == 0:
-            self._train_substitute(state)
-
     def _train_substitute(self, state: BenchmarkState) -> None:
         query_x = state.attack_state["query_data_x"]
         query_y = state.attack_state["query_data_y"]
@@ -428,7 +448,9 @@ class KnockoffNets(BaseAttack):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
         
-        for _ in range(self.train_epochs):
+        epoch_pbar = tqdm(range(self.train_epochs), desc="[KnockoffNets] Training Substitute", leave=False)
+        for _ in epoch_pbar:
+            epoch_loss = 0.0
             for x_batch, y_batch in loader:
                 x_batch = x_batch.to(device)
                 # Normalize images for substitute
@@ -449,5 +471,7 @@ class KnockoffNets(BaseAttack):
                     loss = criterion(logits, y_batch)
                 loss.backward()
                 optimizer.step()
+                epoch_loss += loss.item()
+            epoch_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}"})
 
         state.attack_state["substitute"] = model

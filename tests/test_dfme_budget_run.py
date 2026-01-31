@@ -3,37 +3,16 @@
 import csv
 from pathlib import Path
 
-import torch
-from torch.utils.data import DataLoader, Dataset
-
 import mebench.core.engine as engine
-
-
-class TinyTestDataset(Dataset):
-    """Small synthetic dataset for evaluation."""
-
-    def __init__(self, size: int = 8) -> None:
-        self.x = torch.zeros(size, 3, 32, 32)
-        self.y = torch.zeros(size, dtype=torch.long)
-
-    def __len__(self) -> int:
-        return len(self.x)
-
-    def __getitem__(self, idx: int):
-        return self.x[idx], self.y[idx]
 
 
 def test_dfme_budget_limited_run(tmp_path, monkeypatch) -> None:
     """Run DFME with a small budget and verify artifacts/counts."""
-    def fake_get_test_dataloader(name: str, batch_size: int = 128):
-        return DataLoader(TinyTestDataset(), batch_size=4, shuffle=False)
-
     def fake_create_run_dir(base_dir: Path, run_name: str, seed: int) -> Path:
         run_dir = tmp_path / run_name / f"seed_{seed}"
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
-    monkeypatch.setattr(engine, "get_test_dataloader", fake_get_test_dataloader)
     monkeypatch.setattr(engine, "create_run_dir", fake_create_run_dir)
 
     config = {
@@ -78,22 +57,20 @@ def test_dfme_budget_limited_run(tmp_path, monkeypatch) -> None:
 
     run_dir = tmp_path / "dfme_budget_test" / "seed_0"
     summary_path = run_dir / "summary.json"
-    metrics_path = run_dir / "metrics.csv"
-    cache_dir = run_dir / "query_cache"
-    meta_path = cache_dir / "meta.pkl"
+    history_path = run_dir / "metrics_history.csv"
 
     assert summary_path.exists(), "summary.json should be written"
-    assert metrics_path.exists(), "metrics.csv should be written"
-    # Note: cache saving is currently disabled in QueryStorage.save() to save disk space.
-    # assert meta_path.exists(), "cache metadata should be written"
+    assert history_path.exists(), "metrics_history.csv should be written"
 
-    with open(metrics_path, newline="") as f:
+    with open(history_path, newline="") as f:
         rows = list(csv.DictReader(f))
 
-    checkpoints = {int(row["checkpoint_B"]) for row in rows}
+    checkpoints = {
+        int(row["checkpoint"])
+        for row in rows
+        if row.get("event") == "checkpoint_reached" and row.get("checkpoint")
+    }
     assert checkpoints == {10, 20}
-    # Track A is always logged. Track B might not be if evaluator only returns track_a.
-    assert len(rows) >= 2
 
     # import pickle
     # with open(meta_path, "rb") as f:

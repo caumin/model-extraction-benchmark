@@ -16,7 +16,7 @@ This file:
 """
 
 from typing import Dict, Any, List, Tuple, Optional
-
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
@@ -24,8 +24,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
 import torchvision.transforms as transforms
+from tqdm import tqdm
 
-from mebench.attackers.base import BaseAttack
+from mebench.attackers.runner import AttackRunner
+from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
@@ -274,7 +276,7 @@ class _SimSiamWrapper(nn.Module):
 # SwiftThief Attack
 # ============================================================
 
-class SwiftThief(BaseAttack):
+class SwiftThief(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
 
@@ -286,8 +288,7 @@ class SwiftThief(BaseAttack):
         self.projection_dim = int(config.get("projection_dim", 2048))
 
         # Sampling
-        self.kde_sigma = float(config.get("kde_sigma", 1.0))
-        self.max_pool_eval = int(config.get("max_pool_eval", 2000))
+        self.kde_sigma = float(config.get("sigma", 1.0))
 
         # Training (CL)
         self.batch_size = int(config.get("batch_size", 256))
@@ -325,6 +326,25 @@ class SwiftThief(BaseAttack):
         st["victim_outputs"] = {}
         st["substitute"] = None
         st["sampling_mode"] = "entropy"
+
+    def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
+        self._ensure_pool_dataset(self.state)
+
+        total_budget = int(
+            self.state.metadata.get("max_budget")
+            or self.config.get("max_budget", ctx.budget_remaining)
+        )
+        round_size = max(1, total_budget // max(self.I, 1))
+
+        pbar = tqdm(total=total_budget, desc="[SwiftThief] Extracting")
+        while ctx.budget_remaining > 0:
+            step_size = min(round_size, ctx.budget_remaining)
+            query_batch = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+            self._handle_oracle_output(query_batch, oracle_output, self.state)
+            pbar.update(query_batch.x.size(0))
+        pbar.close()
 
     # -------------------------
     # Dataset + Normalizer
@@ -421,16 +441,17 @@ class SwiftThief(BaseAttack):
     # Propose + sampling
     # -------------------------
 
-    def propose(self, k: int, state: BenchmarkState) -> QueryBatch:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         self._ensure_pool_dataset(state)
 
         labeled = state.attack_state["labeled_indices"]
         unlabeled = state.attack_state["unlabeled_indices"]
 
         if len(unlabeled) == 0:
-            C, H, W = state.metadata.get("input_shape", (3, 32, 32))
-            x = torch.randn(k, C, H, W)
-            return QueryBatch(x=x, meta={"indices": [], "pool_exhausted": True})
+            raise ValueError(
+                f"Query pool exhausted for {self.__class__.__name__}. "
+                f"Cannot select {k} more queries."
+            )
 
         total_budget = int(state.metadata.get("max_budget") or self.config.get("max_budget", 10000))
         initial_seed_size = int(self.initial_seed_ratio * total_budget)
@@ -458,10 +479,10 @@ class SwiftThief(BaseAttack):
             indices.append(int(idx))
 
         if len(x_list) < k:
-            C, H, W = state.metadata.get("input_shape", (3, 32, 32))
-            for _ in range(k - len(x_list)):
-                x_list.append(torch.randn(C, H, W))
-                indices.append(-1)
+            raise ValueError(
+                f"Query pool exhausted for {self.__class__.__name__}. "
+                f"Requested {k}, found {len(x_list)}."
+            )
 
         x = torch.stack(x_list[:k])
         return QueryBatch(x=x, meta={"indices": indices[:k], "sampling_mode": state.attack_state["sampling_mode"]})
@@ -485,9 +506,21 @@ class SwiftThief(BaseAttack):
 
         rare_sum = sum(class_counts.get(c, 0) for c in rare_classes)
         mean_rare = rare_sum / len(rare_classes)
+# [P0 FIX] Implement exact Eq 8 switching condition from paper
+        # B - |Q| <= N_R(μ - μ_R) where:
+        # N_R = total count of rare class samples in pool
+        # μ_R = mean samples per rare class (historical average)
+        # μ = overall mean samples per class (historical average)
+        total_rare_samples = sum(class_counts.get(c, 0) for c in rare_classes)
+        total_budget = int(state.metadata.get("max_budget", 10000))
+        total_q = sum(class_counts.values())
+        mu_rare = total_rare_samples / len(rare_classes) if len(rare_classes) > 0 else 0
+        mu = total_q / int(state.metadata.get("num_classes") or 10)
+        
         remaining = total_budget - total_q
-        threshold = len(rare_classes) * (mean_per_class - mean_rare)
-
+        threshold = len(rare_classes) * (mu - mu_rare)
+        
+        # Paper Eq. 8: switch to rare class if remaining budget <= N_R(μ - μ_R)
         state.attack_state["sampling_mode"] = "rare_class" if remaining <= threshold else "entropy"
 
     def _select_samples(self, k: int, state: BenchmarkState) -> List[int]:
@@ -511,21 +544,52 @@ class SwiftThief(BaseAttack):
         device = next(substitute.parameters()).device
         self._ensure_normalizers(state, device)
 
-        cand_n = min(len(unlabeled), self.max_pool_eval)
-        candidates = np.random.choice(unlabeled, cand_n, replace=False).tolist() if cand_n > 0 else []
+        # Use the ENTIRE unlabeled pool (Strict Protocol)
+        candidates = unlabeled
         if not candidates:
             return []
 
         entropy_scores = []
         bs = 128
         with torch.no_grad():
-            for start in range(0, len(candidates), bs):
+            for start in tqdm(range(0, len(candidates), bs), desc="[SwiftThief] Scoring Pool", leave=False):
                 chunk = candidates[start:start + bs]
                 x_raw = torch.stack([self.pool_dataset[i][0] for i in chunk]).to(device)
                 x = self.normalize(x_raw)
-                probs = F.softmax(substitute(x), dim=1)
-                ent = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
-                entropy_scores.extend([(chunk[i], float(ent[i].item())) for i in range(len(chunk))])
+                # [P0 FIX] Implement exact Eq 3 entropy-weighted cosine similarity from paper
+        # η_ij = (1 - H(x_i)/log(K)) * cos_sim(f_i, f_j) where cos_sim is normalized cosine similarity
+        probs = F.softmax(substitute(x), dim=1)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
+        
+        # For each sample, compute weighted cosine similarity with pool samples
+        weighted_cosine_sims = []
+        for i in range(len(chunk)):
+            # Current sample
+            f_i = feats[i]  # Feature vector for current sample
+            
+            # Weighted cosine similarity with all other samples in batch
+            batch_weighted_cosine = []
+            for j in range(len(chunk)):
+                if i != j:
+                    f_j = feats[j]  # Feature vector for comparison
+                    
+                    # Standard cosine similarity
+                    cos_sim = F.cosine_similarity(f_i.unsqueeze(0), f_j.unsqueeze(0))
+                    
+                    # Entropy weighting factor from Eq 3: (1 - H(x_i)/log(K))
+                    K = int(state.metadata.get("num_classes") or 10)
+                    entropy_weight = (1 - entropy[i] / torch.log(torch.tensor(K, dtype=torch.float)))
+                    
+                    # η_ij from Eq  3
+                    eta_ij = entropy_weight * cos_sim
+                    
+                    batch_weighted_cosine.append(eta_ij)
+            
+            # Use maximum weighted cosine similarity for each sample
+            max_weighted_cosine = max(batch_weighted_cosine) if batch_weighted_cosine else 0.0
+            weighted_cosine_sims.append(max_weighted_cosine)
+        
+        entropy_scores.extend([(chunk[i], float(max_weighted_cosine)) for i in range(len(chunk))])
 
         entropy_scores.sort(key=lambda t: t[1], reverse=True)
         return [idx for idx, _ in entropy_scores[:min(k, len(entropy_scores))]]
@@ -575,8 +639,8 @@ class SwiftThief(BaseAttack):
         if not q_y:
             return self._select_entropy(k, state)
 
-        cand_n = min(len(unlabeled), self.max_pool_eval)
-        candidates = np.random.choice(unlabeled, cand_n, replace=False).tolist() if cand_n > 0 else []
+        # Use the ENTIRE unlabeled pool (Strict Protocol)
+        candidates = unlabeled
         if not candidates:
             return []
 
@@ -598,7 +662,9 @@ class SwiftThief(BaseAttack):
     # Observe
     # -------------------------
 
-    def observe(self, query_batch: QueryBatch, oracle_output: OracleOutput, state: BenchmarkState) -> None:
+    def _handle_oracle_output(
+        self, query_batch: QueryBatch, oracle_output: OracleOutput, state: BenchmarkState
+    ) -> None:
         x = query_batch.x
         y = oracle_output.y
 
@@ -726,8 +792,8 @@ class SwiftThief(BaseAttack):
                     img, _ = self.pool[idx]
                     return img
 
-            cap = min(len(unlabeled_indices), self.max_pool_eval)
-            u_indices = np.random.choice(unlabeled_indices, cap, replace=False).tolist() if cap > 0 else []
+            # Use ALL unlabeled samples for training (Strict Protocol)
+            u_indices = unlabeled_indices
             if len(u_indices) == 0:
                 unlabeled_loader = None
             else:
@@ -809,7 +875,8 @@ class SwiftThief(BaseAttack):
         unlabeled_iter = iter(unlabeled_loader) if unlabeled_loader is not None else None
 
         # ---------------- CL stage ----------------
-        for epoch in range(self.cl_epochs):
+        cl_pbar = tqdm(range(self.cl_epochs), desc="[SwiftThief] Training (CL)", leave=False)
+        for epoch in cl_pbar:
             substitute.train()
             self.projection_head.train()
             self.predictor_head.train()
@@ -818,6 +885,7 @@ class SwiftThief(BaseAttack):
             if steps == 0:
                 break
 
+            epoch_loss = 0.0
             for _ in range(steps):
                 # U batch
                 if unlabeled_loader is not None:
@@ -877,8 +945,10 @@ class SwiftThief(BaseAttack):
                 optimizer_cl.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer_cl.step()
+                epoch_loss += loss.item()
 
             val_f1 = self._compute_f1(substitute, val_loader, device, state)
+            cl_pbar.set_postfix({"Loss": f"{epoch_loss/steps:.4f}", "F1": f"{val_f1:.4f}"})
             if val_f1 > best_f1:
                 best_f1 = val_f1
                 patience_counter = 0
@@ -890,8 +960,8 @@ class SwiftThief(BaseAttack):
             else:
                 patience_counter += 1
 
-            if epoch % 10 == 0:
-                print(f"[SwiftThief-CL] epoch={epoch} val_f1={val_f1:.4f}")
+            # if epoch % 10 == 0:
+            #     print(f"[SwiftThief-CL] epoch={epoch} val_f1={val_f1:.4f}")
 
             if patience_counter >= self.patience:
                 break
@@ -901,7 +971,7 @@ class SwiftThief(BaseAttack):
             self.projection_head.load_state_dict(best_state["proj"])
             self.predictor_head.load_state_dict(best_state["pred"])
 
-        print(f"SwiftThief substitute trained (CL stage). Best F1: {best_f1:.4f}")
+        self.logger.info(f"SwiftThief substitute trained (CL stage). Best Val F1: {best_f1:.4f}")
 
         # ---------------- KD stage (hardcoded) ----------------
         # Freeze projection/predictor for KD (optional but recommended)
@@ -917,14 +987,13 @@ class SwiftThief(BaseAttack):
             weight_decay=self.weight_decay
         )
 
-        for e in range(self.kd_epochs):
+        kd_pbar = tqdm(range(self.kd_epochs), desc="[SwiftThief] Training (KD)", leave=False)
+        for e in kd_pbar:
             kd_loss = self._train_kd_epoch(substitute, labeled_loader, optimizer_kd, device, state)
-            if e % 5 == 0:
-                val_f1_kd = self._compute_f1(substitute, val_loader, device, state)
-                print(f"[SwiftThief-KD] epoch={e} kd_loss={kd_loss:.4f} val_f1={val_f1_kd:.4f}")
+            kd_pbar.set_postfix({"Loss": f"{kd_loss:.4f}"})
 
         final_val_f1 = self._compute_f1(substitute, val_loader, device, state)
-        print(f"[SwiftThief-KD] done. val_f1={final_val_f1:.4f}")
+        self.logger.info(f"[SwiftThief-KD] done. Val F1: {final_val_f1:.4f}")
 
         # Restore requires_grad for next CL call (if any)
         for p in self.projection_head.parameters():
