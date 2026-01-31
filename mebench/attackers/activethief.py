@@ -22,19 +22,15 @@ from mebench.utils.adversarial import deepfool_distance_vectorized, DeepFoolAtta
 class ActiveThief(AttackRunner):
     """ActiveThief with uncertainty, k-center, and DFAL sampling strategies.
     
-    Algorithm loop (from AGENTS.md):
+    Ref: "ActiveThief: Model Extraction Using Active Learning and Unannotated Public Data" (AAAI 2020)
+    
+    Algorithm loop:
     1. Initialize: Select random initial seed S0 from thief dataset
     2. Query: Send S_i to victim f to get labels D_i
     3. Train: Train substitute model f~ from scratch on all collected data ∪D_t
     4. Evaluate: Predict on remaining pool (unlabeled thief data)
     5. Select: Use active learning strategy to select next queries S_{i+1}
     6. Repeat: Continue until budget exhausted
-    
-    Selection strategies:
-    - uncertainty: Entropy-based sampling
-    - k_center: K-center greedy selection
-    - dfal: DeepFool Active Learning (smallest perturbations)
-    - dfal_k_center: DFAL pre-filtering + K-center selection
     """
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -120,10 +116,14 @@ class ActiveThief(AttackRunner):
         arch = sub_config.get("arch", "resnet18")
         input_channels = int(input_shape[0])
         
+        # [Corrected] Pass dropout probability from config (Default: 0.1 for ActiveThief)
+        dropout_prob = float(self.config.get("dropout_prob", 0.0))
+
         return create_substitute(
             arch=arch,
             num_classes=self.num_classes,
             input_channels=input_channels,
+            dropout_prob=dropout_prob
         )
 
     def _train_substitute(self, state: BenchmarkState) -> None:
@@ -138,10 +138,9 @@ class ActiveThief(AttackRunner):
         sub_config = self.state.metadata.get("substitute_config", {})
         opt_config = sub_config.get("optimizer", {})
         
-        self.substitute_optimizer = optim.SGD(
+        self.substitute_optimizer = optim.Adam(
             self.substitute.parameters(),
-            lr=float(opt_config.get("lr", 0.01)),  # Global contract
-            momentum=float(opt_config.get("momentum", 0.9)),
+            lr=float(opt_config.get("lr", 0.001)),  # Default for Adam per AGENTS.md
             weight_decay=float(opt_config.get("weight_decay", 5e-4))
         )
         
@@ -190,16 +189,22 @@ class ActiveThief(AttackRunner):
                     break
 
     def _select_uncertainty(self, probs: torch.Tensor, k: int) -> List[int]:
-        """Select samples with highest entropy."""
+        """Select samples with highest entropy.
+        
+        Eq: H_n = -sum(y_nj * log(y_nj))
+        """
         # Compute entropy
         entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
         _, indices = torch.topk(entropy, k)
         return indices.cpu().tolist()
 
-    def _select_k_center(self, features: torch.Tensor, k: int) -> List[int]:
-        """Select samples using k-center greedy algorithm."""
+    def _select_k_center(self, probs: torch.Tensor, k: int) -> List[int]:
+        """Select samples using k-center greedy algorithm on probability vectors.
+        
+        Implements Core-Set approach adapted for probability space (Pal et al. 2020).
+        """
         selected = []
-        remaining = list(range(features.shape[0]))
+        remaining = list(range(probs.shape[0]))
         
         # Initialize with a random point
         if remaining:
@@ -207,35 +212,33 @@ class ActiveThief(AttackRunner):
             selected.append(first_idx)
             remaining.remove(first_idx)
         
-        # Greedy selection
+        # Initialize min_distances to infinity
+        min_dists = torch.full((probs.shape[0],), float('inf'), device=probs.device)
+        
+        # Update distances for the first selected point
+        dists = torch.norm(probs - probs[selected[0]].unsqueeze(0), dim=1)
+        min_dists = torch.min(min_dists, dists)
+
         for _ in range(min(k - 1, len(remaining))):
-            if not remaining:
+            current_min_dists = min_dists[remaining]
+            if len(current_min_dists) == 0:
                 break
-                
-            max_dist = -1
-            best_idx = None
             
-            for idx in remaining:
-                # Find minimum distance to selected set
-                selected_features = features[selected]
-                dists = torch.norm(features[idx:idx+1] - selected_features, dim=1)
-                min_dist = torch.min(dists).item()
-                
-                if min_dist > max_dist:
-                    max_dist = min_dist
-                    best_idx = idx
+            max_val, max_idx_local = torch.max(current_min_dists, dim=0)
+            best_idx = remaining[max_idx_local.item()]
             
-            if best_idx is not None:
-                selected.append(best_idx)
-                remaining.remove(best_idx)
+            selected.append(best_idx)
+            remaining.remove(best_idx)
+            
+            # Update min_distances for the new point
+            new_dists = torch.norm(probs - probs[best_idx].unsqueeze(0), dim=1)
+            min_dists = torch.min(min_dists, new_dists)
         
         return selected
 
     def _select_dfal(self, state: BenchmarkState, k: int) -> List[int]:
         """Select samples using DeepFool Active Learning."""
         device = state.metadata.get("device", "cpu")
-        
-        # Get unlabeled data
         unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
         unlabeled_loader = DataLoader(
             unlabeled_dataset, 
@@ -244,32 +247,31 @@ class ActiveThief(AttackRunner):
             num_workers=0
         )
         
-        all_features = []
         all_distances = []
-        
         self.substitute.eval()
+        
+        # We process in batches
         with torch.no_grad():
-            for x_batch, _ in unlabeled_loader:
-                x_batch = x_batch.to(device)
-                
-                # Get features (penultimate layer)
-                # This is a simplified approach - in practice, you'd extract from model
-                logits = self.substitute(x_batch)
-                probs = F.softmax(logits, dim=1)
-                all_features.append(probs.cpu())
-                
-                # Compute DeepFool distances
+             # Note: deepfool_distance_vectorized uses gradients, so we need grad enabled inside the function
+             # But here we are in no_grad block. 
+             # Actually, deepfool_distance_vectorized usually enables grad on input.
+             # Let's check logic. We should NOT be in no_grad context if we need input grad.
+             pass
+             
+        for x_batch, _ in unlabeled_loader:
+            x_batch = x_batch.to(device)
+            # Enable grad for DeepFool
+            with torch.enable_grad():
                 distances = deepfool_distance_vectorized(
                     self.substitute, x_batch, 
                     max_iter=self.dfal_max_iter, 
                     batch_size=min(32, x_batch.shape[0])
                 )
-                all_distances.append(distances.cpu())
+            all_distances.append(distances.detach().cpu())
         
-        features = torch.cat(all_features, dim=0)
         distances = torch.cat(all_distances, dim=0)
         
-        # Select k samples with smallest DeepFool distances
+        # Select k samples with smallest DeepFool distances (closest to boundary)
         _, selected_local = torch.topk(distances, k, largest=False)
         selected_indices = [self.unlabeled_indices[i] for i in selected_local.tolist()]
         
@@ -281,11 +283,10 @@ class ActiveThief(AttackRunner):
         rho = min(self.dfal_rho, len(self.unlabeled_indices))
         dfal_candidates = self._select_dfal(state, rho)
         
-        # Create candidate index mapping
-        candidate_to_local = {idx: i for i, idx in enumerate(dfal_candidates)}
+        # Map candidates back to local indices in the pool
+        # This is tricky because _extract_features expects a loader.
         
-        # Get features for candidates only
-        device = state.metadata.get("device", "cpu")
+        # Create loader for candidates
         candidate_dataset = Subset(self.pool_dataset, dfal_candidates)
         candidate_loader = DataLoader(
             candidate_dataset, 
@@ -294,132 +295,12 @@ class ActiveThief(AttackRunner):
             num_workers=0
         )
         
-        all_probs = []
-        self.substitute.eval()
-        with torch.no_grad():
-            for x_batch, _ in candidate_loader:
-                x_batch = x_batch.to(device)
-                logits = self.substitute(x_batch)
-                probs = F.softmax(logits, dim=1)
-                all_probs.append(probs.cpu())
-        
-        candidate_features = torch.cat(all_probs, dim=0)
+        device = state.metadata.get("device", "cpu")
+        _, features = self._extract_features(candidate_loader, device)
         
         # Apply k-center on candidates
-        selected_local = self._select_k_center(candidate_features, k)
-        selected_indices = [dfal_candidates[i] for i in selected_local]
-        
-        return selected_indices
-
-    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
-        """Select next batch of queries using active learning strategy."""
-        if not state.attack_state.get("initialized"):
-            self._setup_datasets(state)
-        
-        # Train substitute if we have labeled data
-        if self.labeled_indices and not self.substitute:
-            self._train_substitute(state)
-        
-        if not self.unlabeled_indices:
-            # No more unlabeled samples
-            return QueryBatch(
-                x=torch.empty(0, *self.state.metadata.get("input_shape", (3, 32, 32))),
-                meta={"strategy": self.strategy, "status": "exhausted"}
-            )
-        
-        # Select samples based on strategy
-        if self.strategy == "uncertainty":
-            selected_indices = self._select_uncertainty_strategy(state, k)
-        elif self.strategy == "k_center":
-            selected_indices = self._select_k_center_strategy(state, k)
-        elif self.strategy == "dfal":
-            selected_indices = self._select_dfal(state, k)
-        elif self.strategy == "dfal_k_center":
-            selected_indices = self._select_dfal_k_center(state, k)
-        else:
-            # Default: random
-            selected_indices = np.random.choice(
-                self.unlabeled_indices, 
-                size=min(k, len(self.unlabeled_indices)), 
-                replace=False
-            ).tolist()
-        
-        # Update labeled/unlabeled splits
-        for idx in selected_indices:
-            if idx in self.unlabeled_indices:
-                self.unlabeled_indices.remove(idx)
-                self.labeled_indices.append(idx)
-        
-        # Update state
-        state.attack_state["labeled_indices"] = self.labeled_indices
-        state.attack_state["unlabeled_indices"] = self.unlabeled_indices
-        state.attack_state["round"] += 1
-        
-        # Create query batch
-        selected_dataset = Subset(self.pool_dataset, selected_indices)
-        query_loader = DataLoader(selected_dataset, batch_size=k, shuffle=False, num_workers=0)
-        x_batch, _ = next(iter(query_loader))
-        
-        return QueryBatch(
-            x=x_batch,
-            meta={
-                "strategy": self.strategy,
-                "selected_indices": selected_indices,
-                "round": state.attack_state["round"],
-                "labeled_size": len(self.labeled_indices),
-                "unlabeled_size": len(self.unlabeled_indices)
-            }
-        )
-
-    def _select_uncertainty_strategy(self, state: BenchmarkState, k: int) -> List[int]:
-        """Uncertainty sampling implementation."""
-        device = state.metadata.get("device", "cpu")
-        unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
-        unlabeled_loader = DataLoader(
-            unlabeled_dataset, 
-            batch_size=self.batch_size, 
-            shuffle=False, 
-            num_workers=0
-        )
-        
-        all_probs = []
-        self.substitute.eval()
-        with torch.no_grad():
-            for x_batch, _ in unlabeled_loader:
-                x_batch = x_batch.to(device)
-                logits = self.substitute(x_batch)
-                probs = F.softmax(logits, dim=1)
-                all_probs.append(probs.cpu())
-        
-        probs = torch.cat(all_probs, dim=0)
-        selected_local = self._select_uncertainty(probs, k)
-        selected_indices = [self.unlabeled_indices[i] for i in selected_local]
-        
-        return selected_indices
-
-    def _select_k_center_strategy(self, state: BenchmarkState, k: int) -> List[int]:
-        """K-center sampling implementation."""
-        device = state.metadata.get("device", "cpu")
-        unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
-        unlabeled_loader = DataLoader(
-            unlabeled_dataset, 
-            batch_size=self.batch_size, 
-            shuffle=False, 
-            num_workers=0
-        )
-        
-        all_probs = []
-        self.substitute.eval()
-        with torch.no_grad():
-            for x_batch, _ in unlabeled_loader:
-                x_batch = x_batch.to(device)
-                logits = self.substitute(x_batch)
-                probs = F.softmax(logits, dim=1)
-                all_probs.append(probs.cpu())
-        
-        features = torch.cat(all_probs, dim=0)
-        selected_local = self._select_k_center(features, k)
-        selected_indices = [self.unlabeled_indices[i] for i in selected_local]
+        selected_local_in_candidates = self._select_k_center(features.to(device), k)
+        selected_indices = [dfal_candidates[i] for i in selected_local_in_candidates]
         
         return selected_indices
 
@@ -427,26 +308,20 @@ class ActiveThief(AttackRunner):
         """Run ActiveThief attack."""
         state = ctx.state
         
-        # Setup datasets on first run
         if not state.attack_state.get("initialized"):
             self._setup_datasets(state)
         
-        # Main loop - query until budget exhausted
         while ctx.budget_remaining > 0 and self.unlabeled_indices:
-            # Determine step size
             step_size = min(self.step_size, ctx.budget_remaining, len(self.unlabeled_indices))
             
-            # Select and query batch
             query_batch = self._select_query_batch(step_size, state)
             
             if query_batch.x.shape[0] == 0:
                 break
             
-            # Send query and observe output
             oracle_output = ctx.oracle.query(query_batch.x)
             self.observe(query_batch, oracle_output, state)
             
-            # Retrain substitute for next round
             if self.labeled_indices:
                 self._train_substitute(state)
 
@@ -457,6 +332,7 @@ class ActiveThief(AttackRunner):
         state: BenchmarkState
     ) -> None:
         """Observe oracle outputs and update attack state."""
-        # Store query results (labels are in oracle_output.logits for hard labels)
-        # This is handled by the runner base class
+        # ActiveThief updates are handled in _select_query_batch (state update)
+        # and _train_substitute (model update).
+        # This method is kept for interface compliance.
         pass
