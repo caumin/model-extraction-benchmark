@@ -6,7 +6,24 @@ import yaml
 import tempfile
 
 
-def test_dfme_config_validity():
+def test_dfme_config_validity_and_activethief_lr():
+    """Test DFME config and ActiveThief lr compliance."""
+    test_dfme_config_validity()
+    
+    # Test ActiveThief learning rate compliance
+    activethief_config_path = Path(__file__).parent.parent / "configs" / "activethief_experiment.yaml"
+    if not activethief_config_path.exists():
+        pytest.skip("ActiveThief config file not found")
+    
+    with open(activethief_config_path) as f:
+        config = yaml.safe_load(f)
+    
+    # Check for lr=0.001 violation
+    lr = config.get("attack", {}).get("optimizer", {}).get("lr", None)
+    if lr == 0.001:
+        pytest.fail(f"ActiveThief violates global contract: lr=0.001, should be 0.01")
+    
+    print("✅ ActiveThief lr compliance check passed")
     """Test that DFME config matches data_free mode."""
     # Load DFME config
     dfme_config_path = Path(__file__).parent.parent / "configs" / "dfme_experiment.yaml"

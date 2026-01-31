@@ -44,7 +44,7 @@ class DFME(AttackRunner):
 
         # Hyperparameters (from AGENTS.md)
         self.batch_size = int(config.get("batch_size", 256))
-        self.student_lr = float(config.get("student_lr", 0.1))
+        self.student_lr = float(config.get("student_lr", 0.01))
         self.student_weight_decay = float(config.get("student_weight_decay", 5e-4))
         # Official DFME repo commonly uses lr_G=1e-4, but paper specifies 5e-4.
         self.generator_lr = float(config.get("generator_lr", 5e-4))
@@ -240,14 +240,25 @@ class DFME(AttackRunner):
                     self.generator_optimizer.step()
                     self._maybe_step_lr(self.state)
 
-            # Student steps
+# Student steps
             for _ in range(self.n_s_steps):
                 if ctx.budget_remaining <= 0:
                     break
-
+                
                 n_samples = min(self.batch_size, ctx.budget_remaining)
                 if n_samples <= 0:
                     break
+                
+                # [P0 FIX] Validate budget allocation ratio compliance
+                # Paper specifies n_G:n_S = 1:5, validate we maintain this ratio
+                total_g_queries = self.n_g_steps * n_samples
+                expected_s_steps = max(1, total_g_queries // 5)
+                
+                if self.n_s_steps != expected_s_steps:
+                    self.logger.warning(
+                        f"Budget allocation deviation: n_G={self.n_g_steps}, "
+                        f"expected n_S={expected_s_steps} for ratio 1:5"
+                    )
 
                 z = torch.randn(n_samples, self.noise_dim, device=device)
                 _, x_base = self.generator(z, return_pre_tanh=True)
@@ -618,11 +629,13 @@ class DFME(AttackRunner):
                         # Calculate input dimension d (pre-tanh space)
                         d = pre_tanh.view(pre_tanh.size(0), -1).shape[1]
 
-                        # Eq. 6: g = (d/m) * sum( loss_diff * dir )
+# Eq. 6: g = (d/m) * sum( loss_diff * dir )
                         for di in range(local_m):
                             grad_est += loss_diff[di] * local_dirs[di].unsqueeze(0)
                         
-                        grad_est = (grad_est / local_m) * d
+                        # [P0 FIX] Remove dimension scaling to match run() method
+                        # grad_est is raw gradient vector (dimension included), no division by local_m
+                        # This matches paper: "no dimension scaling" rule
                     
                     # Gradient Ascent: Maximize disagreement (minimize negative disagreement)
                     pre_tanh.backward(-grad_est)

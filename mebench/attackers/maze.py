@@ -171,6 +171,9 @@ class MAZE(AttackRunner):
                     state.attack_state["current_z"] = z.cpu()
                     with torch.no_grad():
                         x = self.generator(z)
+                        # Transform from [-1, 1] to [0, 1] range
+                        x = (x + 1.0) / 2.0
+                        x = torch.clamp(x, 0.0, 1.0)
                     type_str = "G_BASE"
                 else:
                     # Perturbation batch
@@ -183,7 +186,10 @@ class MAZE(AttackRunner):
                     norm = dirs.view(batch_size, -1).norm(dim=1, keepdim=True) + 1e-12
                     dirs = dirs / norm.view(batch_size, 1, 1, 1)
                     
-                    x = x_base + self.grad_approx_epsilon * dirs
+                    x_pert = x_base + self.grad_approx_epsilon * dirs
+                    # Transform from [-1, 1] to [0, 1] range and clamp
+                    x = (x_pert + 1.0) / 2.0
+                    x = torch.clamp(x, 0.0, 1.0)
                     type_str = "G_PERT"
                     
                 meta = {
@@ -199,6 +205,9 @@ class MAZE(AttackRunner):
                 z = torch.randn(batch_size, self.noise_dim, device=device)
                 with torch.no_grad():
                     x = self.generator(z)
+                    # Transform from [-1, 1] to [0, 1] range
+                    x = (x + 1.0) / 2.0
+                    x = torch.clamp(x, 0.0, 1.0)
                 
                 meta = {
                     "type": "C_BASE",
@@ -220,6 +229,9 @@ class MAZE(AttackRunner):
             # Fallback: return noise to fill budget and avoid hanging
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             x = torch.randn(int(k), *input_shape)
+            # Transform standard normal to [0, 1] range
+            x = torch.sigmoid(x)  # Maps to (0, 1)
+            x = torch.clamp(x, 0.0, 1.0)
             return QueryBatch(x=x, meta={"type": "NOISE"})
 
         x_final = torch.cat(x_all, dim=0)

@@ -94,26 +94,36 @@ class ResidualBlock(nn.Module):
 class LeNet(nn.Module):
     """Simple LeNet for small datasets."""
 
-    def __init__(self, num_classes: int, input_channels: int = 1):
+    def __init__(
+        self, 
+        num_classes: int, 
+        input_channels: int = 1,
+        dropout_prob: float = 0.0,
+    ):
         """Initialize LeNet.
 
         Args:
             num_classes: Number of output classes
             input_channels: Number of input channels
+            dropout_prob: Dropout probability
         """
         super().__init__()
+        self.dropout_prob = dropout_prob
 
         self.features = nn.Sequential(
             nn.Conv2d(input_channels, 6, 5),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity(),
             nn.MaxPool2d(2),
             nn.Conv2d(6, 16, 5),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity(),
             nn.MaxPool2d(2),
         )
 
         self.classifier = nn.Sequential(
             nn.Linear(16 * 5 * 5, 120),
+            nn.Dropout(dropout_prob) if dropout_prob > 0 else nn.Identity(),
             nn.ReLU(inplace=True),
             nn.Linear(120, 84),
             nn.ReLU(inplace=True),
@@ -134,23 +144,29 @@ class LeNetMNIST(nn.Module):
     28 -> 24 -> pool -> 12 -> 8 -> pool -> 4, so flatten dim is 16*4*4.
     """
 
-    def __init__(self, num_classes: int, input_channels: int = 1):
+    def __init__(
+        self, 
+        num_classes: int, 
+        input_channels: int = 1,
+        dropout_prob: float = 0.0,
+    ):
         super().__init__()
+        self.dropout_prob = dropout_prob
 
         self.features = nn.Sequential(
             nn.Conv2d(input_channels, 6, 5),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob),  # [P0 FIX] Add dropout for ActiveThief
+            nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity(),  # [P0 FIX] Add dropout for ActiveThief
             nn.MaxPool2d(2),
             nn.Conv2d(6, 16, 5),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob),  # [P0 FIX] Add dropout for ActiveThief
+            nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity(),  # [P0 FIX] Add dropout for ActiveThief
             nn.MaxPool2d(2),
         )
 
         self.classifier = nn.Sequential(
             nn.Linear(16 * 4 * 4, 120),
-            nn.Dropout2d(dropout_prob),  # [P0 FIX] Add dropout for ActiveThief
+            nn.Dropout(dropout_prob) if dropout_prob > 0 else nn.Identity(),  # [P0 FIX] Add dropout for ActiveThief
             nn.ReLU(inplace=True),
             nn.Linear(120, 84),
             nn.ReLU(inplace=True),
