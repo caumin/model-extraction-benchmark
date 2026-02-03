@@ -16,6 +16,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.training import SubstituteTrainer, TrainRequest
 
 
 class FeatureFool:
@@ -599,9 +600,14 @@ class CloudLeak(AttackRunner):
         if len(dataset) < 2:
             return
 
+        sub_config = state.metadata.get("substitute_config", {})
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
         train_loader = torch.utils.data.DataLoader(
             dataset,
-            batch_size=self.batch_size,
+            batch_size=train_batch_size,
             shuffle=True,
             num_workers=0,
         )
@@ -616,51 +622,14 @@ class CloudLeak(AttackRunner):
             for param in substitute.parameters():
                 param.requires_grad = True
 
-        optimizer = torch.optim.SGD(
-            filter(lambda p: p.requires_grad, substitute.parameters()),
-            lr=self.lr,
-            momentum=self.momentum,
-            weight_decay=self.weight_decay,
+        trainer = SubstituteTrainer(sub_config, device=device, logger=self.logger)
+        request = TrainRequest(
+            model=substitute,
+            train_loader=train_loader,
+            loss_fn=self._compute_training_loss,
+            load_best=True,
         )
-
-        best_loss = float("inf")
-        patience_counter = 0
-        best_state = None
-
-        for _ in tqdm(range(self.max_epochs), desc="[CloudLeak] Training Substitute", leave=False):
-            substitute.train()
-            epoch_loss = 0.0
-            batch_count = 0
-            for x_batch, y_batch in train_loader:
-                x_batch = x_batch.to(device)
-                y_batch = y_batch.to(device)
-
-                optimizer.zero_grad()
-                outputs = substitute(x_batch)
-
-                loss = self._compute_training_loss(outputs, y_batch)
-                loss.backward()
-                optimizer.step()
-
-                epoch_loss += float(loss.item())
-                batch_count += 1
-
-            if batch_count == 0:
-                break
-
-            avg_loss = epoch_loss / batch_count
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                patience_counter = 0
-                best_state = {k: v.cpu() for k, v in substitute.state_dict().items()}
-            else:
-                patience_counter += 1
-
-            if patience_counter >= self.patience:
-                break
-
-        if best_state is not None:
-            substitute.load_state_dict(best_state)
+        trainer.train(request)
 
         state.attack_state["substitute"] = substitute
         self._evaluate_current_substitute(substitute, device)

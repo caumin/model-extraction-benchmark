@@ -13,6 +13,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.training import SubstituteTrainer, TrainRequest
 
 
 class CopycatCNN(AttackRunner):
@@ -232,16 +233,19 @@ class CopycatCNN(AttackRunner):
                 return x, self.y[base_idx]
 
         dataset = OfflineAugmentedTensorDataset(x_train, y_train, augs, self.augmentation_multiplier)
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
         loader = torch.utils.data.DataLoader(
             dataset,
-            batch_size=self.batch_size,
+            batch_size=train_batch_size,
             shuffle=True,
-            num_workers=4,
+            num_workers=0,
             pin_memory=True,
         )
 
         sub_config = state.metadata.get("substitute_config", {})
-        opt_params = sub_config.get("optimizer", {})
         
         device = state.metadata.get("device", "cpu")
         if self.substitute is None:
@@ -254,14 +258,6 @@ class CopycatCNN(AttackRunner):
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
             ).to(device)
-            self.substitute_optimizer = torch.optim.SGD(
-                self.substitute.parameters(),
-                lr=float(opt_params.get("lr", self.substitute_lr)),
-                momentum=float(opt_params.get("momentum", self.substitute_momentum)),
-                weight_decay=float(opt_params.get("weight_decay", self.substitute_weight_decay)),
-            )
-
-        self.substitute.train()
         epochs = max(1, int(self.substitute_epochs))
         
         victim_config = state.metadata.get("victim_config", {})
@@ -271,40 +267,36 @@ class CopycatCNN(AttackRunner):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
         
-        epoch_pbar = tqdm(range(epochs), desc="[CopycatCNN] Training Substitute", leave=False)
-        for epoch in epoch_pbar:
-            # Apply step-down LR schedule as per paper
-            current_lr = self._get_current_lr(epoch, epochs)
-            for param_group in self.substitute_optimizer.param_groups:
-                param_group['lr'] = current_lr
-            
-            epoch_loss = 0.0
-            for x_batch, y_batch in loader:
-                x_batch = x_batch.to(device)
-                # Normalize images for substitute
-                x_batch = (x_batch - norm_mean) / norm_std
-                
-                y_batch = y_batch.long().to(device)
-                self.substitute_optimizer.zero_grad()
-                logits = self.substitute(x_batch)
-                loss = F.cross_entropy(logits, y_batch)
-                loss.backward()
-                self.substitute_optimizer.step()
-                epoch_loss += loss.item()
-            epoch_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}", "LR": f"{current_lr:.4e}"})
+        def preprocess_fn(x_batch: torch.Tensor) -> torch.Tensor:
+            return (x_batch - norm_mean) / norm_std
+
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            return F.cross_entropy(outputs, targets.long())
+
+        train_config = dict(sub_config)
+        train_config["max_epochs"] = int(sub_config.get("max_epochs", epochs))
+        trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
+        request = TrainRequest(
+            model=self.substitute,
+            train_loader=loader,
+            loss_fn=loss_fn,
+            preprocess_fn=preprocess_fn,
+            load_best=True,
+        )
+        trainer.train(request)
 
         state.attack_state["substitute"] = self.substitute
         self.logger.info("CopycatCNN substitute trained.")
         self._evaluate_current_substitute(self.substitute, device)
 
     def _get_current_lr(self, epoch: int, total_epochs: int) -> float:
-        """Apply step-down LR schedule as per CopycatCNN paper."""
+        """Deprecated: legacy schedule retained for reference only."""
         base_lr = self.substitute_lr
-        
+
         if epoch >= int(total_epochs * 0.9):
             return base_lr * 0.001
-        elif epoch >= int(total_epochs * 0.6):
-            return base_lr * 0.01  
-        elif epoch >= int(total_epochs * 0.3):
+        if epoch >= int(total_epochs * 0.6):
+            return base_lr * 0.01
+        if epoch >= int(total_epochs * 0.3):
             return base_lr * 0.1
         return base_lr

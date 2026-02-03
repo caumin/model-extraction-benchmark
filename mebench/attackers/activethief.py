@@ -16,6 +16,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.training import SubstituteTrainer, TrainRequest
 
 
 class ActiveThief(AttackRunner):
@@ -159,13 +160,7 @@ class ActiveThief(AttackRunner):
         # Create fresh model (from scratch)
         self.substitute = self._create_substitute(input_shape).to(device)
         
-        # Setup optimizer from substitute config
         sub_config = self.state.metadata.get("substitute_config", {})
-        opt_config = sub_config.get("optimizer", {})
-        self.substitute_optimizer = self._build_optimizer(
-            self.substitute.parameters(),
-            opt_config,
-        )
         
         # Create custom dataset that uses observed oracle labels
         class LabeledDataset:
@@ -208,60 +203,29 @@ class ActiveThief(AttackRunner):
             self.num_classes,
             self.logger,
         )
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
         labeled_loader = DataLoader(
-            labeled_dataset, 
-            batch_size=self.batch_size, 
-            shuffle=True, 
-            num_workers=4
+            labeled_dataset,
+            batch_size=train_batch_size,
+            shuffle=True,
+            num_workers=0,
         )
         
-        # Training parameters
-        max_epochs = int(sub_config.get("max_epochs", 1000))
-        patience = int(sub_config.get("patience", 100))
-        
-        # Train
-        self.substitute.train()
-        best_loss = float('inf')
-        patience_counter = 0
-        
-        for epoch in range(max_epochs):
-            epoch_loss = 0.0
-            batch_count = 0
-            for x_batch, y_batch in labeled_loader:
-                try:
-                    x_batch = x_batch.to(device)
-                    y_batch = y_batch.to(device)
-                    
-                    self.substitute_optimizer.zero_grad()
-                    logits = self.substitute(x_batch)
-                    
-                    # Use cross-entropy loss
-                    loss = F.cross_entropy(logits, y_batch)
-                    loss.backward()
-                    self.substitute_optimizer.step()
-                    
-                    epoch_loss += loss.item()
-                    batch_count += 1
-                except ValueError as e:
-                    # Skip samples without oracle labels
-                    continue
-            
-            if batch_count == 0:
-                self.logger.warning(
-                    "No valid labeled samples available for training in epoch %s",
-                    epoch,
-                )
-                break
-            
-            # Early stopping
-            avg_loss = epoch_loss / len(labeled_loader)
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    break
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            return F.cross_entropy(outputs, targets.long())
+
+        trainer = SubstituteTrainer(sub_config, device=device, logger=self.logger)
+        request = TrainRequest(
+            model=self.substitute,
+            train_loader=labeled_loader,
+            loss_fn=loss_fn,
+            skip_on_error=True,
+            load_best=True,
+        )
+        trainer.train(request)
 
     def _select_uncertainty(self, probs: torch.Tensor, k: int) -> List[int]:
         """Select samples with highest entropy.

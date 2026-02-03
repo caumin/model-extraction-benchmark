@@ -17,6 +17,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader, get_test_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.eval.metrics import evaluate_substitute
 
 
@@ -746,27 +747,32 @@ class BlackboxDissector(AttackRunner):
             generator=torch.Generator().manual_seed(42),
         )
 
+        sub_config = state.metadata.get("substitute_config", {})
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
         train_loader = torch.utils.data.DataLoader(
             train_subset,
-            batch_size=self.batch_size,
+            batch_size=train_batch_size,
             shuffle=True,
-            num_workers=4,
+            num_workers=0,
             drop_last=False,
         )
         val_loader = torch.utils.data.DataLoader(
             val_subset,
-            batch_size=self.batch_size,
+            batch_size=train_batch_size,
             shuffle=False,
-            num_workers=4,
+            num_workers=0,
         )
 
         # Unlabeled loader (cycle it)
         if len(unlabeled_dataset) > 0:
             unlabeled_loader = torch.utils.data.DataLoader(
                 unlabeled_dataset,
-                batch_size=self.batch_size,
+                batch_size=train_batch_size,
                 shuffle=True,
-                num_workers=4,
+                num_workers=0,
                 drop_last=True, # Drop last to avoid tiny batches
             )
             unlabeled_iter = iter(unlabeled_loader)
@@ -788,9 +794,6 @@ class BlackboxDissector(AttackRunner):
                 p.requires_grad_(False)
 
         # Initialize student model FROM SCRATCH each iteration
-        sub_config = state.metadata.get("substitute_config", {})
-        opt_params = sub_config.get("optimizer", {})
-        
         width_mult = int(sub_config.get("width_mult", 1))
         dropout_prob = float(sub_config.get("dropout_prob", 0.0))
         model = create_substitute(
@@ -801,25 +804,10 @@ class BlackboxDissector(AttackRunner):
             dropout_prob=dropout_prob,
         ).to(device)
 
-        # Optimizer: SGD as in paper training process
-        import torch.optim as optim
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=float(opt_params.get("lr", self.lr)),
-            momentum=0.9,
-            weight_decay=5e-4,
-        )
-
         def soft_cross_entropy(logits: torch.Tensor, soft_targets: torch.Tensor) -> torch.Tensor:
             log_probs = F.log_softmax(logits, dim=1)
             return -(soft_targets * log_probs).sum(dim=1)
 
-        # Early stopping
-        best_f1 = 0.0
-        patience_counter = 0
-        best_model_state = None
-
-        # Training loop
         victim_config = state.metadata.get("victim_config", {})
         normalization = victim_config.get("normalization")
         if normalization is None:
@@ -828,108 +816,71 @@ class BlackboxDissector(AttackRunner):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
 
-        epoch_pbar = tqdm(range(self.max_epochs), desc="[BlackboxDissector] Training Substitute", leave=False)
-        for epoch in epoch_pbar:
-            model.train()
-            train_loss = 0.0
-
-            for x_batch, y_batch in train_loader:
-                if unlabeled_desc is not None:
-                    unlabeled_desc.update(1)
-                x_batch = x_batch.to(device)
-                y_batch = y_batch.to(device)
-                
-                # Supervised Loss on Labeled Data
-                # Normalize images for substitute
-                x_norm = (x_batch - norm_mean) / norm_std
-                
-                outputs = model(x_norm)
-                y_labels = y_batch
-                loss_sup = F.cross_entropy(outputs, y_labels.long())
-                
-                # Self-KD Loss on Unlabeled Data
-                loss_kd = torch.tensor(0.0, device=device)
-                
-                if unlabeled_loader is not None and teacher is not None:
-                    try:
-                        x_unlab, _ = next(unlabeled_iter)
-                    except StopIteration:
-                        unlabeled_iter = iter(unlabeled_loader)
-                        x_unlab, _ = next(unlabeled_iter)
-                    
-                    if len(x_unlab) > 1:
-                        # 1. Generate pseudo-labels using erased variants (BATCH OPTIMIZED)
-                        x_unlab = x_unlab.to(device)
-                        
-                        # Generate B*N variants in one shot
-                        x_variants = random_erase_batch(
-                            x_unlab,
-                            n=self.n_variants,
-                            sl=self.sl, sh=self.sh, r1=self.r1, r2=self.r2,
-                            fill_min=self.fill_min, fill_max=self.fill_max
-                        )
-                        
-                        x_variants_norm = (x_variants - norm_mean) / norm_std
-                        
-                        with torch.no_grad():
-                            logits_variants = teacher(x_variants_norm)
-                            probs_variants = F.softmax(logits_variants, dim=1)
-                            
-                            # Reshape to [B_u, N, NumClasses]
-                            probs_variants = probs_variants.view(len(x_unlab), self.n_variants, num_classes)
-                            
-                            # Average over variants to get pseudo-label
-                            pseudo_labels = probs_variants.mean(dim=1)
-                        
-                        # 2. Consistency Loss
-
-                        # Loss = CE(Model(Original), PseudoLabel)
-                        x_unlab_norm = (x_unlab.to(device) - norm_mean) / norm_std
-                        logits_unlab = model(x_unlab_norm)
-                        
-                        # Use Soft Cross Entropy
-                        loss_kd = soft_cross_entropy(logits_unlab, pseudo_labels).mean()
-
-                # Eq.(7) literal: supervised term + pseudo-label term (no extra weighting).
-                loss = loss_sup + loss_kd
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                train_loss += loss.item()
-
-            # Validation
-            val_f1 = self._compute_f1(model, val_loader, device, norm_mean, norm_std)
-            epoch_pbar.set_postfix({"Loss": f"{train_loss/len(train_loader):.4f}", "F1": f"{val_f1:.4f}"})
-
+        def step_fn(model_local: nn.Module, x_batch: torch.Tensor, y_batch: torch.Tensor) -> torch.Tensor:
             if unlabeled_desc is not None:
-                unlabeled_desc.reset()
+                unlabeled_desc.update(1)
 
-            if val_f1 > best_f1:
-                best_f1 = val_f1
-                patience_counter = 0
-                best_model_state = {k: v.cpu() for k, v in model.state_dict().items()}
-            else:
-                patience_counter += 1
+            x_norm = (x_batch - norm_mean) / norm_std
+            outputs = model_local(x_norm)
+            loss_sup = F.cross_entropy(outputs, y_batch.long())
 
-            # if epoch % 10 == 0:
-            #     print(
-            #         f"Dissector Epoch {epoch}: Loss: {train_loss/len(train_loader):.4f}, Val F1: {val_f1:.4f}"
-            #     )
+            loss_kd = torch.tensor(0.0, device=device)
+            if unlabeled_loader is not None and teacher is not None:
+                try:
+                    x_unlab, _ = next(unlabeled_iter)
+                except StopIteration:
+                    unlabeled_iter = iter(unlabeled_loader)
+                    x_unlab, _ = next(unlabeled_iter)
 
-            # Early stopping
-            if patience_counter >= self.patience:
-                self.logger.info(f"Dissector Early stopping at epoch {epoch}")
-                break
+                if len(x_unlab) > 1:
+                    x_unlab = x_unlab.to(device)
+                    x_variants = random_erase_batch(
+                        x_unlab,
+                        n=self.n_variants,
+                        sl=self.sl,
+                        sh=self.sh,
+                        r1=self.r1,
+                        r2=self.r2,
+                        fill_min=self.fill_min,
+                        fill_max=self.fill_max,
+                    )
+                    x_variants_norm = (x_variants - norm_mean) / norm_std
+                    with torch.no_grad():
+                        logits_variants = teacher(x_variants_norm)
+                        probs_variants = F.softmax(logits_variants, dim=1)
+                        probs_variants = probs_variants.view(len(x_unlab), self.n_variants, num_classes)
+                        pseudo_labels = probs_variants.mean(dim=1)
 
-        # Load best model
-        if best_model_state is not None:
-            model.load_state_dict(best_model_state)
+                    x_unlab_norm = (x_unlab.to(device) - norm_mean) / norm_std
+                    logits_unlab = model_local(x_unlab_norm)
+                    loss_kd = soft_cross_entropy(logits_unlab, pseudo_labels).mean()
+
+            return loss_sup + loss_kd
+
+        def eval_fn(model_local: nn.Module, loader: DataLoader) -> float:
+            return self._compute_f1(model_local, loader, device, norm_mean, norm_std)
+
+        train_config = dict(sub_config)
+        train_config["max_epochs"] = int(sub_config.get("max_epochs", self.max_epochs))
+        train_config["patience"] = int(sub_config.get("patience", self.patience))
+        trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
+        request = TrainRequest(
+            model=model,
+            train_loader=train_loader,
+            step_fn=step_fn,
+            val_loader=val_loader,
+            eval_fn=eval_fn,
+            early_stop_mode="max",
+            load_best=True,
+        )
+        result = trainer.train(request)
 
         # Store in state
         state.attack_state["substitute"] = model
-        self.logger.info(f"Dissector substitute trained. Best Val F1: {best_f1:.4f}")
+        if result.best_value is not None:
+            self.logger.info("Dissector substitute trained. Best Val F1: %.4f", result.best_value)
+        else:
+            self.logger.info("Dissector substitute trained.")
         if unlabeled_desc is not None:
             unlabeled_desc.close()
 

@@ -16,6 +16,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.models.inversion import InversionGenerator
 
 
@@ -212,7 +213,12 @@ class InverseNet(AttackRunner):
         x_all = torch.cat(x_list, dim=0)
         y_all = torch.cat(y_list, dim=0)
         dataset = torch.utils.data.TensorDataset(x_all, y_all)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
+        sub_config = state.metadata.get("substitute_config", {})
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
+        loader = DataLoader(dataset, batch_size=train_batch_size, shuffle=True, num_workers=0)
 
         device = state.metadata.get("device", "cpu")
         self.inversion_model.train()
@@ -337,12 +343,10 @@ class InverseNet(AttackRunner):
                 return self.x[idx], self.y[idx]
 
         dataset = QueryDataset(x_all, y_all)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=0)
 
         device = state.metadata.get("device", "cpu")
         if self.substitute is None:
-            sub_config = state.metadata.get("substitute_config", {})
-            opt_params = sub_config.get("optimizer", {})
             arch = sub_config.get("arch") or self.config.get("substitute_arch", "resnet18")
             width_mult = int(sub_config.get("width_mult", 1))
             dropout_prob = float(sub_config.get("dropout_prob", 0.0))
@@ -353,29 +357,22 @@ class InverseNet(AttackRunner):
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
             ).to(device)
-            self.substitute_optimizer = torch.optim.SGD(
-                self.substitute.parameters(),
-                lr=float(opt_params.get("lr", self.substitute_lr)),
-                momentum=float(opt_params.get("momentum", 0.9)),
-                weight_decay=float(opt_params.get("weight_decay", 0.0)),
-            )
-
-        self.substitute.train()
         epochs = max(1, int(self.substitute_epochs))
-        sub_pbar = tqdm(range(epochs), desc="[InverseNet] Training Substitute", leave=False)
-        for _ in sub_pbar:
-            epoch_loss = 0.0
-            for x_batch, y_batch in loader:
-                x_batch = x_batch.to(device)
-                y_batch = y_batch.to(device)
-                self.substitute_optimizer.zero_grad()
-                logits = self.substitute(x_batch)
-                log_probs = F.log_softmax(logits, dim=1)
-                loss = F.kl_div(log_probs, y_batch, reduction="batchmean")
-                loss.backward()
-                self.substitute_optimizer.step()
-                epoch_loss += loss.item()
-            sub_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}"})
+
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            log_probs = F.log_softmax(outputs, dim=1)
+            return F.kl_div(log_probs, targets, reduction="batchmean")
+
+        train_config = dict(sub_config)
+        train_config["max_epochs"] = int(sub_config.get("max_epochs", epochs))
+        trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
+        request = TrainRequest(
+            model=self.substitute,
+            train_loader=loader,
+            loss_fn=loss_fn,
+            load_best=True,
+        )
+        trainer.train(request)
 
         state.attack_state["substitute"] = self.substitute
         self.logger.info("InverseNet substitute trained from queries.")

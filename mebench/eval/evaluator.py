@@ -6,6 +6,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from mebench.models.substitute_factory import create_substitute
 from mebench.eval.metrics import evaluate_substitute
+from mebench.training import SubstituteTrainer, TrainRequest
 
 
 class Evaluator:
@@ -85,100 +86,46 @@ class Evaluator:
             train_loader: Collected (x, y_oracle) data
             checkpoint_budget: Budget at this checkpoint
         """
-        # 1. Optimizer and Scheduler
-        opt_config = self.config["substitute"]["optimizer"]
-        patience = self.config["substitute"].get("patience", 100)
-
-        import torch.optim as optim
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=float(opt_config.get("lr", 0.01)),
-            momentum=float(opt_config.get("momentum", 0.9)),
-            weight_decay=float(opt_config.get("weight_decay", 5e-4)),
-        )
-
         # Get training steps: S(B) = ceil(0.2 × B)
         steps_coeff = self.config["substitute"]["trackA"]["steps_coeff_c"]
         num_steps = int(steps_coeff * checkpoint_budget + 0.9999)
 
-        # 2. Loss function
         output_mode = self.config["victim"]["output_mode"]
 
-        if output_mode == "soft_prob":
-            criterion = nn.KLDivLoss(reduction="batchmean")
-        else:
-            criterion = nn.CrossEntropyLoss()
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if output_mode == "soft_prob":
+                targets = targets.to(self.device)
+                targets = torch.clamp(targets, min=1e-10)
+                targets = targets / targets.sum(dim=1, keepdim=True)
+                log_outputs = torch.log_softmax(outputs, dim=1)
+                return nn.KLDivLoss(reduction="batchmean")(log_outputs, targets)
 
-        # 3. Validation set (20% of collected data)
-        # For small budgets, use full data for training
+            targets = targets.long().to(self.device)
+            return nn.CrossEntropyLoss()(outputs, targets)
+
         val_loader = train_loader
+        trainer_config = dict(self.config["substitute"])
+        if "grad_clip" not in trainer_config:
+            trainer_config["grad_clip"] = 1.0
 
-        # 4. Training loop
-        model.train()
-        current_step = 0
-        best_f1 = -1.0
-        best_model_state = None
-        patience_counter = 0
-        done = False
+        trainer = SubstituteTrainer(trainer_config, device=self.device)
+        request = TrainRequest(
+            model=model,
+            train_loader=train_loader,
+            loss_fn=loss_fn,
+            val_loader=val_loader,
+            eval_fn=lambda m, v: self._compute_f1(m, v, output_mode),
+            early_stop_mode="max",
+            max_steps=num_steps,
+            validate_every=100,
+            load_best=True,
+        )
+        result = trainer.train(request)
 
-        while not done and current_step < num_steps:
-            for x_batch, y_batch in train_loader:
-                if current_step >= num_steps:
-                    break
-
-                x_batch = x_batch.to(self.device)
-                # Contract: Inputs are already in [0, 1].
-
-                # Handle output modes
-                if output_mode == "soft_prob":
-                    # Soft labels: convert to log probs for KL loss
-                    y_batch = y_batch.to(self.device)
-                    # Clip probabilities to avoid log(0) and normalize
-                    y_batch = torch.clamp(y_batch, min=1e-10)
-                    y_batch = y_batch / y_batch.sum(dim=1, keepdim=True)
-                    
-                    outputs = model(x_batch)
-                    # Ensure outputs are log probabilities
-                    log_outputs = torch.log_softmax(outputs, dim=1)
-                    loss = criterion(log_outputs, y_batch)
-                else:
-                    # Hard labels: standard cross entropy
-                    y_batch = y_batch.long().to(self.device)
-                    outputs = model(x_batch)
-                    loss = criterion(outputs, y_batch)
-
-                optimizer.zero_grad()
-                loss.backward()
-                # Gradient clipping to prevent NaNs
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-
-                current_step += 1
-
-                # Validate every 100 steps or at end
-                if current_step % 100 == 0 or current_step == num_steps:
-                    val_f1 = self._compute_f1(model, val_loader, output_mode)
-
-                    if val_f1 > best_f1:
-                        best_f1 = val_f1
-                        patience_counter = 0
-                        best_model_state = {
-                            k: v.cpu().clone() for k, v in model.state_dict().items()
-                        }
-                    else:
-                        patience_counter += 1
-
-                    if patience_counter >= patience:
-                        print(f"Early stopping at step {current_step}")
-                        done = True
-                        break
-
-        # Load best model state
-        if best_model_state is not None:
-            model.load_state_dict(best_model_state)
-            print(f"Track A training complete. Best F1: {best_f1:.4f}")
+        if result.best_value is not None:
+            print(f"Track A training complete. Best F1: {result.best_value:.4f}")
         else:
-            print(f"Track A training complete. No validation improvement.")
+            print("Track A training complete. No validation improvement.")
 
     def _compute_f1(self, model: nn.Module, val_loader: DataLoader, output_mode: str) -> float:
         """Compute F1 score on validation set."""

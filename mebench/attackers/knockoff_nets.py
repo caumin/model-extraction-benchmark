@@ -18,6 +18,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.training import SubstituteTrainer, TrainRequest
 
 
 class KnockoffNets(AttackRunner):
@@ -434,11 +435,15 @@ class KnockoffNets(AttackRunner):
             def __getitem__(self, idx: int):
                 return self.x[idx], self.y[idx]
 
+        sub_config = state.metadata.get("substitute_config", {})
         dataset = QueryDataset(x_all, y_all)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
+        loader = DataLoader(dataset, batch_size=train_batch_size, shuffle=True, num_workers=0)
 
         device = state.metadata.get("device", "cpu")
-        sub_config = state.metadata.get("substitute_config", {})
         opt_params = sub_config.get("optimizer", {})
         
         model = None
@@ -455,41 +460,32 @@ class KnockoffNets(AttackRunner):
                 dropout_prob=dropout_prob,
             ).to(device)
 
-        optimizer = self._build_optimizer(model.parameters(), opt_params)
         output_mode = self.config.get("output_mode", "soft_prob")
-        if output_mode == "soft_prob":
-            criterion = nn.KLDivLoss(reduction="batchmean")
-        else:
-            criterion = nn.CrossEntropyLoss()
-
-        model.train()
         norm_mean, norm_std = self._get_normalization(state, device)
 
-        epoch_pbar = tqdm(range(epochs), desc="[KnockoffNets] Training Substitute", leave=False)
-        for _ in epoch_pbar:
-            epoch_loss = 0.0
-            for x_batch, y_batch in loader:
-                x_batch = x_batch.to(device)
-                # Normalize images for substitute
-                x_batch = (x_batch - norm_mean) / norm_std
-                
-                optimizer.zero_grad()
-                if output_mode == "soft_prob":
-                    y_batch = y_batch.to(device)
-                    # Clip probabilities to avoid log(0)
-                    y_batch = torch.clamp(y_batch, min=1e-10)
-                    y_batch = y_batch / y_batch.sum(dim=1, keepdim=True)
-                    logits = model(x_batch)
-                    log_probs = torch.log_softmax(logits, dim=1)
-                    loss = criterion(log_probs, y_batch)
-                else:
-                    y_batch = y_batch.long().to(device)
-                    logits = model(x_batch)
-                    loss = criterion(logits, y_batch)
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-            epoch_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}"})
+        def preprocess_fn(x_batch: torch.Tensor) -> torch.Tensor:
+            return (x_batch - norm_mean) / norm_std
+
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if output_mode == "soft_prob":
+                targets = torch.clamp(targets, min=1e-10)
+                targets = targets / targets.sum(dim=1, keepdim=True)
+                log_probs = torch.log_softmax(outputs, dim=1)
+                return nn.KLDivLoss(reduction="batchmean")(log_probs, targets)
+
+            return nn.CrossEntropyLoss()(outputs, targets.long())
+
+        train_config = dict(sub_config)
+        train_config["max_epochs"] = int(sub_config.get("max_epochs", epochs))
+        trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
+        request = TrainRequest(
+            model=model,
+            train_loader=loader,
+            loss_fn=loss_fn,
+            preprocess_fn=preprocess_fn,
+            load_best=True,
+        )
+        trainer.train(request)
 
         state.attack_state[store_key] = model
 
