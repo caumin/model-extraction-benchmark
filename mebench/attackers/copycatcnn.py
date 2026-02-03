@@ -45,7 +45,7 @@ class CopycatCNN(AttackRunner):
         self._initialize_state(state)
         
         # [P0 FIX] Validate NPDD constraint in initialization
-        dataset_config = self._get_dataset_config(state)
+        dataset_config = self._get_pool_dataset_config(state)
         if dataset_config.get("data_mode", "").lower() in ["cifar10", "svhn", "mnist", "fashionmnist"]:
             raise ValueError(
                 f"CopycatCNN requires NPDD dataset, but '{dataset_config.get('data_mode')}' is problem-domain. "
@@ -236,7 +236,8 @@ class CopycatCNN(AttackRunner):
             dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=0,
+            num_workers=4,
+            pin_memory=True,
         )
 
         sub_config = state.metadata.get("substitute_config", {})
@@ -244,10 +245,14 @@ class CopycatCNN(AttackRunner):
         
         device = state.metadata.get("device", "cpu")
         if self.substitute is None:
+            width_mult = int(sub_config.get("width_mult", 1))
+            dropout_prob = float(sub_config.get("dropout_prob", 0.0))
             self.substitute = create_substitute(
                 arch=sub_config.get("arch", "resnet18"),
                 num_classes=self.num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+                width_mult=width_mult,
+                dropout_prob=dropout_prob,
             ).to(device)
             self.substitute_optimizer = torch.optim.SGD(
                 self.substitute.parameters(),

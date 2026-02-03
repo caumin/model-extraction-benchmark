@@ -41,9 +41,20 @@ class DFME(AttackRunner):
         self.generator = DFMEGenerator(noise_dim=100, output_channels=input_shape[0], output_size=input_shape[1]).to(device)
         self.g_opt = optim.Adam(self.generator.parameters(), lr=5e-4)
         
-        # Student: ResNet-18-8x per Section 4.1
-        self.student = create_substitute(arch="resnet18-8x", num_classes=state.metadata.get("num_classes", 10)).to(device)
-        self.s_opt = optim.SGD(self.student.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
+        # Student: honor substitute config if provided
+        sub_config = state.metadata.get("substitute_config", {})
+        arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18-8x")
+        width_mult = int(sub_config.get("width_mult", 1))
+        dropout_prob = float(sub_config.get("dropout_prob", 0.0))
+        self.student = create_substitute(
+            arch=arch,
+            num_classes=state.metadata.get("num_classes", 10),
+            input_channels=int(input_shape[0]),
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
+        ).to(device)
+        opt_config = sub_config.get("optimizer", {})
+        self.s_opt = self._build_optimizer(self.student.parameters(), opt_config)
 
     def _recover_logits(self, probs: torch.Tensor) -> torch.Tensor:
         """Mean Correction for Logit Recovery (Section 3.2).
@@ -54,14 +65,22 @@ class DFME(AttackRunner):
 
     def run(self, ctx: BenchmarkContext) -> None:
         device = self.state.metadata.get("device", "cpu")
-        pbar = tqdm(total=ctx.budget_remaining, desc="[DFME] Extracting")
+        pbar = self._create_progress_bar(ctx.budget_remaining, "[DFME] Extracting")
 
         while ctx.budget_remaining > 0:
+            total_queries = 1 + self.m
+            max_g_batch = min(self.batch_size, ctx.budget_remaining // total_queries)
+            max_s_batch = min(self.batch_size, ctx.budget_remaining)
+            if max_g_batch <= 0 and max_s_batch <= 0:
+                break
             # 1. Generator Update (Disagreement Maximization)
             for _ in range(self.n_g):
-                if ctx.budget_remaining < self.batch_size * (1 + self.m): break
+                total_queries = 1 + self.m
+                batch = min(self.batch_size, ctx.budget_remaining // total_queries)
+                if batch <= 0:
+                    break
                 self.generator.train(); self.student.eval()
-                z = torch.randn(self.batch_size, 100, device=device)
+                z = torch.randn(batch, 100, device=device)
                 
                 # Forward Difference for Gradient Estimation (Eq. 6)
                 pre_tanh, x = self.generator(z, return_pre_tanh=True)
@@ -72,7 +91,8 @@ class DFME(AttackRunner):
                 # Estimating Gradient
                 grad_est = torch.zeros_like(pre_tanh)
                 for _ in range(self.m):
-                    u = torch.randn_like(pre_tanh); u /= (torch.norm(u.view(self.batch_size, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
+                    u = torch.randn_like(pre_tanh)
+                    u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
                     x_pert = torch.tanh(pre_tanh + self.epsilon * u)
                     v_pert = self._recover_logits(ctx.oracle.query(x_pert).y.to(device))
                     s_pert = self.student(x_pert)
@@ -83,20 +103,22 @@ class DFME(AttackRunner):
                 # Maximize L1 Disagreement (Gradient Ascent)
                 pre_tanh.backward(- (grad_est / (self.m * self.epsilon)))
                 self.g_opt.step()
-                pbar.update(self.batch_size * (1 + self.m))
+                pbar.update(batch * (1 + self.m))
 
             # 2. Student Update (Disagreement Minimization)
             for _ in range(self.n_s):
-                if ctx.budget_remaining < self.batch_size: break
+                batch = min(self.batch_size, ctx.budget_remaining)
+                if batch <= 0:
+                    break
                 self.generator.eval(); self.student.train()
-                z = torch.randn(self.batch_size, 100, device=device)
+                z = torch.randn(batch, 100, device=device)
                 x = self.generator(z).detach()
                 v_out = self._recover_logits(ctx.oracle.query(x).y.to(device))
                 
                 self.s_opt.zero_grad()
                 loss = F.l1_loss(self.student(x), v_out)
                 loss.backward(); self.s_opt.step()
-                pbar.update(self.batch_size)
+                pbar.update(batch)
         
         self.state.attack_state["substitute"] = self.student
         pbar.close()

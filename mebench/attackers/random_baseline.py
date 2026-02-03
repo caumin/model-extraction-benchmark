@@ -48,26 +48,41 @@ class RandomBaseline(AttackRunner):
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
         device = self.state.metadata.get("device", "cpu")
-        
-        pbar = tqdm(total=self.state.budget_remaining, desc=f"[{self.__class__.__name__}] Extracting")
-        while ctx.budget_remaining > 0:
-            step_size = self._default_step_size(ctx)
-            query_batch = self._select_query_batch(step_size, self.state)
+
+        total_budget = ctx.budget_remaining
+        indices, pool_exhausted = self._sample_indices(total_budget, self.state)
+        step_size = int(self.config.get("batch_size", self._default_step_size(ctx)))
+
+        pbar = self._create_progress_bar(total_budget, f"[{self.__class__.__name__}] Extracting")
+        offset = 0
+        while offset < total_budget:
+            k = min(step_size, total_budget - offset)
+            batch_indices = indices[offset : offset + k]
+            x_list = [self.pool_dataset[i][0] for i in batch_indices]
+            x_batch = torch.stack(x_list)
+
+            meta = {"synthetic": False}
+            if pool_exhausted:
+                meta["pool_exhausted"] = True
+
+            query_batch = QueryBatch(x=x_batch, meta=meta)
             oracle_output = ctx.query(query_batch.x, meta=getattr(query_batch, "meta", None))
             self._handle_oracle_output(query_batch, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
+            offset += k
         pbar.close()
         # Final Evaluation (handled by engine)
 
-    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
+    def _sample_indices(self, k: int, state: BenchmarkState) -> tuple[list[int], bool]:
         self._ensure_pool_dataset(state)
 
+        if self.pool_dataset is None or len(self.pool_dataset) == 0:
+            raise ValueError("RandomBaseline requires a non-empty pool dataset.")
+
+        indices: list[int] = []
         pool_exhausted = len(state.attack_state["unqueried_indices"]) == 0
-        if pool_exhausted:
-            if self.pool_dataset is None or len(self.pool_dataset) == 0:
-                raise ValueError("RandomBaseline requires a non-empty pool dataset.")
-            indices = np.random.choice(len(self.pool_dataset), int(k), replace=True).tolist()
-        else:
+
+        if not pool_exhausted:
             available = state.attack_state["unqueried_indices"]
             n_take = min(int(k), len(available))
             indices = np.random.choice(available, n_take, replace=False).tolist()
@@ -76,14 +91,20 @@ class RandomBaseline(AttackRunner):
                 extra = np.random.choice(len(self.pool_dataset), remainder, replace=True).tolist()
                 indices.extend(extra)
                 pool_exhausted = True
-
-        x_list = [self.pool_dataset[i][0] for i in indices]
-        x_batch = torch.stack(x_list)
+        else:
+            indices = np.random.choice(len(self.pool_dataset), int(k), replace=True).tolist()
 
         for idx in indices:
             if idx in state.attack_state["unqueried_indices"]:
                 state.attack_state["unqueried_indices"].remove(idx)
             state.attack_state["queried_indices"].append(int(idx))
+
+        return indices, pool_exhausted
+
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
+        indices, pool_exhausted = self._sample_indices(k, state)
+        x_list = [self.pool_dataset[i][0] for i in indices]
+        x_batch = torch.stack(x_list)
 
         meta = {"synthetic": False}
         if pool_exhausted:

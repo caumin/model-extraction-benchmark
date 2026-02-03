@@ -36,6 +36,22 @@ class BenchmarkContext:
         self.checkpoints = sorted(int(c) for c in checkpoints)
         self._checkpoint_reached = set(self.state.attack_state.get("checkpoint_reached", []))
 
+        attack_config = self.config.get("attack", {})
+        interval = attack_config.get("log_query_interval")
+        if interval is not None:
+            interval = int(interval)
+            self._progress_interval = interval if interval > 0 else None
+        else:
+            total_budget = (
+                self.config.get("budget", {}).get("max_budget")
+                or self.state.metadata.get("max_budget")
+                or 0
+            )
+            if total_budget > 0:
+                self._progress_interval = max(1000, int(total_budget // 100))
+            else:
+                self._progress_interval = 1000
+
     @property
     def budget_remaining(self) -> int:
         return int(self.state.budget_remaining)
@@ -58,9 +74,11 @@ class BenchmarkContext:
             )
 
         oracle_output = self.oracle.query(x)
-        # Print progress every ~1000 queries (handles batch jumps)
-        if self.state.query_count % 1000 < batch_size:
-            print(f"[Query Progress] Used: {self.state.query_count} / Remaining: {self.state.budget_remaining}")
+        # Print progress at coarse intervals (handles batch jumps)
+        if self._progress_interval and self.state.query_count % self._progress_interval < batch_size:
+            print(
+                f"[Query Progress] Used: {self.state.query_count} / Remaining: {self.state.budget_remaining}"
+            )
 
         if self.record_queries:
             if self.query_storage is None:

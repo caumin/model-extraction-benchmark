@@ -3,6 +3,7 @@
 from typing import Dict, Any, List, Tuple, Optional
 from collections import deque
 import logging
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -27,8 +28,13 @@ class KnockoffNets(AttackRunner):
 
         self.batch_size = int(config.get("batch_size", 128))
         # Update substitute periodically or every batch if policy requires fresh logits
-        self.train_every = int(config.get("train_every", self.batch_size))
+        self.train_every = max(1, int(config.get("train_every", self.batch_size)))
         self.train_epochs = int(config.get("train_epochs", 1))
+        self.online_train_epochs = int(config.get("online_train_epochs", self.train_epochs))
+        offline_train_epochs = config.get("offline_train_epochs")
+        self.offline_train_epochs = (
+            int(offline_train_epochs) if offline_train_epochs is not None else None
+        )
         self.reward_window = int(config.get("reward_window", 100))
         self.reward_certainty_weight = float(config.get("reward_certainty_weight", 1.0))
         self.reward_diversity_weight = float(config.get("reward_diversity_weight", 1.0))
@@ -44,6 +50,10 @@ class KnockoffNets(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        loss_reward_scale = float(
+            config.get("loss_reward_scale", max(1.0, math.log(max(self.num_classes, 2))))
+        )
+        self.loss_reward_scale = max(loss_reward_scale, 1e-6)
 
         self.pool_dataset = None
         self.class_to_indices: Dict[int, List[int]] = {}
@@ -54,14 +64,16 @@ class KnockoffNets(AttackRunner):
         self.victim = ctx.oracle.model
         device = self.state.metadata.get("device", "cpu")
         
-        pbar = tqdm(total=self.state.budget_remaining, desc="[KnockoffNets] Extracting")
+        pbar = self._create_progress_bar(self.state.budget_remaining, "[KnockoffNets] Extracting")
         while ctx.budget_remaining > 0:
-            step_size = self._default_step_size(ctx)
+            step_size = min(self.batch_size, ctx.budget_remaining)
             x, indices, classes = self._select_query_batch(step_size, self.state)
             oracle_output = ctx.query(x, meta={"indices": indices, "classes": classes})
             self._handle_oracle_output(x, oracle_output, classes, self.state)
             pbar.update(x.size(0))
         pbar.close()
+
+        self._finalize_attack(self.state)
 
     def _select_query_batch(
         self, k: int, state: BenchmarkState
@@ -149,20 +161,23 @@ class KnockoffNets(AttackRunner):
         else:
             diversity_reward = torch.zeros(probs.size(0))
 
-        substitute = state.attack_state.get("substitute")
+        substitute = state.attack_state.get("online_substitute")
         if substitute is not None:
             substitute.eval()
+            device = state.metadata.get("device", "cpu")
+            norm_mean, norm_std = self._get_normalization(state, device)
             with torch.no_grad():
-                logits = substitute(x_batch.to(state.metadata.get("device", "cpu")))
-                log_probs = F.log_softmax(logits, dim=1).cpu()
-                loss_reward = -(probs * log_probs).sum(dim=1)
+                x_input = (x_batch.to(device) - norm_mean) / norm_std
+                logits = substitute(x_input)
+                log_probs = F.log_softmax(logits, dim=1)
+                loss_reward = -(probs.to(device) * log_probs).sum(dim=1).detach().cpu()
         else:
             loss_reward = torch.zeros(probs.size(0))
 
-        # [P0 FIX] Normalize rewards to [0,1] range before aggregation
+        # Normalize rewards to [0,1] range before aggregation
         certainty_reward = torch.clamp(certainty_reward, 0.0, 1.0)
         diversity_reward = torch.clamp(diversity_reward, 0.0, 1.0)
-        loss_reward = torch.clamp(loss_reward, 0.0, 1.0)
+        loss_reward = torch.clamp(loss_reward / self.loss_reward_scale, 0.0, 1.0)
         
         rewards = (
             self.reward_certainty_weight * certainty_reward
@@ -187,36 +202,31 @@ class KnockoffNets(AttackRunner):
             if class_id < 0 or class_id >= weights.numel():
                 continue
 
-            state.attack_state["action_counts"][class_id] += 1
-            count = state.attack_state["action_counts"][class_id].item()
-            alpha = 1.0 / count
-
             adv = float(rewards[idx]) - baseline
             grad = -pi
             grad[class_id] = 1.0 - pi[class_id]
-            weights = weights + alpha * adv * grad
+            weights = weights + self.policy_lr * adv * grad
 
             pi = torch.softmax(weights, dim=0)
 
             if class_id in class_to_coarse and coarse_weights.numel() > 0:
                 coarse_id = int(class_to_coarse[class_id])
                 if 0 <= coarse_id < coarse_weights.numel():
-                    state.attack_state["coarse_action_counts"][coarse_id] += 1
-                    coarse_count = state.attack_state["coarse_action_counts"][coarse_id].item()
-                    coarse_alpha = 1.0 / coarse_count
-
                     coarse_pi = torch.softmax(coarse_weights, dim=0)
                     coarse_grad = -coarse_pi
                     coarse_grad[coarse_id] = 1.0 - coarse_pi[coarse_id]
-                    coarse_weights = coarse_weights + coarse_alpha * adv * coarse_grad
+                    coarse_weights = coarse_weights + self.policy_lr * adv * coarse_grad
 
         state.attack_state["policy_weights"] = weights
         if coarse_weights.numel() > 0:
             state.attack_state["coarse_policy_weights"] = coarse_weights
 
-        if state.attack_state["query_count"] % self.train_every == 0:
+        last_train_count = state.attack_state.get("last_train_count", 0)
+        if state.attack_state["query_count"] - last_train_count >= self.train_every:
             self.logger.info(f"Training substitute at query count {state.attack_state['query_count']}...")
-            self._train_substitute(state)
+            self._train_substitute(state, reset_model=False, epochs=self.online_train_epochs, store_key="online_substitute")
+            state.attack_state["substitute"] = state.attack_state.get("online_substitute")
+            state.attack_state["last_train_count"] = state.attack_state["query_count"]
             self._evaluate_current_substitute(state.attack_state.get("substitute"), state.metadata.get("device", "cpu"))
 
     def _initialize_state(self, state: BenchmarkState) -> None:
@@ -232,7 +242,10 @@ class KnockoffNets(AttackRunner):
         state.attack_state["query_data_x"] = []
         state.attack_state["query_data_y"] = []
         state.attack_state["substitute"] = None
+        state.attack_state["online_substitute"] = None
+        state.attack_state["offline_substitute"] = None
         state.attack_state["query_count"] = 0
+        state.attack_state["last_train_count"] = 0
         state.attack_state["class_to_coarse"] = {}
         state.attack_state["coarse_to_classes"] = {}
 
@@ -394,7 +407,14 @@ class KnockoffNets(AttackRunner):
         class_probs = torch.softmax(class_weights[class_ids], dim=0).cpu().numpy()
         return int(np.random.choice(class_ids, p=class_probs))
 
-    def _train_substitute(self, state: BenchmarkState) -> None:
+    def _train_substitute(
+        self,
+        state: BenchmarkState,
+        *,
+        reset_model: bool,
+        epochs: int,
+        store_key: str,
+    ) -> None:
         query_x = state.attack_state["query_data_x"]
         query_y = state.attack_state["query_data_y"]
         if len(query_x) == 0:
@@ -415,24 +435,27 @@ class KnockoffNets(AttackRunner):
                 return self.x[idx], self.y[idx]
 
         dataset = QueryDataset(x_all, y_all)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=0)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
 
         device = state.metadata.get("device", "cpu")
         sub_config = state.metadata.get("substitute_config", {})
         opt_params = sub_config.get("optimizer", {})
         
-        model = create_substitute(
-            arch=sub_config.get("arch", "resnet18"),
-            num_classes=self.num_classes,
-            input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
-        ).to(device)
+        model = None
+        if not reset_model:
+            model = state.attack_state.get(store_key)
+        if model is None:
+            width_mult = int(sub_config.get("width_mult", 1))
+            dropout_prob = float(sub_config.get("dropout_prob", 0.0))
+            model = create_substitute(
+                arch=sub_config.get("arch", "resnet18"),
+                num_classes=self.num_classes,
+                input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+                width_mult=width_mult,
+                dropout_prob=dropout_prob,
+            ).to(device)
 
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            lr=float(opt_params.get("lr", 0.01)),
-            momentum=float(opt_params.get("momentum", 0.9)),
-            weight_decay=float(opt_params.get("weight_decay", 5e-4))
-        )
+        optimizer = self._build_optimizer(model.parameters(), opt_params)
         output_mode = self.config.get("output_mode", "soft_prob")
         if output_mode == "soft_prob":
             criterion = nn.KLDivLoss(reduction="batchmean")
@@ -440,15 +463,9 @@ class KnockoffNets(AttackRunner):
             criterion = nn.CrossEntropyLoss()
 
         model.train()
-        victim_config = state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-            
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
-        
-        epoch_pbar = tqdm(range(self.train_epochs), desc="[KnockoffNets] Training Substitute", leave=False)
+        norm_mean, norm_std = self._get_normalization(state, device)
+
+        epoch_pbar = tqdm(range(epochs), desc="[KnockoffNets] Training Substitute", leave=False)
         for _ in epoch_pbar:
             epoch_loss = 0.0
             for x_batch, y_batch in loader:
@@ -474,4 +491,31 @@ class KnockoffNets(AttackRunner):
                 epoch_loss += loss.item()
             epoch_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}"})
 
-        state.attack_state["substitute"] = model
+        state.attack_state[store_key] = model
+
+    def _get_normalization(self, state: BenchmarkState, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+        victim_config = state.metadata.get("victim_config", {})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
+
+        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
+        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        return norm_mean, norm_std
+
+    def _finalize_attack(self, state: BenchmarkState) -> None:
+        if len(state.attack_state["query_data_x"]) == 0:
+            return
+
+        self.logger.info("Final offline retraining for KnockoffNets...")
+        sub_config = state.metadata.get("substitute_config", {})
+        default_epochs = int(sub_config.get("max_epochs", self.train_epochs))
+        offline_epochs = self.offline_train_epochs or default_epochs
+        self._train_substitute(
+            state,
+            reset_model=True,
+            epochs=offline_epochs,
+            store_key="offline_substitute",
+        )
+        state.attack_state["substitute"] = state.attack_state.get("offline_substitute")
+        self._evaluate_current_substitute(state.attack_state.get("substitute"), state.metadata.get("device", "cpu"))

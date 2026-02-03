@@ -15,7 +15,7 @@ def setup_console_logging():
     if not root_logger.handlers:
         root_logger.setLevel(logging.INFO)
         handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(logging.Formatter('%(message)s'))
+        handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
         root_logger.addHandler(handler)
 
 

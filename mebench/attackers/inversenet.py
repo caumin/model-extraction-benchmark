@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import torchvision.transforms as transforms
 from tqdm import tqdm
 
@@ -212,7 +212,7 @@ class InverseNet(AttackRunner):
         x_all = torch.cat(x_list, dim=0)
         y_all = torch.cat(y_list, dim=0)
         dataset = torch.utils.data.TensorDataset(x_all, y_all)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=0)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
 
         device = state.metadata.get("device", "cpu")
         self.inversion_model.train()
@@ -337,17 +337,27 @@ class InverseNet(AttackRunner):
                 return self.x[idx], self.y[idx]
 
         dataset = QueryDataset(x_all, y_all)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=0)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
 
         device = state.metadata.get("device", "cpu")
         if self.substitute is None:
+            sub_config = state.metadata.get("substitute_config", {})
+            opt_params = sub_config.get("optimizer", {})
+            arch = sub_config.get("arch") or self.config.get("substitute_arch", "resnet18")
+            width_mult = int(sub_config.get("width_mult", 1))
+            dropout_prob = float(sub_config.get("dropout_prob", 0.0))
             self.substitute = create_substitute(
-                arch=self.config.get("substitute_arch", "resnet18"),
+                arch=arch,
                 num_classes=self.num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+                width_mult=width_mult,
+                dropout_prob=dropout_prob,
             ).to(device)
             self.substitute_optimizer = torch.optim.SGD(
-                self.substitute.parameters(), lr=self.substitute_lr, momentum=0.9
+                self.substitute.parameters(),
+                lr=float(opt_params.get("lr", self.substitute_lr)),
+                momentum=float(opt_params.get("momentum", 0.9)),
+                weight_decay=float(opt_params.get("weight_decay", 0.0)),
             )
 
         self.substitute.train()
@@ -414,30 +424,95 @@ class InverseNet(AttackRunner):
             return centers[:k]
 
         selected = []
+        
+        # [OPTIMIZATION] Batched feature extraction & distance computation
+        # 1. Extract features (flattened images) for all centers and remaining candidates ONCE
+        # Note: InverseNet uses raw image L1 distance as "feature"
+        
+        # Load all candidate images into memory (batched)
+        # This is much faster than single-item access inside the loop
+        subset = torch.utils.data.Subset(self.pool_dataset, remaining)
+        loader = DataLoader(subset, batch_size=256, shuffle=False, num_workers=0)
+        
+        candidates_matrix = []
+        for x_batch, _ in loader:
+            candidates_matrix.append(x_batch.view(x_batch.size(0), -1))
+        
+        if not candidates_matrix:
+            return centers[:k]
+            
+        # [N_remaining, D]
+        candidates_matrix = torch.cat(candidates_matrix, dim=0)
+        
+        # Load centers
+        center_subset = torch.utils.data.Subset(self.pool_dataset, centers)
+        center_loader = DataLoader(center_subset, batch_size=256, shuffle=False, num_workers=0)
+        
+        centers_matrix_list = []
+        for x_batch, _ in center_loader:
+            centers_matrix_list.append(x_batch.view(x_batch.size(0), -1))
+        
+        # [N_centers, D]
+        centers_matrix = torch.cat(centers_matrix_list, dim=0)
+        
+        # Move to GPU if available for fast distance computation
+        device = state.metadata.get("device", "cpu")
+        candidates_matrix = candidates_matrix.to(device)
+        centers_matrix = centers_matrix.to(device)
+        
+        # Initialize min_distances with current centers
+        # dists: [N_remaining, N_centers]
+        # We need min_dist for each candidate: min_{c in centers} ||x - c||_1
+        # L1 distance: sum(|x - y|)
+        
+        # Memory optimization: Compute initial min_dists in chunks if needed
+        # But for typical pool sizes (e.g. 50k), we can do it iteratively to save memory
+        
+        # Initialize with infinity
+        min_dists = torch.full((candidates_matrix.size(0),), float('inf'), device=device)
+        
+        # Update min_dists against existing centers
+        # Chunking centers to avoid OOM [N_rem, N_cen, D] tensor
+        chunk_size = 100
+        for i in range(0, centers_matrix.size(0), chunk_size):
+            c_chunk = centers_matrix[i:i+chunk_size] # [C, D]
+            # dists: [N_rem, C]
+            # L1: |x - c|
+            # Expand: [N_rem, 1, D] - [1, C, D] -> [N_rem, C, D] -> sum(abs) -> [N_rem, C]
+            # This is still heavy. 
+            # Alternative: Iterate candidates? No, slow.
+            # Efficient L1 distance matrix computation is tricky without expansion.
+            # Let's simply loop over centers for initialization (N_centers is small initially)
+            for j in range(c_chunk.size(0)):
+                c_vec = c_chunk[j].unsqueeze(0) # [1, D]
+                d = torch.norm(candidates_matrix - c_vec, p=1, dim=1) # [N_rem]
+                min_dists = torch.minimum(min_dists, d)
+
+        # Greedy selection loop
         for _ in range(min(k, len(remaining))):
-            max_dist = -1.0
-            best_idx = None
-            for idx in remaining:
-                img, _ = self.pool_dataset[idx]
-                x = img.view(-1)
-                min_dist = None
-                for c_idx in centers:
-                    c_img, _ = self.pool_dataset[c_idx]
-                    c_x = c_img.view(-1)
-                    dist = torch.norm(x - c_x, p=1).item()
-                    if min_dist is None or dist < min_dist:
-                        min_dist = dist
-                if min_dist is not None and min_dist > max_dist:
-                    max_dist = min_dist
-                    best_idx = idx
-
-            if best_idx is None:
-                break
-            selected.append(best_idx)
-            centers.append(best_idx)
-            remaining.remove(best_idx)
-
-        state.attack_state["coreset_centers"] = centers
+            # Find candidate with MAX min_dist
+            max_val, max_idx_in_matrix = torch.max(min_dists, dim=0)
+            max_idx = max_idx_in_matrix.item()
+            
+            best_real_idx = remaining[max_idx]
+            selected.append(best_real_idx)
+            
+            # Update centers and remove from consideration
+            new_center_vec = candidates_matrix[max_idx].unsqueeze(0) # [1, D]
+            
+            # Update min_dists for all candidates using the new center
+            # New min_dist = min(old_min_dist, dist(x, new_center))
+            new_dists = torch.norm(candidates_matrix - new_center_vec, p=1, dim=1)
+            min_dists = torch.minimum(min_dists, new_dists)
+            
+            # Effectively remove the selected one by setting its dist to -1
+            min_dists[max_idx] = -1.0
+            
+            # Update state (strictly speaking we should append to centers list, but we reconstruct at end)
+        
+        # Reconstruct centers list
+        final_centers = centers + selected
+        state.attack_state["coreset_centers"] = final_centers
         return selected
 
     def _hcss_select(
@@ -446,12 +521,41 @@ class InverseNet(AttackRunner):
         device = next(substitute.parameters()).device
         substitute.eval()
         scores = []
-        for idx in candidates:
-            img, _ = self.pool_dataset[idx]
-            x = img.unsqueeze(0).to(device)
-            perturb = self._deepfool_distance(substitute, x, overshoot=self.hcss_xi)
-            score = (1.0 + self.hcss_xi) * perturb
-            scores.append((idx, score))
+
+        batch_size = min(self.batch_size, 32)
+        
+        # [OPTIMIZATION] Use DataLoader for efficient batch retrieval (I/O Bound -> GPU Bound)
+        # Maps candidates[i] -> dataset[candidates[i]]
+        subset = Subset(self.pool_dataset, candidates)
+        loader = DataLoader(
+            subset, 
+            batch_size=batch_size, 
+            shuffle=False, 
+            num_workers=0
+        )
+        
+        current_idx_ptr = 0
+        
+        # Iterate through pre-fetched batches
+        for x_batch, _ in loader:
+            batch_len = x_batch.size(0)
+            
+            # Retrieve original indices corresponding to this batch
+            # Subset maintains the order of 'candidates', so we can slice directly
+            batch_indices = candidates[current_idx_ptr : current_idx_ptr + batch_len]
+            current_idx_ptr += batch_len
+            
+            x_batch = x_batch.to(device)
+            
+            # DeepFool distance calculation (unchanged logic)
+            distances = self._deepfool_distance_batch(
+                substitute,
+                x_batch,
+                overshoot=self.hcss_xi,
+            )
+            
+            for i, dist in enumerate(distances):
+                scores.append((batch_indices[i], (1.0 + self.hcss_xi) * dist.item()))
 
         scores.sort(key=lambda x: x[1], reverse=True)
         return [idx for idx, _ in scores[: min(k, len(scores))]]
@@ -463,57 +567,80 @@ class InverseNet(AttackRunner):
         max_iter: int = 20,
         overshoot: float = 0.02,
     ) -> float:
-        x_adv = x.clone().detach()
-        perturbation = torch.zeros_like(x_adv)
+        distances = self._deepfool_distance_batch(
+            model,
+            x,
+            max_iter=max_iter,
+            overshoot=overshoot,
+        )
+        return distances[0].item()
 
+    def _deepfool_distance_batch(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        max_iter: int = 20,
+        overshoot: float = 0.02,
+    ) -> torch.Tensor:
+        device = x.device
+        batch = x.shape[0]
+        if batch == 0:
+            return torch.empty(0, device=device)
+
+        model.eval()
+        perturb = torch.zeros_like(x, device=device)
         with torch.no_grad():
-            logits = model(x_adv)
-            num_classes = logits.shape[1]
-            current = logits.argmax(dim=1).item()
+            logits = model(x)
+            current = logits.argmax(dim=1)
 
+        active = torch.ones(batch, dtype=torch.bool, device=device)
         for _ in range(max_iter):
-            x_adv = (x + perturbation).clone().detach().requires_grad_(True)
+            if not active.any():
+                break
+
+            x_adv = (x + perturb).detach()
+            x_adv.requires_grad_(True)
             logits = model(x_adv)
-            current = logits.argmax(dim=1).item()
+            current = logits.argmax(dim=1)
+            num_classes = logits.shape[1]
 
-            grad_current = torch.autograd.grad(
-                logits[0, current],
-                x_adv,
-                retain_graph=True,
-                create_graph=False,
-            )[0]
-
-            min_r = None
-            best_w = None
+            grads = []
             for k in range(num_classes):
-                if k == current:
-                    continue
                 grad_k = torch.autograd.grad(
-                    logits[0, k],
+                    logits[:, k].sum(),
                     x_adv,
-                    retain_graph=True,
+                    retain_graph=(k != num_classes - 1),
                     create_graph=False,
                 )[0]
-                w_k = grad_k - grad_current
-                f_k = logits[0, k] - logits[0, current]
-                denom = torch.norm(w_k)
-                if denom.item() == 0:
-                    continue
-                r_k = torch.abs(f_k) / denom
-                if min_r is None or r_k.item() < min_r:
-                    min_r = r_k.item()
-                    best_w = w_k
+                grads.append(grad_k)
 
-            if best_w is None:
+            grads = torch.stack(grads, dim=1)
+            grad_current = grads[torch.arange(batch), current]
+            w = grads - grad_current.unsqueeze(1)
+            f = logits - logits.gather(1, current.unsqueeze(1))
+            w_norm = torch.norm(w.view(batch, num_classes, -1), dim=2)
+            dist = torch.abs(f) / (w_norm + 1e-8)
+            dist = torch.where(
+                w_norm > 0,
+                dist,
+                torch.full_like(dist, float("inf")),
+            )
+            dist[torch.arange(batch), current] = float("inf")
+            min_dist, best_idx = dist.min(dim=1)
+            valid = torch.isfinite(min_dist)
+            active = active & valid
+            if not active.any():
                 break
 
-            r_i = (min_r + 1e-6) * best_w / torch.norm(best_w)
-            perturbation = perturbation + r_i
-            x_adv = x + (1 + overshoot) * perturbation
-
+            best_w = w[torch.arange(batch), best_idx]
+            best_w_norm = torch.norm(best_w.view(batch, -1), dim=1)
+            r_i = (min_dist + 1e-6).view(-1, 1, 1, 1) * best_w
+            r_i = r_i / (best_w_norm.view(-1, 1, 1, 1) + 1e-8)
             with torch.no_grad():
-                new_pred = model(x_adv).argmax(dim=1).item()
-            if new_pred != current:
-                break
+                perturb[active] = perturb[active] + r_i[active]
+                x_adv_next = x + (1 + overshoot) * perturb
+                new_pred = model(x_adv_next).argmax(dim=1)
 
-        return perturbation.view(-1).norm().item()
+            active = active & (new_pred == current)
+
+        return torch.norm(perturb.view(batch, -1), dim=1)

@@ -6,7 +6,30 @@ This file provides essential guidelines for agents working on the Model Extracti
 
 This is a **specification-first** PyTorch project implementing a paper-grade benchmark for comparing model extraction attacks fairly. The project follows strict validation-first principles defined in `Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md`.
 
-**Status**: Design/Specification phase. No implementation exists yet.
+**Status**: Implementation phase with 13+ attacks implemented. Core engine is stable.
+
+---
+
+## Quick Reference (Essential Commands)
+
+```bash
+# Install
+pip install -e ".[dev]"
+
+# Run experiment
+python -m mebench run --config configs/experiment.yaml
+
+# Test
+pytest tests/test_contract_validation.py  # Most important test
+pytest tests/ -v  # All tests verbose
+
+# Lint/Format
+ruff check mebench/
+ruff format mebench/
+
+# Type check
+mypy mebench/
+```
 
 ---
 
@@ -256,6 +279,20 @@ Consult Oracle (senior engineering advisor) for:
 ## Quick Reference
 
 ### Attack Interface
+```python
+class AttackRunner(ABC):
+    """Base class for attack runners (Track B)."""
+    
+    def __init__(self, config: Dict[str, Any], state: BenchmarkState) -> None:
+        ...
+
+    @abstractmethod
+    def run(self, ctx: BenchmarkContext) -> None:
+        """Execute attack protocol until budget is exhausted."""
+        ...
+```
+
+### Legacy BaseAttack Interface (for reference)
 ```python
 class BaseAttack:
     def propose(self, k: int, state: BenchmarkState) -> QueryBatch:

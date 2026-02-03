@@ -110,25 +110,34 @@ class LeNet(nn.Module):
         super().__init__()
         self.dropout_prob = dropout_prob
 
-        self.features = nn.Sequential(
+        features = [
             nn.Conv2d(input_channels, 6, 5),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity(),
-            nn.MaxPool2d(2),
+        ]
+        if dropout_prob > 0:
+            features.append(nn.Dropout2d(dropout_prob))
+        features.append(nn.MaxPool2d(2))
+        features.extend([
             nn.Conv2d(6, 16, 5),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity(),
-            nn.MaxPool2d(2),
-        )
+        ])
+        if dropout_prob > 0:
+            features.append(nn.Dropout2d(dropout_prob))
+        features.append(nn.MaxPool2d(2))
+        self.features = nn.Sequential(*features)
 
-        self.classifier = nn.Sequential(
+        classifier = [
             nn.Linear(16 * 5 * 5, 120),
-            nn.Dropout(dropout_prob) if dropout_prob > 0 else nn.Identity(),
+        ]
+        if dropout_prob > 0:
+            classifier.append(nn.Dropout(dropout_prob))
+        classifier.extend([
             nn.ReLU(inplace=True),
             nn.Linear(120, 84),
             nn.ReLU(inplace=True),
             nn.Linear(84, num_classes),
-        )
+        ])
+        self.classifier = nn.Sequential(*classifier)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
@@ -153,25 +162,34 @@ class LeNetMNIST(nn.Module):
         super().__init__()
         self.dropout_prob = dropout_prob
 
-        self.features = nn.Sequential(
+        features = [
             nn.Conv2d(input_channels, 6, 5),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity(),  # [P0 FIX] Add dropout for ActiveThief
-            nn.MaxPool2d(2),
+        ]
+        if dropout_prob > 0:
+            features.append(nn.Dropout2d(dropout_prob))
+        features.append(nn.MaxPool2d(2))
+        features.extend([
             nn.Conv2d(6, 16, 5),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity(),  # [P0 FIX] Add dropout for ActiveThief
-            nn.MaxPool2d(2),
-        )
+        ])
+        if dropout_prob > 0:
+            features.append(nn.Dropout2d(dropout_prob))
+        features.append(nn.MaxPool2d(2))
+        self.features = nn.Sequential(*features)
 
-        self.classifier = nn.Sequential(
+        classifier = [
             nn.Linear(16 * 4 * 4, 120),
-            nn.Dropout(dropout_prob) if dropout_prob > 0 else nn.Identity(),  # [P0 FIX] Add dropout for ActiveThief
+        ]
+        if dropout_prob > 0:
+            classifier.append(nn.Dropout(dropout_prob))
+        classifier.extend([
             nn.ReLU(inplace=True),
             nn.Linear(120, 84),
             nn.ReLU(inplace=True),
             nn.Linear(84, num_classes),
-        )
+        ])
+        self.classifier = nn.Sequential(*classifier)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)

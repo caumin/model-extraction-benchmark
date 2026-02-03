@@ -113,6 +113,7 @@ def run_experiment(
         state = BenchmarkState(
             budget_remaining=config["budget"]["max_budget"],
             metadata={
+                "seed": seed,  # [ADDED] Track current seed
                 "device": device,
                 "input_shape": (
                     int(config["victim"]["channels"]),
@@ -136,6 +137,9 @@ def run_experiment(
 
         # Context (Track B only)
         ctx = BenchmarkContext(state=state, oracle=oracle, logger=logger, config=config)
+        
+        # [ADDED] Inject context into attack runner for metric logging
+        attack.ctx = ctx
 
         print("\nStarting attack run (Track B only)")
         attack.run(ctx)

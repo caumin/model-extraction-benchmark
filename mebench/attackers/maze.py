@@ -34,7 +34,6 @@ class MAZE(AttackRunner):
         self.n_g = int(config.get("n_g_steps", 1))
         self.n_c = int(config.get("n_c_steps", 5))
         self.n_r = int(config.get("n_r_steps", 10))
-        self.replay_max = int(config.get("replay_max", 10000))
         self.noise_dim = int(config.get("noise_dim", 100))
         
         self.generator = None
@@ -57,24 +56,39 @@ class MAZE(AttackRunner):
         ).to(device)
         self.g_opt = optim.SGD(self.generator.parameters(), lr=1e-4, momentum=0.5)
         
-        # Clone: ResNet-18 or similar
+        # Clone: honor substitute config if provided
+        sub_config = state.metadata.get("substitute_config", {})
+        arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18-8x")
+        width_mult = int(sub_config.get("width_mult", 1))
+        dropout_prob = float(sub_config.get("dropout_prob", 0.0))
         self.clone = create_substitute(
-            arch="resnet18-8x", 
+            arch=arch,
             num_classes=num_classes,
-            input_channels=input_shape[0]
+            input_channels=input_shape[0],
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
         ).to(device)
-        self.c_opt = optim.SGD(self.clone.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
+        opt_config = sub_config.get("optimizer", {})
+        self.c_opt = self._build_optimizer(self.clone.parameters(), opt_config)
 
     def run(self, ctx: BenchmarkContext) -> None:
         device = self.state.metadata.get("device", "cpu")
-        pbar = tqdm(total=ctx.budget_remaining, desc="[MAZE] Extracting")
+        pbar = self._create_progress_bar(ctx.budget_remaining, "[MAZE] Extracting")
 
         while ctx.budget_remaining > 0:
+            total_queries = 1 + self.grad_approx_m
+            max_g_batch = min(self.batch_size, ctx.budget_remaining // total_queries)
+            max_s_batch = min(self.batch_size, ctx.budget_remaining)
+            if max_g_batch <= 0 and max_s_batch <= 0:
+                break
             # 1. Generator Update Phase (Disagreement Maximization)
             for _ in range(self.n_g):
-                if ctx.budget_remaining < self.batch_size * (1 + self.grad_approx_m): break
+                total_queries = 1 + self.grad_approx_m
+                batch = min(self.batch_size, ctx.budget_remaining // total_queries)
+                if batch <= 0:
+                    break
                 self.generator.train(); self.clone.eval()
-                z = torch.randn(self.batch_size, self.noise_dim, device=device)
+                z = torch.randn(batch, self.noise_dim, device=device)
                 
                 # Base output for estimation
                 x_base = self.generator(z)
@@ -89,8 +103,8 @@ class MAZE(AttackRunner):
                 d = x_base[0].numel()
                 for _ in range(self.grad_approx_m):
                     u = torch.randn_like(x_base)
-                    u /= (torch.norm(u.view(self.batch_size, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
-                    x_pert = x_base + self.epsilon * u
+                    u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
+                    x_pert = torch.clamp(x_base + self.epsilon * u, -1.0, 1.0)
                     y_t_pert = ctx.oracle.query((x_pert + 1.0) / 2.0).y.to(device)
                     y_c_pert = F.softmax(self.clone(self._normalize(x_pert)), dim=1)
                     loss_pert = -F.kl_div(torch.log(y_c_pert + 1e-10), y_t_pert, reduction='none').sum(dim=1)
@@ -101,13 +115,15 @@ class MAZE(AttackRunner):
                 # Chain rule: dLG/dThetaG = dLG/dx * dx/dThetaG
                 x_base.backward(grad_est_x)
                 self.g_opt.step()
-                pbar.update(self.batch_size * (1 + self.grad_approx_m))
+                pbar.update(batch * (1 + self.grad_approx_m))
 
             # 2. Clone Update Phase (Disagreement Minimization)
             for _ in range(self.n_c):
-                if ctx.budget_remaining < self.batch_size: break
+                batch = min(self.batch_size, ctx.budget_remaining)
+                if batch <= 0:
+                    break
                 self.generator.eval(); self.clone.train()
-                z = torch.randn(self.batch_size, self.noise_dim, device=device)
+                z = torch.randn(batch, self.noise_dim, device=device)
                 x_gen = self.generator(z).detach()
                 y_t = ctx.oracle.query((x_gen + 1.0) / 2.0).y.to(device)
                 
@@ -119,7 +135,7 @@ class MAZE(AttackRunner):
                 
                 # Experience Replay Storage
                 self._append_replay(x_gen, y_t)
-                pbar.update(self.batch_size)
+                pbar.update(batch)
 
             # 3. Experience Replay Phase
             if self.replay_x:
@@ -141,9 +157,8 @@ class MAZE(AttackRunner):
         return x_01
 
     def _append_replay(self, x: torch.Tensor, y: torch.Tensor):
-        self.replay_x.append(x.cpu()); self.replay_y.append(y.cpu())
-        if len(self.replay_x) * self.batch_size > self.replay_max:
-            self.replay_x.pop(0); self.replay_y.pop(0)
+        self.replay_x.append(x.cpu())
+        self.replay_y.append(y.cpu())
 
     def _sample_replay(self) -> Tuple[torch.Tensor, torch.Tensor]:
         idx = np.random.choice(len(self.replay_x))

@@ -64,7 +64,7 @@ class GAME(AttackRunner):
         self.victim = ctx.oracle.model
         device = self.state.metadata.get("device", "cpu")
         total_budget = self.state.budget_remaining
-        pbar = tqdm(total=total_budget, desc="[GAME] Extracting")
+        pbar = self._create_progress_bar(total_budget, "[GAME] Extracting")
         
         last_eval_queries = 0
         eval_interval = total_budget // 10
@@ -96,22 +96,17 @@ class GAME(AttackRunner):
         y_g = torch.multinomial(class_probs, k, replacement=True)
         with torch.no_grad():
             x = self.generator(z, y_g)
-        
-        # [P0 FIX] Query victim with generated samples to get fresh class distribution
-        with torch.no_grad():
-            victim_output = self.victim(x)
-            fresh_victim_probs = F.softmax(victim_output.y, dim=1)
-            fresh_class_dist = torch.mean(fresh_victim_probs, dim=0)
-            
+
+        x_query = x * 0.5 + 0.5
+
         meta = {
             "generator_step": state.attack_state["step"],
             "synthetic": True,
             "z": z.cpu(),
             "y_g": y_g.cpu(),
             "acs_probs": class_probs.cpu(),
-            "fresh_victim_probs": fresh_victim_probs.cpu(),
         }
-        return x, meta
+        return x_query, meta
 
     def _handle_oracle_output(
         self,
@@ -198,11 +193,15 @@ class GAME(AttackRunner):
             sub_config = state.metadata.get("substitute_config", {})
             opt_params = sub_config.get("optimizer", {})
             
-            arch = self.config.get("student_arch", "resnet18-8x")
+            arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18-8x")
+            width_mult = int(sub_config.get("width_mult", 1))
+            dropout_prob = float(sub_config.get("dropout_prob", 0.0))
             self.student = create_substitute(
                 arch=arch,
                 num_classes=self.num_classes,
                 input_channels=int(input_shape[0]),
+                width_mult=width_mult,
+                dropout_prob=dropout_prob,
             ).to(device)
             self.student_optimizer = optim.SGD(
                 self.student.parameters(),

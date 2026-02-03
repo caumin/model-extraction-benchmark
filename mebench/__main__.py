@@ -10,11 +10,8 @@ from mebench.core.engine import run_experiment
 def main():
     """Main CLI entry point."""
     # Configure logging to show INFO level and above to console
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
+    from mebench.core.logging import setup_console_logging
+    setup_console_logging()
 
     parser = argparse.ArgumentParser(description="Model Extraction Benchmark")
     parser.add_argument("command", choices=["run"], help="Command to run")

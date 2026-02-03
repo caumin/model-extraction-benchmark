@@ -173,14 +173,17 @@ class SNDCGANGenerator(DCGANGenerator):
         output_channels: int = 3,
         base_channels: int = 64,
         num_classes: Optional[int] = None,
-        input_size: int = 32,
+        output_size: Optional[int] = None,
+        input_size: Optional[int] = None,
     ) -> None:
+        if output_size is None:
+            output_size = input_size or 32
         super().__init__(
             noise_dim=noise_dim,
             output_channels=output_channels,
             base_channels=base_channels,
             num_classes=num_classes,
-            input_size=input_size,
+            output_size=output_size,
         )
         # _apply_spectral_norm(self)  # Commented out due to issues
 
@@ -202,6 +205,124 @@ class SNDCGANDiscriminator(DCGANDiscriminator):
             input_size=input_size,
         )
         # _apply_spectral_norm(self)  # Commented out due to syntax issues
+
+
+class ACGANGenerator(nn.Module):
+    """ACGAN generator (conditional DCGAN)."""
+
+    def __init__(
+        self,
+        noise_dim: int = 100,
+        output_channels: int = 3,
+        base_channels: int = 64,
+        num_classes: int = 10,
+        output_size: int = 32,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.noise_dim = noise_dim
+        self.num_classes = num_classes
+        self.output_size = output_size
+        self.base_channels = base_channels
+
+        self.label_emb = nn.Embedding(num_classes, noise_dim)
+        self.fc = nn.Linear(noise_dim, 4 * 4 * base_channels * 8)
+
+        num_upsamples = int(math.log2(output_size // 4))
+        layers = [
+            nn.BatchNorm2d(base_channels * 8),
+            nn.ReLU(inplace=True),
+        ]
+        if dropout_prob > 0:
+            layers.append(nn.Dropout2d(dropout_prob))
+
+        in_channels = base_channels * 8
+        for i in range(num_upsamples - 1):
+            out_channels = max(base_channels, in_channels // 2)
+            layers.extend(
+                [
+                    nn.ConvTranspose2d(in_channels, out_channels, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(out_channels),
+                    nn.ReLU(inplace=True),
+                ]
+            )
+            if dropout_prob > 0:
+                layers.append(nn.Dropout2d(dropout_prob))
+            in_channels = out_channels
+
+        layers.append(
+            nn.ConvTranspose2d(in_channels, output_channels, 4, 2, 1, bias=False)
+        )
+        self.main = nn.Sequential(*layers)
+        self.out_act = nn.Tanh()
+
+    def forward(self, z: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        # Multiplicative conditioning (standard ACGAN style)
+        z = z * self.label_emb(labels)
+        x = self.fc(z)
+        x = x.view(-1, self.base_channels * 8, 4, 4)
+        x = self.main(x)
+        if x.shape[-1] != self.output_size:
+            x = torch.nn.functional.interpolate(x, size=(self.output_size, self.output_size))
+        return self.out_act(x)
+
+
+class ACGANDiscriminator(nn.Module):
+    """ACGAN discriminator (DCGAN with auxiliary classifier)."""
+
+    def __init__(
+        self,
+        input_channels: int = 3,
+        base_channels: int = 64,
+        num_classes: int = 10,
+        input_size: int = 32,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.input_size = input_size
+        num_downsamples = int(math.log2(input_size // 2))
+
+        layers = [
+            nn.Conv2d(input_channels, base_channels, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+        ]
+        if dropout_prob > 0:
+            layers.append(nn.Dropout2d(dropout_prob))
+
+        in_channels = base_channels
+        for i in range(1, num_downsamples):
+            out_channels = base_channels * (2**i)
+            layers.extend(
+                [
+                    nn.Conv2d(in_channels, out_channels, 4, 2, 1, bias=False),
+                    nn.BatchNorm2d(out_channels),
+                    nn.LeakyReLU(0.2, inplace=True),
+                ]
+            )
+            if dropout_prob > 0:
+                layers.append(nn.Dropout2d(dropout_prob))
+            in_channels = out_channels
+
+        self.features = nn.Sequential(*layers)
+        final_size = input_size // (2**num_downsamples)
+        self.source_head = nn.Conv2d(in_channels, 1, final_size, 1, 0, bias=False)
+        self.classifier_head = nn.Linear(in_channels * final_size * final_size, num_classes)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        feats = self.features(x)
+        source = self.source_head(feats).view(x.size(0), -1)
+        flat = feats.view(x.size(0), -1)
+        class_logits = self.classifier_head(flat)
+        return source, class_logits
+
+
+class ProGANGenerator(nn.Module):
+    """Simplified Progressive GAN generator placeholder."""
+    def __init__(self, noise_dim=128, output_channels=3, base_channels=64, output_size=32, **kwargs):
+        super().__init__()
+        # Just use DCGAN as placeholder for now since true ProGAN is complex
+        self.impl = DCGANGenerator(noise_dim, output_channels, base_channels, None, output_size)
+    def forward(self, z): return self.impl(z)
 
 
 class DFMEGenerator(nn.Module):

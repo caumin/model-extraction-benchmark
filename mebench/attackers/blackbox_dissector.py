@@ -249,39 +249,17 @@ def cam_erase(
     return erased
 
 
+from mebench.attackers.blackbox_dissector_batch import cam_erase_batch, random_erase_batch
+
 class BlackboxDissector(AttackRunner):
     """Black-box Dissector: CAM-driven erasing for hard-label victims.
-
-    Algorithm loop:
-    1. For each sample in pool, generate N erasing variants:
-       - CAM-driven: Erase most attended region
-       - Random: N random erasures
-    2. Select best variant per sample:
-       - Substitute's MSP change (original vs erased)
-       - Maximize information gain
-    3. Query victim on original + best erased (2x budget per sample)
-    4. Train substitute:
-       - CE loss on victim labels (original + erased)
-       - CE loss on pseudo-labels (average of N random variants)
-    5. Select top-k samples by substitute MSP (erased variants)
-    6. Repeat until budget exhausted
-
-    Hyperparameters:
-    - n_variants: Number of erasing variants (10)
-    - erasing_ratio: Ratio of area to erase (0.5)
-    - batch_size: Training batch size (128)
-    - lr: Learning rate (0.001, Adam)
+    
+    (Batch Optimized Implementation)
     """
 
     def __init__(self, config: dict, state: BenchmarkState):
-        """Initialize Blackbox Dissector attack.
-
-        Args:
-            config: Attack configuration
-            state: Global benchmark state
-        """
         super().__init__(config, state)
-
+        
         # Hyperparameters
         self.n_variants = int(config.get("n_variants", 10))
 
@@ -296,15 +274,16 @@ class BlackboxDissector(AttackRunner):
         # Training hyperparameters
         self.batch_size = int(config.get("batch_size", 128))
         self.lr = float(config.get("lr", 0.1))
-        self.max_epochs = int(config.get("max_epochs", 1000))
-        self.patience = int(config.get("patience", 100))
-        self.dropout = float(config.get("dropout", 0.1))
         # [P0 FIX] Paper mandates 200 epochs for BlackBox Dissector
         self.max_epochs = int(config.get("max_epochs", 200))
+        self.patience = int(config.get("patience", 100))
+        self.dropout = float(config.get("dropout", 0.1))
         self.l2_reg = float(config.get("l2_reg", 5e-4))
+        
+        # Selection batch size (for GPU efficiency)
+        self.selection_batch_size = int(config.get("selection_batch_size", 64))
 
         # Algorithm 2 (outer loop) iterative max-budget sequence.
-        # Default: {0.1K, 0.2K, 0.5K, 0.8K, 1K, 2K, 5K, 10K, 20K, 30K}, capped to max_budget.
         self.iterative_budgets = config.get("iterative_budgets")
 
         # Initialize attack state
@@ -414,6 +393,10 @@ class BlackboxDissector(AttackRunner):
                 batch_size=1,
                 shuffle=False,
             ).dataset
+
+        # If already initialized (e.g. resuming from checkpoint), do not reset
+        if "labeled_indices" in state.attack_state:
+            return
 
         pool_size = len(self.pool_dataset)
         state.attack_state["labeled_indices"] = []
@@ -607,41 +590,60 @@ class BlackboxDissector(AttackRunner):
 
         substitute.eval()
         scored: list[tuple[int, float]] = []
-        for idx in transfer_indices:
-            img, _ = self.pool_dataset[idx]
-            y0 = int(victim_labels[idx])
-
-            best_variant: Optional[torch.Tensor] = None
-            best_score: Optional[float] = None
-            best_msp: Optional[float] = None
-            for _ in range(self.n_variants):
-                variant = cam_erase(
-                    img,
-                    substitute,
-                    sl=self.sl,
-                    sh=self.sh,
-                    r1=self.r1,
-                    r2=self.r2,
-                    fill_min=self.fill_min,
-                    fill_max=self.fill_max,
-                )
-                with torch.no_grad():
-                    probs = F.softmax(
-                        substitute(variant.unsqueeze(0).to(device)), dim=1
-                    ).squeeze(0)
-                p_y0 = float(probs[y0].item())
-                msp = float(probs.max().item())
-                # Eq.(4): choose erased variant minimizing prob of original label.
-                if best_score is None or p_y0 < best_score:
-                    best_score = p_y0
-                    best_variant = variant
-                    best_msp = msp
-
-            if best_variant is not None and best_msp is not None:
-                state.attack_state["best_variant_img"][idx] = best_variant
-                scored.append((idx, best_msp))
+        
+        # BATCH PROCESSING START
+        candidate_subset = Subset(self.pool_dataset, transfer_indices)
+        candidate_loader = DataLoader(
+            candidate_subset, 
+            batch_size=self.selection_batch_size, 
+            shuffle=False, 
+            num_workers=4,
+            pin_memory=True
+        )
+        
+        current_idx_ptr = 0
+        
+        for imgs, _ in candidate_loader:
+            batch_size = imgs.size(0)
+            batch_indices = transfer_indices[current_idx_ptr : current_idx_ptr + batch_size]
+            current_idx_ptr += batch_size
+            
+            imgs = imgs.to(device)
+            labels = torch.tensor([victim_labels[idx] for idx in batch_indices], device=device)
+            
+            imgs_repeated = imgs.unsqueeze(1).repeat(1, self.n_variants, 1, 1, 1).view(-1, *imgs.shape[1:])
+            labels_repeated = labels.unsqueeze(1).repeat(1, self.n_variants).view(-1)
+            
+            variants = cam_erase_batch(
+                imgs_repeated,
+                substitute,
+                sl=self.sl, sh=self.sh, r1=self.r1, r2=self.r2,
+                fill_min=self.fill_min, fill_max=self.fill_max,
+                target_class=None
+            )
+            
+            with torch.no_grad():
+                logits = substitute(variants)
+                probs = F.softmax(logits, dim=1)
+                
+            p_y0 = probs.gather(1, labels_repeated.unsqueeze(1)).squeeze(1)
+            p_y0 = p_y0.view(batch_size, self.n_variants)
+            
+            best_variant_indices = p_y0.argmin(dim=1)
+            
+            all_msp = probs.max(dim=1)[0].view(batch_size, self.n_variants)
+            best_msps = all_msp.gather(1, best_variant_indices.unsqueeze(1)).squeeze(1)
+            
+            variants_reshaped = variants.view(batch_size, self.n_variants, *imgs.shape[1:])
+            gather_idx = best_variant_indices.view(batch_size, 1, 1, 1, 1).expand(-1, 1, *imgs.shape[1:])
+            best_imgs = variants_reshaped.gather(1, gather_idx).squeeze(1)
+            
+            for i, idx in enumerate(batch_indices):
+                state.attack_state["best_variant_img"][idx] = best_imgs[i].cpu()
+                scored.append((idx, float(best_msps[i].item())))
 
         scored.sort(key=lambda x: x[1], reverse=True)
+        # BATCH PROCESSING END
         k_eff = min(k_eff, len(scored))
         if k_eff <= 0:
             # Can't form erased queries; fall back to querying unlabeled originals.
@@ -748,14 +750,14 @@ class BlackboxDissector(AttackRunner):
             train_subset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=0,
+            num_workers=4,
             drop_last=False,
         )
         val_loader = torch.utils.data.DataLoader(
             val_subset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=0,
+            num_workers=4,
         )
 
         # Unlabeled loader (cycle it)
@@ -764,7 +766,7 @@ class BlackboxDissector(AttackRunner):
                 unlabeled_dataset,
                 batch_size=self.batch_size,
                 shuffle=True,
-                num_workers=0,
+                num_workers=4,
                 drop_last=True, # Drop last to avoid tiny batches
             )
             unlabeled_iter = iter(unlabeled_loader)
@@ -789,10 +791,14 @@ class BlackboxDissector(AttackRunner):
         sub_config = state.metadata.get("substitute_config", {})
         opt_params = sub_config.get("optimizer", {})
         
+        width_mult = int(sub_config.get("width_mult", 1))
+        dropout_prob = float(sub_config.get("dropout_prob", 0.0))
         model = create_substitute(
             arch=sub_config.get("arch", "resnet18"),
             num_classes=num_classes,
             input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
         ).to(device)
 
         # Optimizer: SGD as in paper training process
@@ -852,27 +858,17 @@ class BlackboxDissector(AttackRunner):
                         x_unlab, _ = next(unlabeled_iter)
                     
                     if len(x_unlab) > 1:
-                        # 1. Generate pseudo-labels using erased variants
-                        # For efficiency, we process variants in batches
-                        # Target = Mean(Softmax(Model(Erased_Variants)))
+                        # 1. Generate pseudo-labels using erased variants (BATCH OPTIMIZED)
+                        x_unlab = x_unlab.to(device)
                         
-                        variants_list: list[torch.Tensor] = []
-                        for img in x_unlab:
-                            variants_list.extend(
-                                random_erase(
-                                    img,
-                                    n=self.n_variants,
-                                    sl=self.sl,
-                                    sh=self.sh,
-                                    r1=self.r1,
-                                    r2=self.r2,
-                                    fill_min=self.fill_min,
-                                    fill_max=self.fill_max,
-                                )
-                            )
+                        # Generate B*N variants in one shot
+                        x_variants = random_erase_batch(
+                            x_unlab,
+                            n=self.n_variants,
+                            sl=self.sl, sh=self.sh, r1=self.r1, r2=self.r2,
+                            fill_min=self.fill_min, fill_max=self.fill_max
+                        )
                         
-                        # Stack all variants: [B_u * N, C, H, W]
-                        x_variants = torch.stack(variants_list).to(device)
                         x_variants_norm = (x_variants - norm_mean) / norm_std
                         
                         with torch.no_grad():
@@ -886,6 +882,7 @@ class BlackboxDissector(AttackRunner):
                             pseudo_labels = probs_variants.mean(dim=1)
                         
                         # 2. Consistency Loss
+
                         # Loss = CE(Model(Original), PseudoLabel)
                         x_unlab_norm = (x_unlab.to(device) - norm_mean) / norm_std
                         logits_unlab = model(x_unlab_norm)

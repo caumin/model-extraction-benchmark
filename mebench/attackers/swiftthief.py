@@ -272,6 +272,59 @@ class _SimSiamWrapper(nn.Module):
         return {'z1': z1, 'z2': z2, 'p1': p1, 'p2': p2}
 
 
+class TwoCropTransform:
+    """Apply transform twice to create two views."""
+    def __init__(self, transform, to_pil_first=True, input_channels=3):
+        self.transform = transform
+        self.to_pil_first = to_pil_first
+        self.to_pil = transforms.ToPILImage() if self.to_pil_first else None
+        self.input_channels = input_channels
+
+    def __call__(self, x):
+        # x is Tensor [C, H, W]
+        if self.to_pil_first:
+            img = self.to_pil(x.clamp(0, 1))
+            # Handle channel mismatch if needed (e.g. 1-channel PIL)
+            if self.input_channels == 1 and img.mode != "L":
+                img = img.convert("L")
+            elif self.input_channels == 3 and img.mode != "RGB":
+                img = img.convert("RGB")
+        else:
+            img = x
+            if img.dtype == torch.uint8:
+                img = img.float().div(255.0)
+            else:
+                img = img.float()
+            img = img.clamp(0, 1)
+        
+        v1 = self.transform(img)
+        v2 = self.transform(img)
+        return v1, v2
+
+class SimSiamDataset(torch.utils.data.Dataset):
+    """Dataset wrapper that applies TwoCropTransform."""
+    def __init__(self, base_dataset, transform):
+        self.base_dataset = base_dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        # Base dataset returns (img, label) or just img depending on implementation
+        # But here we pass specific datasets.
+        # Check what base_dataset returns.
+        item = self.base_dataset[idx]
+        if isinstance(item, tuple):
+            img = item[0]
+            target = item[1]
+            v1, v2 = self.transform(img)
+            return v1, v2, target
+        else:
+            img = item
+            v1, v2 = self.transform(img)
+            return v1, v2
+
 # ============================================================
 # SwiftThief Attack
 # ============================================================
@@ -292,6 +345,9 @@ class SwiftThief(AttackRunner):
 
         # Training (CL)
         self.batch_size = int(config.get("batch_size", 256))
+        self.num_workers = int(config.get("num_workers", 4))
+        self.prefetch_factor = int(config.get("prefetch_factor", 2))
+        self.use_pil_transforms = bool(config.get("use_pil_transforms", False))
         self.lr = float(config.get("lr", 0.06))
         self.momentum = float(config.get("momentum", 0.9))
         self.weight_decay = float(config.get("weight_decay", 5e-4))
@@ -341,6 +397,12 @@ class SwiftThief(AttackRunner):
         while ctx.budget_remaining > 0:
             step_size = min(round_size, ctx.budget_remaining)
             query_batch = self._select_query_batch(step_size, self.state)
+            
+            # [FIX] Handle pool exhaustion
+            if query_batch.x.size(0) == 0:
+                self.logger.warning("SwiftThief query selection returned empty batch. Stopping attack.")
+                break
+                
             oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
             self._handle_oracle_output(query_batch, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
@@ -396,7 +458,7 @@ class SwiftThief(AttackRunner):
     # SSL transforms (raw -> aug -> raw, then normalize_pair)
     # -------------------------
 
-    def _build_ssl_transforms(self, state: BenchmarkState) -> transforms.Compose:
+    def _build_ssl_transforms(self, state: BenchmarkState, use_pil: bool) -> transforms.Compose:
         C, H, W = state.metadata.get("input_shape", (3, 32, 32))
 
         if C == 1:
@@ -404,36 +466,32 @@ class SwiftThief(AttackRunner):
         else:
             cj = transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
 
-        return transforms.Compose(
-            [
-                transforms.RandomResizedCrop((H, W), scale=(0.2, 1.0)),
-                transforms.RandomHorizontalFlip(),
-                transforms.RandomApply([cj], p=0.8),
-                transforms.RandomGrayscale(p=0.2),
-                transforms.ToTensor(),
-            ]
-        )
+        ops = [
+            transforms.RandomResizedCrop((H, W), scale=(0.2, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomApply([cj], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+        ]
+        if use_pil:
+            ops.append(transforms.ToTensor())
+        return transforms.Compose(ops)
 
     def _apply_two_crops(self, x_batch: torch.Tensor, device: torch.device, state: BenchmarkState) -> Tuple[torch.Tensor, torch.Tensor]:
         if self._ssl_transforms is None:
-            self._ssl_transforms = self._build_ssl_transforms(state)
+            self._ssl_transforms = self._build_ssl_transforms(state, self.use_pil_transforms)
 
         C = state.metadata.get("input_shape", (3, 32, 32))[0]
+        two_crop = TwoCropTransform(
+            self._ssl_transforms,
+            to_pil_first=self.use_pil_transforms,
+            input_channels=C,
+        )
 
-        to_pil = transforms.ToPILImage()
         v1_list, v2_list = [], []
-
         for x in x_batch.detach().cpu():
-            img = to_pil(x.clamp(0, 1))
-            if C == 1:
-                if img.mode != "L":
-                    img = img.convert("L")
-            else:
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-
-            v1_list.append(self._ssl_transforms(img))
-            v2_list.append(self._ssl_transforms(img))
+            v1, v2 = two_crop(x)
+            v1_list.append(v1)
+            v2_list.append(v2)
 
         return torch.stack(v1_list).to(device), torch.stack(v2_list).to(device)
 
@@ -451,6 +509,11 @@ class SwiftThief(AttackRunner):
             raise ValueError(
                 f"Query pool exhausted for {self.__class__.__name__}. "
                 f"Cannot select {k} more queries."
+            )
+        if k > len(unlabeled):
+            raise ValueError(
+                f"Requested step_size={k} exceeds remaining pool size={len(unlabeled)} "
+                f"for {self.__class__.__name__}."
             )
 
         total_budget = int(state.metadata.get("max_budget") or self.config.get("max_budget", 10000))
@@ -478,14 +541,10 @@ class SwiftThief(AttackRunner):
             x_list.append(img)
             indices.append(int(idx))
 
-        if len(x_list) < k:
-            raise ValueError(
-                f"Query pool exhausted for {self.__class__.__name__}. "
-                f"Requested {k}, found {len(x_list)}."
-            )
-
-        x = torch.stack(x_list[:k])
-        return QueryBatch(x=x, meta={"indices": indices[:k], "sampling_mode": state.attack_state["sampling_mode"]})
+        x = torch.stack(x_list)
+        # Slicing x_list[:k] is redundant if len < k, but safe.
+        # However, indices was appended in loop.
+        return QueryBatch(x=x, meta={"indices": indices, "sampling_mode": state.attack_state["sampling_mode"]})
 
     def _update_sampling_mode(self, state: BenchmarkState) -> None:
         labeled = state.attack_state["labeled_indices"]
@@ -504,23 +563,17 @@ class SwiftThief(AttackRunner):
             state.attack_state["sampling_mode"] = "entropy"
             return
 
-        rare_sum = sum(class_counts.get(c, 0) for c in rare_classes)
-        mean_rare = rare_sum / len(rare_classes)
-# [P0 FIX] Implement exact Eq 8 switching condition from paper
-        # B - |Q| <= N_R(μ - μ_R) where:
-        # N_R = total count of rare class samples in pool
-        # μ_R = mean samples per rare class (historical average)
-        # μ = overall mean samples per class (historical average)
-        total_rare_samples = sum(class_counts.get(c, 0) for c in rare_classes)
         total_budget = int(state.metadata.get("max_budget", 10000))
         total_q = sum(class_counts.values())
-        mu_rare = total_rare_samples / len(rare_classes) if len(rare_classes) > 0 else 0
-        mu = total_q / int(state.metadata.get("num_classes") or 10)
-        
+        mu = total_q / num_classes if num_classes > 0 else 0.0
+        mu_rare = (
+            sum(class_counts.get(c, 0) for c in rare_classes) / len(rare_classes)
+            if len(rare_classes) > 0
+            else 0.0
+        )
         remaining = total_budget - total_q
         threshold = len(rare_classes) * (mu - mu_rare)
-        
-        # Paper Eq. 8: switch to rare class if remaining budget <= N_R(μ - μ_R)
+
         state.attack_state["sampling_mode"] = "rare_class" if remaining <= threshold else "entropy"
 
     def _select_samples(self, k: int, state: BenchmarkState) -> List[int]:
@@ -550,46 +603,29 @@ class SwiftThief(AttackRunner):
             return []
 
         entropy_scores = []
-        bs = 128
+        bs = min(self.batch_size, len(candidates))
         with torch.no_grad():
             for start in tqdm(range(0, len(candidates), bs), desc="[SwiftThief] Scoring Pool", leave=False):
                 chunk = candidates[start:start + bs]
                 x_raw = torch.stack([self.pool_dataset[i][0] for i in chunk]).to(device)
                 x = self.normalize(x_raw)
-                # [P0 FIX] Implement exact Eq 3 entropy-weighted cosine similarity from paper
-        # η_ij = (1 - H(x_i)/log(K)) * cos_sim(f_i, f_j) where cos_sim is normalized cosine similarity
-        probs = F.softmax(substitute(x), dim=1)
-        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
-        
-        # For each sample, compute weighted cosine similarity with pool samples
-        weighted_cosine_sims = []
-        for i in range(len(chunk)):
-            # Current sample
-            f_i = feats[i]  # Feature vector for current sample
-            
-            # Weighted cosine similarity with all other samples in batch
-            batch_weighted_cosine = []
-            for j in range(len(chunk)):
-                if i != j:
-                    f_j = feats[j]  # Feature vector for comparison
-                    
-                    # Standard cosine similarity
-                    cos_sim = F.cosine_similarity(f_i.unsqueeze(0), f_j.unsqueeze(0))
-                    
-                    # Entropy weighting factor from Eq 3: (1 - H(x_i)/log(K))
-                    K = int(state.metadata.get("num_classes") or 10)
-                    entropy_weight = (1 - entropy[i] / torch.log(torch.tensor(K, dtype=torch.float)))
-                    
-                    # η_ij from Eq  3
-                    eta_ij = entropy_weight * cos_sim
-                    
-                    batch_weighted_cosine.append(eta_ij)
-            
-            # Use maximum weighted cosine similarity for each sample
-            max_weighted_cosine = max(batch_weighted_cosine) if batch_weighted_cosine else 0.0
-            weighted_cosine_sims.append(max_weighted_cosine)
-        
-        entropy_scores.extend([(chunk[i], float(max_weighted_cosine)) for i in range(len(chunk))])
+
+                probs = F.softmax(substitute(x), dim=1)
+                entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
+                K = int(state.metadata.get("num_classes") or 10)
+                log_k = torch.log(torch.tensor(float(K), device=device))
+                entropy_weight = 1.0 - entropy / log_k
+
+                probs_norm = F.normalize(probs, dim=1)
+                cos_sim = probs_norm @ probs_norm.T
+                weights = entropy_weight.unsqueeze(1) * entropy_weight.unsqueeze(0)
+                eta = weights * cos_sim
+                eta.fill_diagonal_(0.0)
+
+                max_eta = eta.max(dim=1).values
+                entropy_scores.extend(
+                    [(chunk[i], float(max_eta[i].item())) for i in range(len(chunk))]
+                )
 
         entropy_scores.sort(key=lambda t: t[1], reverse=True)
         return [idx for idx, _ in entropy_scores[:min(k, len(entropy_scores))]]
@@ -600,7 +636,7 @@ class SwiftThief(AttackRunner):
         substitute: SwiftThiefSubstitute,
         device: torch.device,
         state: BenchmarkState,
-        batch_size: int = 128
+        batch_size: int = 256
     ) -> torch.Tensor:
         self._ensure_normalizers(state, device)
         feats = []
@@ -645,8 +681,12 @@ class SwiftThief(AttackRunner):
             return []
 
         device = next(substitute.parameters()).device
-        rare_feats = self._extract_features_for_indices(q_y, substitute, device, state)
-        pool_feats = self._extract_features_for_indices(candidates, substitute, device, state)
+        rare_feats = self._extract_features_for_indices(
+            q_y, substitute, device, state, batch_size=self.batch_size
+        )
+        pool_feats = self._extract_features_for_indices(
+            candidates, substitute, device, state, batch_size=self.batch_size
+        )
         if rare_feats.numel() == 0 or pool_feats.numel() == 0:
             return self._select_entropy(k, state)
 
@@ -771,11 +811,45 @@ class SwiftThief(AttackRunner):
             dataset_q, [train_size, val_size], generator=torch.Generator().manual_seed(42)
         )
 
-        bs_q = min(256, len(train_q))
+        # [OPTIMIZATION] Pre-build transforms and wrap datasets for multi-worker loading
+        ssl_transform = self._build_ssl_transforms(state, self.use_pil_transforms)
+        input_channels = state.metadata.get("input_shape", (3, 32, 32))[0]
+        two_crop = TwoCropTransform(
+            ssl_transform,
+            to_pil_first=self.use_pil_transforms,
+            input_channels=input_channels,
+        )
+
+        # Wrap labeled training set
+        train_q_ssl = SimSiamDataset(train_q, two_crop)
+
+        bs_q = min(self.batch_size, len(train_q))
         if bs_q <= 0:
             return
-        labeled_loader = torch.utils.data.DataLoader(train_q, batch_size=bs_q, shuffle=True, num_workers=0, drop_last=False)
-        val_loader = torch.utils.data.DataLoader(val_q, batch_size=min(256, len(val_q)), shuffle=False, num_workers=0, drop_last=False)
+
+        loader_kwargs = {
+            "num_workers": self.num_workers,
+            "pin_memory": True,
+            "drop_last": False,
+        }
+        if self.num_workers > 0:
+            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["prefetch_factor"] = self.prefetch_factor
+             
+        labeled_loader = torch.utils.data.DataLoader(
+            train_q_ssl,
+            batch_size=bs_q,
+            shuffle=True,
+            **loader_kwargs,
+        )
+        
+        # Validation loader (standard)
+        val_loader = torch.utils.data.DataLoader(
+            val_q,
+            batch_size=min(self.batch_size, len(val_q)),
+            shuffle=False,
+            **loader_kwargs,
+        )
 
         # U loader
         unlabeled_indices = state.attack_state["unlabeled_indices"]
@@ -798,8 +872,16 @@ class SwiftThief(AttackRunner):
                 unlabeled_loader = None
             else:
                 dataset_u = PoolU(u_indices, self.pool_dataset)
-                bs_u = min(self.batch_size, 128, len(dataset_u))
-                unlabeled_loader = torch.utils.data.DataLoader(dataset_u, batch_size=bs_u, shuffle=True, num_workers=0, drop_last=False)
+                # Wrap unlabeled set
+                dataset_u_ssl = SimSiamDataset(dataset_u, two_crop)
+                
+                bs_u = min(self.batch_size, len(dataset_u))
+                unlabeled_loader = torch.utils.data.DataLoader(
+                    dataset_u_ssl,
+                    batch_size=bs_u,
+                    shuffle=True,
+                    **loader_kwargs,
+                )
 
         device = torch.device(state.metadata.get("device", "cpu"))
         num_classes = int(state.metadata.get("num_classes") or 10)
@@ -807,6 +889,8 @@ class SwiftThief(AttackRunner):
         # init / warm-start substitute
         substitute_config = state.metadata.get("substitute_config") or self.config.get("substitute") or {}
         arch = substitute_config.get("arch", "resnet18")
+        width_mult = int(substitute_config.get("width_mult", 1))
+        dropout_prob = float(substitute_config.get("dropout_prob", 0.0))
 
         substitute = state.attack_state.get("substitute")
         if not isinstance(substitute, SwiftThiefSubstitute):
@@ -814,6 +898,8 @@ class SwiftThief(AttackRunner):
                 arch=arch,
                 num_classes=num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+                width_mult=width_mult,
+                dropout_prob=dropout_prob,
             ).to(device)
 
             if hasattr(base, "fc"):
@@ -860,11 +946,12 @@ class SwiftThief(AttackRunner):
         fgsm_model = _SimSiamWrapper(substitute, self.projection_head, self.predictor_head).to(device)
         reg_adversary = CL_FGSM(fgsm_model, self.fgsm_epsilon, device)
 
-        optimizer_cl = torch.optim.SGD(
-            list(substitute.parameters()) + list(self.projection_head.parameters()) + list(self.predictor_head.parameters()),
-            lr=self.lr,
-            momentum=self.momentum,
-            weight_decay=self.weight_decay
+        opt_config = substitute_config.get("optimizer", {})
+        optimizer_cl = self._build_optimizer(
+            list(substitute.parameters())
+            + list(self.projection_head.parameters())
+            + list(self.predictor_head.parameters()),
+            opt_config,
         )
 
         best_f1 = 0.0
@@ -890,14 +977,17 @@ class SwiftThief(AttackRunner):
                 # U batch
                 if unlabeled_loader is not None:
                     try:
-                        u_raw = next(unlabeled_iter)
+                        u1_raw, u2_raw = next(unlabeled_iter)
                     except StopIteration:
                         unlabeled_iter = iter(unlabeled_loader)
-                        u_raw = next(unlabeled_iter)
+                        u1_raw, u2_raw = next(unlabeled_iter)
 
-                    u_raw = u_raw.to(device)
-                    u1_raw, u2_raw = self._apply_two_crops(u_raw, device, state)
+                    u1_raw = u1_raw.to(device, non_blocking=True)
+                    u2_raw = u2_raw.to(device, non_blocking=True)
+                    
+                    # Normalization on GPU
                     u1, u2 = self.normalize_pair(u1_raw, u2_raw)
+                    
                     outs_u = fgsm_model(im_aug1=u1, im_aug2=u2)
                     loss1 = criterion(outs_u['z1'], outs_u['z2'], outs_u['p1'], outs_u['p2'])
                 else:
@@ -905,15 +995,15 @@ class SwiftThief(AttackRunner):
 
                 # Q batch
                 try:
-                    x_raw, y = next(labeled_iter)
+                    x1_raw, x2_raw, y = next(labeled_iter)
                 except StopIteration:
                     labeled_iter = iter(labeled_loader)
-                    x_raw, y = next(labeled_iter)
+                    x1_raw, x2_raw, y = next(labeled_iter)
 
-                x_raw = x_raw.to(device)
-                y = y.to(device)
+                x1_raw = x1_raw.to(device, non_blocking=True)
+                x2_raw = x2_raw.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True)
 
-                x1_raw, x2_raw = self._apply_two_crops(x_raw, device, state)
                 x1, x2 = self.normalize_pair(x1_raw, x2_raw)
 
                 adv_x1 = reg_adversary(x1, x2)
@@ -979,17 +1069,21 @@ class SwiftThief(AttackRunner):
             p.requires_grad = False
         for p in self.predictor_head.parameters():
             p.requires_grad = False
-
-        optimizer_kd = torch.optim.SGD(
-            substitute.parameters(),
-            lr=self.kd_lr,
-            momentum=0.9,
-            weight_decay=self.weight_decay
+            
+        # Re-create loader for KD (standard, no TwoCrop)
+        # We can reuse train_q but need standard loader
+        kd_loader = torch.utils.data.DataLoader(
+            train_q,  # Standard dataset, not wrapped
+            batch_size=bs_q,
+            shuffle=True,
+            **loader_kwargs,
         )
+
+        optimizer_kd = self._build_optimizer(substitute.parameters(), opt_config)
 
         kd_pbar = tqdm(range(self.kd_epochs), desc="[SwiftThief] Training (KD)", leave=False)
         for e in kd_pbar:
-            kd_loss = self._train_kd_epoch(substitute, labeled_loader, optimizer_kd, device, state)
+            kd_loss = self._train_kd_epoch(substitute, kd_loader, optimizer_kd, device, state)
             kd_pbar.set_postfix({"Loss": f"{kd_loss:.4f}"})
 
         final_val_f1 = self._compute_f1(substitute, val_loader, device, state)

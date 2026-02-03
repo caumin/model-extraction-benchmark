@@ -153,7 +153,7 @@ def deepfool_distance_vectorized(
     
     # Compute L2 norm of perturbations
     perturbations_flat = perturbations.view(perturbations.shape[0], -1)
-    distances = torch.norm(perturbations_flat, dim=2)
+    distances = torch.norm(perturbations_flat, dim=1)
     
     return distances
 

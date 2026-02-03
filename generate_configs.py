@@ -105,7 +105,7 @@ def generate_configs():
 
             for max_b, checkpoints in budgets_to_gen:
                 for seed in seeds:
-                    budget_suffix = f"_{max_b//1000}k" if attack_name in AL_ATTACKS else ""
+                    budget_suffix = f"_{max_b//1000}k"
                     config_name = f"{setup['id']}_{attack}{budget_suffix}_seed{seed}"
                     
                     config = {
@@ -140,7 +140,7 @@ def generate_configs():
                             "arch": setup['substitute_arch'],
                             "init_seed": 1234 + seed,
                             "trackA": {
-                                "batch_size": 128,
+                            "batch_size": 256,
                                 "steps_coeff_c": 0.2
                             },
                             "optimizer": {
@@ -162,6 +162,9 @@ def generate_configs():
                             "delete_on_finish": True
                         }
                     }
+
+                    if attack_name == "knockoff_nets":
+                        config["attack"]["offline_train_epochs"] = config["substitute"]["max_epochs"]
 
                     if attack_strategy:
                         config["attack"]["strategy"] = attack_strategy

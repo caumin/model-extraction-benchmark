@@ -386,10 +386,14 @@ class BlackboxRipper(AttackRunner):
         sub_config = state.metadata.get("substitute_config", {})
         opt_params = sub_config.get("optimizer", {})
         
+        width_mult = int(sub_config.get("width_mult", 1))
+        dropout_prob = float(sub_config.get("dropout_prob", 0.0))
         self.substitute = create_substitute(
             arch=sub_config.get("arch", "resnet18"),
             num_classes=self.num_classes,
             input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
         ).to(device)
         
         self.substitute_optimizer = optim.Adam(
@@ -426,14 +430,11 @@ class BlackboxRipper(AttackRunner):
         norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
         
-        # Paper: "We train the substitute model for 200 epochs using the Adam optimizer."
-        # Setup implies batch size 64.
-        
         train_loader = torch.utils.data.DataLoader(
             QueryDataset(x_all, y_all),
-            batch_size=64, # Explicitly 64 as per paper setup
+            batch_size=self.batch_size,
             shuffle=True,
-            num_workers=0,
+            num_workers=4,
         )
         
         epochs = max(1, int(self.substitute_epochs))

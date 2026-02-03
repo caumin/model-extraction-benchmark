@@ -28,7 +28,7 @@ substitute:
   arch: resnet18
   init_seed: 1236
   trackA:
-    batch_size: 128
+    batch_size: 256
     steps_coeff_c: 0.2
   optimizer:
     name: sgd

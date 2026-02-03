@@ -49,7 +49,19 @@ class ESAttack(AttackRunner):
         self.student_optimizer: optim.Optimizer | None = None
         self.generator_optimizer: optim.Optimizer | None = None
         self.syn_data: torch.Tensor | None = None
+        
+        # Replay buffer for dataset accumulation (ES Attack critical fix)
+        self.replay_buffer_x: List[torch.Tensor] = []
+        self.replay_buffer_y: List[torch.Tensor] = []
 
+        # [CRITICAL FIX] Enforce class-conditional generation as required by paper
+        if self.synthesis_mode == "dnn_syn" and not self.use_class_conditional:
+            raise ValueError(
+                "ES Attack paper strictly describes conditional generation (G(z, l)). "
+                "Unconditional DNN-SYN mode is not supported in the paper. "
+                "Set use_class_conditional=True."
+            )
+        
         self._initialize_state(state)
 
     def run(self, ctx: BenchmarkContext) -> None:
@@ -71,11 +83,11 @@ class ESAttack(AttackRunner):
         device = state.metadata.get("device", "cpu")
 
         if self.synthesis_mode == "opt_syn":
-            x, indices = self._sample_syn_batch(k)
-            self._optimize_syn_batch(indices, device)
-            x = self.syn_data[indices].to(device)
-            x_query = x * 0.5 + 0.5
-            meta = {"synthetic": True, "mode": "opt_syn", "indices": indices.cpu()}
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            x_init = self._sample_syn_batch(k, device, input_shape)
+            x_opt = self._optimize_syn_batch(x_init, device)
+            x_query = x_opt * 0.5 + 0.5
+            meta = {"synthetic": True, "mode": "opt_syn"}
             return x_query, meta
 
         z = torch.randn(k, self.noise_dim, device=device)
@@ -112,6 +124,10 @@ class ESAttack(AttackRunner):
         else:
             victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
 
+        # [CRITICAL FIX] Dataset accumulation - store queries in replay buffer
+        self.replay_buffer_x.append(x_query.cpu())
+        self.replay_buffer_y.append(victim_probs.cpu())
+
         self._train_student(x_query, victim_probs)
 
         if self.synthesis_mode == "dnn_syn" and self.generator is not None:
@@ -131,19 +147,23 @@ class ESAttack(AttackRunner):
         input_shape = state.metadata.get("input_shape", (3, 32, 32))
         if self.student is None:
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            arch = self.config.get("student_arch", "resnet18-8x")
             sub_config = state.metadata.get("substitute_config", {})
+            arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18-8x")
+            width_mult = int(sub_config.get("width_mult", 1))
+            dropout_prob = float(sub_config.get("dropout_prob", 0.0))
             opt_params = sub_config.get("optimizer", {})
             
             self.student = create_substitute(
                 arch=arch,
                 num_classes=self.num_classes,
                 input_channels=int(input_shape[0]),
+                width_mult=width_mult,
+                dropout_prob=dropout_prob,
             ).to(device)
-            self.student_optimizer = optim.SGD(
+            # [CRITICAL FIX] Use Adam optimizer as specified in paper (Source [175])
+            self.student_optimizer = optim.Adam(
                 self.student.parameters(),
                 lr=float(opt_params.get("lr", self.student_lr)),
-                momentum=float(opt_params.get("momentum", 0.9)),
                 weight_decay=float(opt_params.get("weight_decay", 5e-4))
             )
 
@@ -200,18 +220,39 @@ class ESAttack(AttackRunner):
         def _norm(img):
             return (img - norm_mean) / norm_std
 
+        # [CRITICAL FIX] Dataset accumulation - use replay buffer for training
+        if len(self.replay_buffer_x) > 0:
+            # Concatenate all accumulated data to form the full dataset D_syn^(t)
+            full_x = torch.cat(self.replay_buffer_x, dim=0).to(x.device)
+            full_y = torch.cat(self.replay_buffer_y, dim=0).to(x.device)
+        else:
+            # Fallback to current batch if buffer is empty
+            full_x = x
+            full_y = victim_probs
+
         sub_pbar = tqdm(range(self.student_epochs), desc="[ESAttack] Training Student", leave=False)
         for _ in sub_pbar:
             epoch_loss = 0.0
             
-            # Create a dataloader for the query data to support proper batching
-            dataset = torch.utils.data.TensorDataset(x, victim_probs)
-            # Ensure strict batch size from config, or default 128
-            train_bs = min(len(x), 128)
-            loader = torch.utils.data.DataLoader(dataset, batch_size=train_bs, shuffle=True)
+            # Create a dataloader for the accumulated data to support proper batching
+            dataset = torch.utils.data.TensorDataset(full_x, full_y)
+            # Ensure strict batch size from config
+            train_bs = min(len(full_x), self.batch_size)
+            loader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=train_bs,
+                shuffle=True,
+                num_workers=0,
+            )
             
             for batch_x, batch_y in loader:
-                batch_x, batch_y = batch_x.to(x.device), batch_y.to(x.device)
+                # batch_x/y are already on device (from x/victim_probs) if x was on device
+                # But DataLoader might move them to CPU if num_workers>0 and tensors were on GPU (error cause).
+                # With num_workers=0 and tensors on GPU, they stay on GPU (or we ensure to move them).
+                
+                # If x was on GPU, TensorDataset keeps it there. 
+                # num_workers=0 just slices it.
+                
                 self.student_optimizer.zero_grad()
                 
                 if self.use_opt_augment and self.synthesis_mode == "opt_syn":
@@ -224,11 +265,9 @@ class ESAttack(AttackRunner):
                      x_input = batch_x
 
                 logits = self.student(_norm(x_input))
-                loss = F.kl_div(
-                    F.log_softmax(logits, dim=1),
-                    batch_y,
-                    reduction="batchmean",
-                )
+                # [CRITICAL FIX] Replace KL Divergence with Cross Entropy (Paper Equation 2)
+                # L_CE(f_s(x), f_v(x)) - minimize cross entropy between student and victim outputs
+                loss = F.cross_entropy(logits, batch_y)
                 loss.backward()
                 self.student_optimizer.step()
                 epoch_loss += loss.item()
@@ -293,10 +332,16 @@ class ESAttack(AttackRunner):
             def _norm(img):
                 return (img - norm_mean) / norm_std
             
+            # [CRITICAL FIX] Switch student to eval mode during generator update to prevent BN corruption
+            student_training_mode = self.student.training
+            self.student.eval()
+            
             # 1. Classification Loss (L_img)
             # Maximize probability of target class 'y'
             # L_img = CE(S(G(z)), y)
-            logits_1 = self.student(_norm(x_gen_1))
+            with torch.no_grad():
+                # Student should act as fixed discriminator - no gradients needed
+                logits_1 = self.student(_norm(x_gen_1))
             
             if y is not None:
                 # [P0 FIX] Paper Equation 6 mandates Cross-Entropy, NOT KL Divergence
@@ -326,9 +371,8 @@ class ESAttack(AttackRunner):
             # We want to MINIMIZE L_ms = dz / lz (according to correction plan)
             # Paper Eq 5: L_DNN = L_img + lambda * L_ms
             
-            # Let's use L1 distance for images and z
-            lz = torch.mean(torch.abs(x_gen_raw_1 - x_gen_raw_2).view(z1.size(0), -1), dim=1)
-            dz = torch.mean(torch.abs(z1 - z2).view(z1.size(0), -1), dim=1)
+            lz = torch.norm((x_gen_raw_1 - x_gen_raw_2).view(z1.size(0), -1), p=2, dim=1)
+            dz = torch.norm((z1 - z2).view(z1.size(0), -1), p=2, dim=1)
             
             # Add epsilon to lz to prevent division by zero
             epsilon = 1e-8
@@ -339,18 +383,22 @@ class ESAttack(AttackRunner):
             
             loss.backward()
             self.generator_optimizer.step()
+            
+            # [CRITICAL FIX] Restore student training mode after generator update
+            if student_training_mode:
+                self.student.train()
 
-    def _sample_syn_batch(self, k: int) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.syn_data is None:
-            raise ValueError("Synthetic dataset not initialized")
-        idx = torch.randint(0, self.syn_data.size(0), (k,), device=self.syn_data.device)
-        return self.syn_data[idx], idx
+    def _sample_syn_batch(
+        self,
+        k: int,
+        device: str,
+        input_shape: tuple[int, int, int],
+    ) -> torch.Tensor:
+        c, h, w = int(input_shape[0]), int(input_shape[1]), int(input_shape[2])
+        return torch.randn(k, c, h, w, device=device)
 
-    def _optimize_syn_batch(self, indices: torch.Tensor, device: str) -> None:
-        if self.syn_data is None:
-            return
-        # x is in [-1, 1] here
-        x = self.syn_data[indices].clone().detach().to(device)
+    def _optimize_syn_batch(self, x_init: torch.Tensor, device: str) -> torch.Tensor:
+        x = x_init.clone().detach().to(device)
         x.requires_grad_(True)
         optimizer = optim.Adam([x], lr=self.opt_lr)
         
@@ -395,7 +443,7 @@ class ESAttack(AttackRunner):
             with torch.no_grad():
                 x.data.clamp_(-1.0, 1.0)
                 
-        self.syn_data[indices] = x.detach()
+        return x.detach()
 
     def _refresh_syn_data(self, device: str) -> None:
         if self.syn_data is None or self.generator is None:

@@ -206,14 +206,18 @@ class DFMSHL(AttackRunner):
 
         if self.clone is None:
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            arch = self.config.get("clone_arch", "resnet18-8x")
             sub_config = state.metadata.get("substitute_config", {})
+            arch = sub_config.get("arch") or self.config.get("clone_arch", "resnet18-8x")
+            width_mult = int(sub_config.get("width_mult", 1))
+            dropout_prob = float(sub_config.get("dropout_prob", 0.0))
             opt_params = sub_config.get("optimizer", {})
             
             self.clone = create_substitute(
                 arch=arch,
                 num_classes=self.num_classes,
                 input_channels=int(input_shape[0]),
+                width_mult=width_mult,
+                dropout_prob=dropout_prob,
             ).to(device)
             self.clone_optimizer = optim.SGD(
                 self.clone.parameters(),
@@ -346,7 +350,15 @@ class DFMSHL(AttackRunner):
 
         # Batching to avoid OOM for large buffers during init
         dataset = torch.utils.data.TensorDataset(x_fake, hard_labels)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        
+        # [CRITICAL FIX] Use num_workers=0 because x_fake/hard_labels are already on GPU.
+        # CUDA tensors cannot be shared across processes in DataLoader multiprocessing.
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=0,
+        )
         
         for batch_x, batch_y in loader:
             self.clone_optimizer.zero_grad()
@@ -358,14 +370,18 @@ class DFMSHL(AttackRunner):
     def _reset_clone(self) -> None:
         device = self.state.metadata.get("device", "cpu")
         input_shape = self.state.metadata.get("input_shape", (3, 32, 32))
-        arch = self.config.get("clone_arch", "resnet18-8x")
         sub_config = self.state.metadata.get("substitute_config", {})
+        arch = sub_config.get("arch") or self.config.get("clone_arch", "resnet18-8x")
+        width_mult = int(sub_config.get("width_mult", 1))
+        dropout_prob = float(sub_config.get("dropout_prob", 0.0))
         opt_params = sub_config.get("optimizer", {})
 
         self.clone = create_substitute(
             arch=arch,
             num_classes=self.num_classes,
             input_channels=int(input_shape[0]),
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
         ).to(device)
         self.clone_optimizer = optim.SGD(
             self.clone.parameters(),
