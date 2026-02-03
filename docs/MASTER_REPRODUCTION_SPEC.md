@@ -7,6 +7,23 @@
 
 ---
 
+## 0. Protocol Freeze (v1.2)
+**Effective Date:** February 4, 2026
+
+All remediation work must adhere to **Benchmark Protocol v1.2**. This introduces strict branching rules to separate "Query Strategy" improvements from "Training Recipe" advantages.
+
+### 0.1. Track Classification & Unification
+*   **Track A (Standard)**: Innovations in *query selection* (e.g., Active Learning, Bandit) must use the **Unified Substitute Trainer** defined in `docs/design/SUBSTITUTE_TRAINING_UNIFICATION.md`.
+*   **Track B (Native)**: Innovations requiring *coupled loops* (e.g., Data-Free GANs) may use native training but are subject to strict control experiments.
+*   **Hybrid**: If a generative attack can be decoupled, it must support a "Standard Loop" mode for Track A comparison.
+
+### 0.2. Mandatory Control Experiments
+Any attack not using the Unified Substitute Trainer (Track B/Hybrid) must implement the **Control Experiment Template** defined in `docs/design/BENCHMARK_PROTOCOL.md`.
+*   **Goal**: Isolate $\Delta_{loop}$ (Performance gain from training recipe) from $\Delta_{query}$ (Performance gain from query synthesis).
+*   **Requirement**: Report `Native Loop + Random Queries` vs `Standard Loop + Random Queries` baselines.
+
+---
+
 ## 1. Executive Summary
 
 This document serves as the authoritative source of truth for remediating the 14 model extraction attacks currently implemented in the `mebench` repository. A comprehensive analysis of the codebase against original paper specifications has revealed systemic deviations in three key areas:

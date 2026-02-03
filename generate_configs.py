@@ -68,6 +68,8 @@ def generate_configs():
     budget_checkpoints = [1000, 10000, 20000]
     data_free_max = 100000
     data_free_checkpoints = [1000, 10000, 20000, 50000, 100000]
+    protocol_version = "1.2"
+    substitute_batch_size = 256
 
     os.makedirs("configs/matrix", exist_ok=True)
 
@@ -107,12 +109,15 @@ def generate_configs():
                 for seed in seeds:
                     budget_suffix = f"_{max_b//1000}k"
                     config_name = f"{setup['id']}_{attack}{budget_suffix}_seed{seed}"
-                    
+
                     config = {
                         "run": {
                             "name": config_name,
                             "seeds": [seed],
                             "device": "cuda:0"
+                        },
+                        "benchmark": {
+                            "protocol_version": protocol_version
                         },
                         "victim": {
                             "victim_id": victim_id,
@@ -139,8 +144,9 @@ def generate_configs():
                         "substitute": {
                             "arch": setup['substitute_arch'],
                             "init_seed": 1234 + seed,
+                            "batch_size": substitute_batch_size,
                             "trackA": {
-                            "batch_size": 256,
+                                "batch_size": substitute_batch_size,
                                 "steps_coeff_c": 0.2
                             },
                             "optimizer": {

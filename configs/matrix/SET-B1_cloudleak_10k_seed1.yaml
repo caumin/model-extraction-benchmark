@@ -3,6 +3,8 @@ run:
   seeds:
   - 1
   device: cuda:0
+benchmark:
+  protocol_version: '1.2'
 victim:
   victim_id: cifar10_resnet18
   arch: resnet18
@@ -27,6 +29,7 @@ attack:
 substitute:
   arch: resnet18
   init_seed: 1235
+  batch_size: 256
   trackA:
     batch_size: 256
     steps_coeff_c: 0.2

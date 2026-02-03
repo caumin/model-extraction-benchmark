@@ -129,6 +129,14 @@ For implementation details of specific attacks, see [docs/reference/](docs/refer
 2.  **Oracle**: Default `soft_prob` uses Temperature `T=1.0`. `hard_top1` returns labels.
 3.  **Determinism**: Victims run in `eval()`/`no_grad()`. Seeds are fixed for Track A.
 
+### 🔄 Protocol v1.2: Track Logic & Control Experiments
+To ensure fair attribution of performance gains, we enforce **Protocol v1.2** branching rules:
+- **Track A (Query Focus)**: Attacks that innovate on *selection* must use the **Unified Substitute Trainer** (Standard Loop).
+- **Track B (System Focus)**: Attacks with tightly coupled generation/training loops (e.g., Data-Free GANs) retain their native loop.
+- **Control Experiments**: All Track B/Hybrid attacks **must** report a "Loop Contribution" control experiment (Standard Loop vs. Native Loop) to isolate the benefit of custom training recipes from the query strategy itself.
+
+*See [Benchmark Protocol v1.2](docs/design/BENCHMARK_PROTOCOL.md) and [Substitute Training Unification](docs/design/SUBSTITUTE_TRAINING_UNIFICATION.md) for details.*
+
 ---
 
 ## 🤝 Contributing

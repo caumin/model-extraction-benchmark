@@ -1,8 +1,10 @@
 """Artifact logging for benchmark results."""
 
-import json
+import copy
 import csv
+import json
 import logging
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -151,8 +153,14 @@ class ArtifactLogger:
         import yaml
 
         config_path = self.run_dir / "run_config.yaml"
+        config_to_save = copy.deepcopy(config)
+
+        run_section = config_to_save.setdefault("run", {})
+        if "code_version" not in run_section:
+            run_section["code_version"] = _get_git_commit()
+
         with open(config_path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False)
+            yaml.dump(config_to_save, f, default_flow_style=False)
 
     def finalize(self) -> None:
         """Finalize logging (save all artifacts)."""
@@ -179,3 +187,19 @@ def create_run_dir(
     run_dir = base_dir / run_name / timestamp / f"seed_{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
+
+
+def _get_git_commit() -> str:
+    """Best-effort git commit hash for run provenance."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        return "unknown"
+    return "unknown"

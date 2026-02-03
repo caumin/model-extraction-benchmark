@@ -3,6 +3,8 @@ run:
   seeds:
   - 0
   device: cuda:0
+benchmark:
+  protocol_version: '1.2'
 victim:
   victim_id: mnist_lenet
   arch: lenet_mnist
@@ -27,6 +29,7 @@ attack:
 substitute:
   arch: lenet_mnist
   init_seed: 1234
+  batch_size: 256
   trackA:
     batch_size: 256
     steps_coeff_c: 0.2
