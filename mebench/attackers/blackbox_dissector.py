@@ -817,6 +817,7 @@ class BlackboxDissector(AttackRunner):
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
 
         def step_fn(model_local: nn.Module, x_batch: torch.Tensor, y_batch: torch.Tensor) -> torch.Tensor:
+            nonlocal unlabeled_iter
             if unlabeled_desc is not None:
                 unlabeled_desc.update(1)
 
@@ -825,7 +826,7 @@ class BlackboxDissector(AttackRunner):
             loss_sup = F.cross_entropy(outputs, y_batch.long())
 
             loss_kd = torch.tensor(0.0, device=device)
-            if unlabeled_loader is not None and teacher is not None:
+            if unlabeled_loader is not None and unlabeled_iter is not None and teacher is not None:
                 try:
                     x_unlab, _ = next(unlabeled_iter)
                 except StopIteration:

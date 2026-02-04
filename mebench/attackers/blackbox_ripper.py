@@ -24,6 +24,20 @@ from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 
 
+class QueryDataset(torch.utils.data.Dataset):
+    """Simple dataset for query data that can be pickled."""
+    
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx]
+
+
 class BlackboxRipper(AttackRunner):
     """Black-box Ripper attack with proxy GAN and evolutionary search."""
 
@@ -399,7 +413,7 @@ class BlackboxRipper(AttackRunner):
         self.substitute_optimizer = optim.Adam(
             self.substitute.parameters(),
             lr=float(opt_params.get("lr", self.substitute_lr)),
-        )
+)
 
         query_x = state.attack_state["query_data_x"]
         query_y = state.attack_state["query_data_y"]
@@ -408,17 +422,6 @@ class BlackboxRipper(AttackRunner):
 
         x_all = torch.cat(query_x, dim=0)
         y_all = torch.cat(query_y, dim=0)
-
-        class QueryDataset(torch.utils.data.Dataset):
-            def __init__(self, x, y):
-                self.x = x
-                self.y = y
-
-            def __len__(self):
-                return len(self.x)
-
-            def __getitem__(self, idx):
-                return self.x[idx], self.y[idx]
 
         self.substitute.train()
         output_mode = self.config.get("output_mode", "soft_prob")
