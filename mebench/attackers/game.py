@@ -1,6 +1,6 @@
 """GAME (Generative-Based Adaptive Model Extraction) attack."""
 
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Callable
 import logging
 import torch
 import torch.nn as nn
@@ -35,10 +35,11 @@ class GAME(AttackRunner):
         )
         self.base_channels = int(config.get("base_channels", 64))
         self.acs_strategy = config.get("acs_strategy", "uncertainty")
+        self.acs_probe_size = int(config.get("acs_probe_size", 0))
 
         self.beta1 = float(config.get("beta1", 1.0)) # l_res
         self.beta2 = float(config.get("beta2", 1.0)) # l_bou
-        self.beta3 = float(config.get("beta3", 1.0)) # l_adv
+        self.beta3 = float(config.get("beta3", 0.0)) # l_adv
         self.beta4 = float(config.get("beta4", 1.0)) # l_dif
 
         # TDL: Training Discriminator and Generator with proxy data.
@@ -57,11 +58,16 @@ class GAME(AttackRunner):
         self.proxy_loader = None
         self.proxy_iter = None
         self.tdl_done = False
+        self._ctx: Optional[BenchmarkContext] = None
+        self._query_fn: Optional[Callable[..., OracleOutput]] = None
+        self._pending_query_k: Optional[int] = None
 
         self._initialize_state(state)
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
+        self._ctx = ctx
+        self._query_fn = ctx.query
         device = self.state.metadata.get("device", "cpu")
         total_budget = self.state.budget_remaining
         pbar = self._create_progress_bar(total_budget, "[GAME] Extracting")
@@ -72,6 +78,8 @@ class GAME(AttackRunner):
         while ctx.budget_remaining > 0:
             step_size = self._default_step_size(ctx)
             x_query, meta = self._select_query_batch(step_size, self.state)
+            if x_query.size(0) == 0:
+                break
             oracle_output = ctx.query(x_query, meta=meta)
             self._handle_oracle_output(x_query, meta, oracle_output, self.state)
             pbar.update(x_query.size(0))
@@ -83,16 +91,26 @@ class GAME(AttackRunner):
                 last_eval_queries = queries_done
                 
         pbar.close()
+        self._ctx = None
+        self._query_fn = None
 
     def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
         self._init_models(state)
         device = state.metadata.get("device", "cpu")
-        z = torch.randn(k, self.noise_dim, device=device)
+        self._pending_query_k = k
         class_probs = self._compute_class_distribution(state, device)
+        self._pending_query_k = None
         class_probs = torch.nan_to_num(class_probs, nan=1.0 / self.num_classes)
         class_probs = torch.clamp(class_probs, min=1e-9)
         class_probs = class_probs / class_probs.sum()
 
+        if self._ctx is not None:
+            k = min(k, self._ctx.budget_remaining)
+            if k <= 0:
+                input_shape = state.metadata.get("input_shape", (3, 32, 32))
+                return torch.empty((0, *input_shape), device=device), {"acs_probs": class_probs.cpu()}
+
+        z = torch.randn(k, self.noise_dim, device=device)
         y_g = torch.multinomial(class_probs, k, replacement=True)
         with torch.no_grad():
             x = self.generator(z, y_g)
@@ -422,40 +440,16 @@ class GAME(AttackRunner):
             self._train_generator(z_cpu, y_cpu, victim_probs, device)
 
     def _gmd_phase(self, x: torch.Tensor, victim_probs: torch.Tensor) -> None:
-        # Check if victim output is effectively hard-label (max prob > 0.999)
-        # Or if config explicitly flags hard-label scenario.
-        # Paper GMD soft-label branch: if hard label, use discriminator soft output as target.
-        
-        # Determine if we should use discriminator soft labels
-        # Heuristic: if entropy of victim_probs is very low (~0), it's hard label.
-        entropy = -(victim_probs * torch.log(victim_probs + 1e-10)).sum(dim=1).mean()
-        is_hard_label = entropy < 0.01 
-        
-        target = victim_probs
-        if is_hard_label and self.discriminator is not None:
-            # Use Discriminator's class head as soft label source?
-            # GAME paper Section 4.3: "We use the soft output of the discriminator as the ground truth."
-            # The discriminator has an auxiliary classifier C.
-            # We feed x to D, get C(x).
-            with torch.no_grad():
-                d_out = self.discriminator(x)
-                if isinstance(d_out, tuple):
-                    _, d_class = d_out
-                    if d_class is not None:
-                        # Softmax of auxiliary classifier
-                        target = F.softmax(d_class, dim=1)
-        
         for _ in range(self.gmd_steps):
-            self._train_student(x, target)
+            self._train_student(x, victim_probs)
 
     def _compute_class_distribution(self, state: BenchmarkState, device: str) -> torch.Tensor:
         """Compute class distribution from FRESH victim queries for ACS deviation.
         
         [P0 FIX] Paper requires fresh victim queries for ACS deviation, not cached stats.
         """
-        if self.student is None:
+        if self.student is None or self.generator is None:
             return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
-
         victim_config = self.state.metadata.get("victim_config", {})
         normalization = victim_config.get("normalization")
         if normalization is None:
@@ -465,28 +459,56 @@ class GAME(AttackRunner):
         def _norm(img):
             return (img * 0.5 + 0.5 - norm_mean) / norm_std
 
-        z = torch.randn(self.num_classes, self.noise_dim, device=device)
-        class_ids = torch.arange(self.num_classes, device=device)
-        with torch.no_grad():
-            x = self.generator(z, class_ids)
-            student_logits = self.student(_norm(x))
-            student_probs = F.softmax(student_logits, dim=1)
-
-        if self.acs_strategy == "deviation":
-            cached_p_v = state.attack_state.get("victim_class_avg_prob")
-            if cached_p_v is None:
-                cached_p_v = torch.full(
-                    (self.num_classes, self.num_classes),
-                    1.0 / self.num_classes,
-                    device=device,
-                )
-            cached_p_v = cached_p_v.to(device)
-            s_log = torch.log(student_probs + 1e-10)
-            v_log = torch.log(cached_p_v + 1e-10)
-            kl_div = (student_probs * (s_log - v_log)).sum(dim=1)
-            score = kl_div
-        else:
+        if self.acs_strategy != "deviation":
+            z = torch.randn(self.num_classes, self.noise_dim, device=device)
+            class_ids = torch.arange(self.num_classes, device=device)
+            with torch.no_grad():
+                x_gen = self.generator(z, class_ids)
+                student_logits = self.student(_norm(x_gen))
+                student_probs = F.softmax(student_logits, dim=1)
             score = 1.0 - student_probs.max(dim=1).values
+        else:
+            if self._query_fn is None:
+                self.logger.warning("GAME ACS deviation requires oracle query; returning uniform distribution.")
+                return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
+            budget_remaining = None
+            if self._ctx is not None:
+                budget_remaining = int(self._ctx.budget_remaining)
+
+            probe_budget = self.num_classes
+            if self.acs_probe_size > 0:
+                probe_budget = min(self.acs_probe_size, self.num_classes)
+            if budget_remaining is not None and self._pending_query_k is not None:
+                probe_budget = min(probe_budget, max(0, budget_remaining - int(self._pending_query_k)))
+
+            if probe_budget <= 0:
+                self.logger.warning("GAME ACS deviation probe skipped due to budget constraints.")
+                return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
+
+            if probe_budget < self.num_classes:
+                class_ids = torch.randperm(self.num_classes, device=device)[:probe_budget]
+            else:
+                class_ids = torch.arange(self.num_classes, device=device)
+
+            z = torch.randn(class_ids.size(0), self.noise_dim, device=device)
+            with torch.no_grad():
+                x_gen = self.generator(z, class_ids)
+                student_logits = self.student(_norm(x_gen))
+                student_probs = F.softmax(student_logits, dim=1)
+
+            x_query = x_gen * 0.5 + 0.5
+            oracle_output = self._query_fn(x_query, meta={"acs_probe": True, "y_g": class_ids.detach().cpu()})
+            if oracle_output.kind == "soft_prob":
+                victim_probs = oracle_output.y.to(device)
+            else:
+                victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
+
+            self._update_victim_stats(state, victim_probs, class_ids)
+            s_log = torch.log(student_probs + 1e-10)
+            v_log = torch.log(victim_probs + 1e-10)
+            kl_div = (student_probs * (s_log - v_log)).sum(dim=1)
+            score = torch.full((self.num_classes,), 1e-6, device=device)
+            score[class_ids] = kl_div
 
         score = score - score.min()
         score = score + 1e-6
