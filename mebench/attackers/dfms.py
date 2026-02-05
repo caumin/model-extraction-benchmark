@@ -37,7 +37,6 @@ class DFMSHL(AttackRunner):
         
         # [STRICT] Paper specifies lambda_div = 500.0 for CIFAR-10.
         self.diversity_weight = float(config.get("diversity_weight", 500.0))
-        self.certainty_weight = float(config.get("certainty_weight", 1.0))
         
         # [P0 FIX] Paper mandates 50,000 initial queries for CIFAR-10, not 1,000
         dataset_name = state.metadata.get("dataset_config", {}).get("name", "cifar10")
@@ -309,11 +308,8 @@ class DFMSHL(AttackRunner):
         # Diversity: entropy of batch-mean distribution alpha.
         alpha = probs.mean(dim=0)
         class_div = torch.sum(alpha * torch.log(alpha + 1e-6))
-        
-        # Certainty: mean entropy of individual distributions.
-        certainty_loss = -torch.sum(probs * torch.log(probs + 1e-6), dim=1).mean()
-        
-        loss = adv_loss + self.diversity_weight * class_div + self.certainty_weight * certainty_loss
+
+        loss = adv_loss + self.diversity_weight * class_div
         loss.backward()
         self.generator_optimizer.step()
 

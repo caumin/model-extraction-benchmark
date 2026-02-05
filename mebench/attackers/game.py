@@ -24,7 +24,7 @@ class GAME(AttackRunner):
         super().__init__(config, state)
 
         self.batch_size = int(config.get("batch_size", 128))
-        self.student_lr = float(config.get("student_lr", 0.01))
+        self.student_lr = float(config.get("student_lr", 0.1))
         self.generator_lr = float(config.get("generator_lr", 2e-4))
         self.discriminator_lr = float(config.get("discriminator_lr", 2e-4))
         self.noise_dim = int(config.get("noise_dim", 100))
@@ -135,6 +135,11 @@ class GAME(AttackRunner):
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["step"] = 0
+        state.attack_state["victim_class_avg_prob"] = torch.full(
+            (self.num_classes, self.num_classes),
+            1.0 / self.num_classes,
+        )
+        state.attack_state["victim_class_counts"] = torch.zeros(self.num_classes)
 
     def _init_models(self, state: BenchmarkState) -> None:
         device = state.metadata.get("device", "cpu")
@@ -467,45 +472,19 @@ class GAME(AttackRunner):
             student_logits = self.student(_norm(x))
             student_probs = F.softmax(student_logits, dim=1)
 
-        if self.acs_strategy == "deviation" and "last_victim_probs" in state.attack_state:
-            # Paper Eq. 9: d_i = KL(N_S(x_i) || N_V(x_i))
-            # BUT we need victim probabilities for these specific generated x_i.
-            # Using last_victim_probs (mean over batch) is incorrect if batch isn't class-aligned.
-            # Correct approach:
-            # We assume we cannot query victim for free.
-            # The paper says: "Estimate d_i by current samples or cached samples."
-            # Since we generate x_i here without querying victim, we must rely on historical average P_V for class i?
-            # Or perhaps we should use "uncertainty" if we can't afford queries.
-            
-            # If we strictly follow paper, we need N_V(x_i). 
-            # If we don't query, we can't compute exact Eq 9 deviation.
-            # "Approximation: Use average victim confidence for class i observed so far?"
-            # Let's check cached victim outputs per class.
-            
-            # Fallback to Uncertainty (entropy) if no per-class history.
-            # To fix "Correct GAME ACS deviation-distance (Eq. 9)":
-            # We need to track victim outputs per class in state.
-            
-            cached_p_v = state.attack_state.get("victim_class_avg_prob") # shape [C, C]
-            
-            if cached_p_v is not None:
-                cached_p_v = cached_p_v.to(device)
-                # student_probs: [C, C] (diagonal dominant hopefully)
-                # cached_p_v: [C, C] (average victim response for class i)
-                
-                # KL(S||V)
-                # We want vector of scores d_i for each class i
-                # d_i = KL( S(x_i) || V_avg_i )
-                
-                s_log = torch.log(student_probs + 1e-10)
-                v_log = torch.log(cached_p_v + 1e-10)
-                
-                # KL = sum S * (logS - logV)
-                kl_div = (student_probs * (s_log - v_log)).sum(dim=1)
-                score = kl_div
-            else:
-                # Fallback to uncertainty 
-                score = 1.0 - student_probs.max(dim=1).values
+        if self.acs_strategy == "deviation":
+            cached_p_v = state.attack_state.get("victim_class_avg_prob")
+            if cached_p_v is None:
+                cached_p_v = torch.full(
+                    (self.num_classes, self.num_classes),
+                    1.0 / self.num_classes,
+                    device=device,
+                )
+            cached_p_v = cached_p_v.to(device)
+            s_log = torch.log(student_probs + 1e-10)
+            v_log = torch.log(cached_p_v + 1e-10)
+            kl_div = (student_probs * (s_log - v_log)).sum(dim=1)
+            score = kl_div
         else:
             score = 1.0 - student_probs.max(dim=1).values
 

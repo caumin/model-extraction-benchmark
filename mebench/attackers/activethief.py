@@ -237,40 +237,60 @@ class ActiveThief(AttackRunner):
         _, indices = torch.topk(entropy, k)
         return indices.cpu().tolist()
 
-    def _select_k_center(self, probs: torch.Tensor, k: int) -> List[int]:
+    def _select_k_center(self, unlabeled_probs: torch.Tensor, labeled_probs: torch.Tensor, k: int) -> List[int]:
         """Select samples using k-center greedy algorithm on probability vectors.
         
         Implements Core-Set approach adapted for probability space (Pal et al. 2020).
+        labeled_probs: Probabilities of samples ALREADY in the labeled set (centers).
+        unlabeled_probs: Probabilities of samples in the pool.
         """
-        selected = []
-        remaining = list(range(probs.shape[0]))
-        
-        # Initialize with a random point
-        if remaining:
-            first_idx = np.random.choice(remaining)
-            selected.append(first_idx)
-            remaining.remove(first_idx)
-        
-        # Initialize min_distances to infinity
-        min_dists = torch.full((probs.shape[0],), float('inf'), device=probs.device)
-        
-        # Update distances for the first selected point
-        dists = torch.norm(probs - probs[selected[0]].unsqueeze(0), dim=1)
-        min_dists = torch.min(min_dists, dists)
+        if labeled_probs.shape[0] == 0:
+            # No labeled data yet, fall back to random initialization within unlabeled
+            selected = []
+            remaining = list(range(unlabeled_probs.shape[0]))
+            
+            if remaining:
+                first_idx = np.random.choice(remaining)
+                selected.append(first_idx)
+                remaining.remove(first_idx)
+            
+            min_dists = torch.full((unlabeled_probs.shape[0],), float('inf'), device=unlabeled_probs.device)
+            dists = torch.norm(unlabeled_probs - unlabeled_probs[selected[0]].unsqueeze(0), dim=1)
+            min_dists = torch.min(min_dists, dists)
 
-        for _ in range(min(k - 1, len(remaining))):
-            current_min_dists = min_dists[remaining]
-            if len(current_min_dists) == 0:
-                break
+            for _ in range(min(k - 1, len(remaining))):
+                current_min_dists = min_dists[remaining]
+                if len(current_min_dists) == 0:
+                    break
+                
+                max_val, max_idx_local = torch.max(current_min_dists, dim=0)
+                best_idx = remaining[max_idx_local.item()]
+                
+                selected.append(best_idx)
+                remaining.remove(best_idx)
+                
+                new_dists = torch.norm(unlabeled_probs - unlabeled_probs[best_idx].unsqueeze(0), dim=1)
+                min_dists = torch.min(min_dists, new_dists)
             
-            max_val, max_idx_local = torch.max(current_min_dists, dim=0)
-            best_idx = remaining[max_idx_local.item()]
-            
+            return selected
+        
+        # Paper: "most distant from all existing centers"
+        # 1. Initialize min_dists based on distance to CLOSEST existing labeled point
+        dists = torch.cdist(unlabeled_probs, labeled_probs)  # Shape: [unlabeled, labeled]
+        min_dists, _ = torch.min(dists, dim=1)  # Min distance to ANY existing center
+        
+        selected = []
+        
+        # 2. Greedy selection for k iterations
+        for _ in range(min(k, unlabeled_probs.shape[0])):
+            # Select point with maximum 'min_distance'
+            max_val, max_idx = torch.max(min_dists, dim=0)
+            best_idx = max_idx.item()
             selected.append(best_idx)
-            remaining.remove(best_idx)
             
-            # Update min_distances for the new point
-            new_dists = torch.norm(probs - probs[best_idx].unsqueeze(0), dim=1)
+            # Update distances relative to the NEWLY selected point
+            new_center = unlabeled_probs[best_idx].unsqueeze(0)
+            new_dists = torch.norm(unlabeled_probs - new_center, dim=1)
             min_dists = torch.min(min_dists, new_dists)
         
         return selected
@@ -452,8 +472,17 @@ class ActiveThief(AttackRunner):
             self._train_substitute(state)
         probs = self._collect_probs(candidate_loader, device)
 
-        # Apply k-center on candidates using probability vectors
-        selected_local_in_candidates = self._select_k_center(probs.to(device), k)
+        # Need to get probs for ALREADY LABELED data to act as centers
+        if self.labeled_indices:
+            labeled_dataset = Subset(self.pool_dataset, self.labeled_indices)
+            labeled_loader = DataLoader(labeled_dataset, batch_size=self.batch_size, shuffle=False)
+            labeled_probs = self._collect_probs(labeled_loader, device)
+        else:
+            # No labeled data yet, pass empty tensor
+            labeled_probs = torch.empty(0, self.num_classes, device=device)
+        
+        # Apply k-center on candidates using probability vectors with labeled centers
+        selected_local_in_candidates = self._select_k_center(probs.to(device), labeled_probs.to(device), k)
         selected_indices = [dfal_candidates[i] for i in selected_local_in_candidates]
         
         return selected_indices
@@ -529,7 +558,17 @@ class ActiveThief(AttackRunner):
             return self._finalize_query_batch(selected_indices, state, k)
 
         if self.strategy == "k_center":
-            selected_local = self._select_k_center(probs.to(device), k)
+            # Need to get probs for ALREADY LABELED data to act as centers
+            if self.labeled_indices:
+                labeled_dataset = Subset(self.pool_dataset, self.labeled_indices)
+                labeled_loader = DataLoader(labeled_dataset, batch_size=self.batch_size, shuffle=False)
+                labeled_probs = self._collect_probs(labeled_loader, device)
+            else:
+                # No labeled data yet, pass empty tensor
+                labeled_probs = torch.empty(0, self.num_classes, device=device)
+            
+            # Pass both to selector
+            selected_local = self._select_k_center(probs.to(device), labeled_probs.to(device), k)
             selected_indices = [self.unlabeled_indices[i] for i in selected_local]
             return self._finalize_query_batch(selected_indices, state, k)
 

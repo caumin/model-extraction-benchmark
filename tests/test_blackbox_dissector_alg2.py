@@ -53,10 +53,10 @@ def test_dissector_stage_a_and_b_are_separate_batches(monkeypatch) -> None:
 
     state.attack_state["substitute"] = DummySub()
 
-    # Monkeypatch CAM erasing to avoid Grad-CAM dependency in unit test.
+    # Monkeypatch CAM erasing batch to avoid Grad-CAM dependency in unit test.
     monkeypatch.setattr(
-        "mebench.attackers.blackbox_dissector.cam_erase",
-        lambda img, model, **kwargs: img + 0.1,
+        "mebench.attackers.blackbox_dissector.cam_erase_batch",
+        lambda imgs, model, **kwargs: imgs + 0.1,
     )
 
     qb_a = attack._select_query_batch(100, state)

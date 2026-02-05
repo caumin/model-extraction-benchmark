@@ -143,8 +143,7 @@ class FeatureFool:
 
             def closure() -> torch.Tensor:
                 optimizer.zero_grad()
-                delta_clamped = torch.clamp(delta, -self.epsilon, self.epsilon)
-                x_adv = torch.clamp(x_source_dev + delta_clamped, 0.0, 1.0)
+                x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
 
                 activations.clear()
                 _ = self.model(x_adv)
@@ -153,7 +152,7 @@ class FeatureFool:
                 dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1).view(B, 1)
                 dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1).view(B, 1)
                 triplet = torch.clamp(dist_t - dist_s + margin_m, min=0.0)
-                visual_loss = torch.sum(delta_clamped ** 2, dim=(1, 2, 3)).view(B, 1)
+                visual_loss = torch.sum(delta ** 2, dim=(1, 2, 3)).view(B, 1)
                 loss = torch.mean(visual_loss + self.lambda_adv * triplet)
                 loss.backward()
                 return loss
@@ -161,8 +160,7 @@ class FeatureFool:
             optimizer.step(closure)
 
             with torch.no_grad():
-                delta_final = torch.clamp(delta, -self.epsilon, self.epsilon)
-                x_adv = torch.clamp(x_source_dev + delta_final, 0.0, 1.0)
+                x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
             return x_adv.detach().cpu()
         finally:
             hook_handle.remove()

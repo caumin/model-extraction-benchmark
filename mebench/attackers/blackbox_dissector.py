@@ -430,6 +430,7 @@ class BlackboxDissector(AttackRunner):
         state.attack_state["iter_prev_q"] = 0
         state.attack_state["iter_target_q"] = state.attack_state["iter_targets"][0]
         state.attack_state["iter_stage"] = "A"  # 'A' (original) then 'B' (erased)
+        state.attack_state["step1_trained"] = False
         self._reset_iteration_stage_budgets(state)
 
     def _build_iter_targets(self, state: BenchmarkState) -> List[int]:
@@ -459,6 +460,7 @@ class BlackboxDissector(AttackRunner):
         state.attack_state["stage_a_remaining"] = a
         state.attack_state["stage_b_remaining"] = b
         state.attack_state["iter_stage"] = "A"
+        state.attack_state["step1_trained"] = False
 
     def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         """Algorithm 2 query proposal.
@@ -566,6 +568,10 @@ class BlackboxDissector(AttackRunner):
             )
 
         # Stage B
+        if len(state.attack_state.get("D_T_x", [])) > 0 and not state.attack_state.get("step1_trained", False):
+            self.train_substitute(state)
+            state.attack_state["step1_trained"] = True
+            substitute = state.attack_state.get("substitute")
         budget_rem = int(state.attack_state.get("stage_b_remaining", 0))
         k_eff = min(int(k), budget_rem, remaining_to_target)
         if k_eff <= 0:

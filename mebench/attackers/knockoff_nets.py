@@ -44,7 +44,10 @@ class KnockoffNets(AttackRunner):
         self.samples_per_class = int(config.get("samples_per_class", 50))
         self.kmeans_iters = int(config.get("kmeans_iters", 100))
         self.kmeans_tol = float(config.get("kmeans_tol", 1e-4))
-        self.feature_arch = config.get("feature_arch", "resnet50")
+        feature_arch = str(config.get("feature_arch", "resnet50")).lower()
+        if feature_arch in {"resnet18", "resnet34"}:
+            feature_arch = "resnet50"
+        self.feature_arch = feature_arch
         self.policy_lr = float(config.get("policy_lr", 0.01))
         self.num_classes = int(
             state.metadata.get("num_classes")
@@ -175,24 +178,53 @@ class KnockoffNets(AttackRunner):
         else:
             loss_reward = torch.zeros(probs.size(0))
 
-        # Normalize rewards to [0,1] range before aggregation
-        certainty_reward = torch.clamp(certainty_reward, 0.0, 1.0)
-        diversity_reward = torch.clamp(diversity_reward, 0.0, 1.0)
-        loss_reward = torch.clamp(loss_reward / self.loss_reward_scale, 0.0, 1.0)
+        def _normalize_with_history(values: torch.Tensor, history: deque[float]) -> torch.Tensor:
+            if values.numel() == 0:
+                return values
+            if len(history) > 0:
+                hist_min = min(history)
+                hist_max = max(history)
+            else:
+                hist_min = float(values.min().item())
+                hist_max = float(values.max().item())
+            denom = max(hist_max - hist_min, 1e-6)
+            normalized = (values - hist_min) / denom
+            return torch.clamp(normalized, 0.0, 1.0)
+
+        certainty_reward_norm = _normalize_with_history(
+            certainty_reward, state.attack_state["recent_certainty_rewards"]
+        )
+        diversity_reward_norm = _normalize_with_history(
+            diversity_reward, state.attack_state["recent_diversity_rewards"]
+        )
+        loss_reward_scaled = loss_reward / self.loss_reward_scale
+        loss_reward_norm = _normalize_with_history(
+            loss_reward_scaled, state.attack_state["recent_loss_rewards"]
+        )
         
         rewards = (
-            self.reward_certainty_weight * certainty_reward
-            + self.reward_diversity_weight * diversity_reward
-            + self.reward_loss_weight * loss_reward
+            self.reward_certainty_weight * certainty_reward_norm
+            + self.reward_diversity_weight * diversity_reward_norm
+            + self.reward_loss_weight * loss_reward_norm
         )
 
-        reward_mean = float(rewards.mean().item()) if rewards.numel() > 0 else 0.0
-        state.attack_state["recent_rewards"].append(reward_mean)
         if len(state.attack_state["recent_rewards"]) > 0:
             baseline = float(np.mean(state.attack_state["recent_rewards"]))
         else:
             baseline = 0.0
+        reward_mean = float(rewards.mean().item()) if rewards.numel() > 0 else 0.0
+        state.attack_state["recent_rewards"].append(reward_mean)
         state.attack_state["reward_baseline"] = baseline
+
+        state.attack_state["recent_certainty_rewards"].extend(
+            [float(x) for x in certainty_reward.tolist()]
+        )
+        state.attack_state["recent_diversity_rewards"].extend(
+            [float(x) for x in diversity_reward.tolist()]
+        )
+        state.attack_state["recent_loss_rewards"].extend(
+            [float(x) for x in loss_reward_scaled.tolist()]
+        )
 
         weights = state.attack_state["policy_weights"].clone().float()
         coarse_weights = state.attack_state["coarse_policy_weights"].clone().float()
@@ -203,20 +235,24 @@ class KnockoffNets(AttackRunner):
             if class_id < 0 or class_id >= weights.numel():
                 continue
 
+            state.attack_state["action_counts"][class_id] += 1.0
+            alpha = 1.0 / float(state.attack_state["action_counts"][class_id].item())
             adv = float(rewards[idx]) - baseline
             grad = -pi
             grad[class_id] = 1.0 - pi[class_id]
-            weights = weights + self.policy_lr * adv * grad
+            weights = weights + alpha * adv * grad
 
             pi = torch.softmax(weights, dim=0)
 
             if class_id in class_to_coarse and coarse_weights.numel() > 0:
                 coarse_id = int(class_to_coarse[class_id])
                 if 0 <= coarse_id < coarse_weights.numel():
+                    state.attack_state["coarse_action_counts"][coarse_id] += 1.0
+                    coarse_alpha = 1.0 / float(state.attack_state["coarse_action_counts"][coarse_id].item())
                     coarse_pi = torch.softmax(coarse_weights, dim=0)
                     coarse_grad = -coarse_pi
                     coarse_grad[coarse_id] = 1.0 - coarse_pi[coarse_id]
-                    coarse_weights = coarse_weights + self.policy_lr * adv * coarse_grad
+                    coarse_weights = coarse_weights + coarse_alpha * adv * coarse_grad
 
         state.attack_state["policy_weights"] = weights
         if coarse_weights.numel() > 0:
@@ -240,6 +276,9 @@ class KnockoffNets(AttackRunner):
         state.attack_state["reward_baseline"] = 0.0
         state.attack_state["recent_victim_probs"] = deque(maxlen=self.reward_window)
         state.attack_state["recent_rewards"] = deque(maxlen=self.reward_window)
+        state.attack_state["recent_certainty_rewards"] = deque(maxlen=self.reward_window)
+        state.attack_state["recent_diversity_rewards"] = deque(maxlen=self.reward_window)
+        state.attack_state["recent_loss_rewards"] = deque(maxlen=self.reward_window)
         state.attack_state["query_data_x"] = []
         state.attack_state["query_data_y"] = []
         state.attack_state["substitute"] = None
@@ -295,6 +334,12 @@ class KnockoffNets(AttackRunner):
         elif self.feature_arch == "resnet34":
             weights = models.ResNet34_Weights.DEFAULT
             model = models.resnet34(weights=weights)
+        elif self.feature_arch == "resnet101":
+            weights = models.ResNet101_Weights.DEFAULT
+            model = models.resnet101(weights=weights)
+        elif self.feature_arch == "resnet152":
+            weights = models.ResNet152_Weights.DEFAULT
+            model = models.resnet152(weights=weights)
         else:
             weights = models.ResNet50_Weights.DEFAULT
             model = models.resnet50(weights=weights)

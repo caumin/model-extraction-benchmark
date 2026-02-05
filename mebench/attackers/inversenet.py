@@ -45,6 +45,8 @@ class InverseNet(AttackRunner):
         self.truncation_k = int(config.get("truncation_k", 1))
         self.coreset_seed = int(config.get("coreset_seed", 20))
         self.hcss_xi = float(config.get("hcss_xi", 0.02))
+        self.hcss_step_size = float(config.get("hcss_step_size", 0.01))
+        self.hcss_max_iter = int(config.get("hcss_max_iter", 20))
 
         self.pool_dataset = None
         self.inversion_model: nn.Module | None = None
@@ -97,7 +99,7 @@ class InverseNet(AttackRunner):
             with torch.no_grad():
                 x = self.inversion_model(y_sample)
 
-            x = self._augment_inversion(x)
+            x = self._augment_inversion(x, y_sample)
             meta = {"phase": phase, "synthetic": True, "augmented": True}
             return x, meta
 
@@ -125,11 +127,16 @@ class InverseNet(AttackRunner):
         oracle_output: OracleOutput,
         state: BenchmarkState,
     ) -> None:
-        if oracle_output.kind != "soft_prob":
-            raise ValueError("InverseNet requires soft_prob output mode")
+        if oracle_output.kind == "soft_prob":
+            victim_probs = oracle_output.y.detach().cpu()
+            query_targets = victim_probs
+        else:
+            victim_labels = oracle_output.y.detach().cpu().long()
+            victim_probs = F.one_hot(victim_labels, num_classes=self.num_classes).float()
+            query_targets = victim_labels
 
         state.attack_state["query_data_x"].append(x_query.detach().cpu())
-        state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
+        state.attack_state["query_data_y"].append(query_targets)
         self._update_phase(state)
         phase = state.attack_state["phase"]
 
@@ -139,11 +146,15 @@ class InverseNet(AttackRunner):
 
         if phase == 2:
             state.attack_state["inversion_x"].append(x_query.detach().cpu())
-            trunc = self._truncate_logits(oracle_output.y.detach().cpu())
+            trunc = self._truncate_logits(victim_probs)
             state.attack_state["inversion_y"].append(trunc)
 
         if phase == 3:
-            self._train_substitute_on_batch(x_query, oracle_output.y, state)
+            if oracle_output.kind == "soft_prob":
+                targets = oracle_output.y
+            else:
+                targets = oracle_output.y.long()
+            self._train_substitute_on_batch(x_query, targets, state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["query_data_x"] = []
@@ -280,8 +291,11 @@ class InverseNet(AttackRunner):
         self.substitute.train()
         self.substitute_optimizer.zero_grad()
         logits = self.substitute(x_batch)
-        log_probs = F.log_softmax(logits, dim=1)
-        loss = F.kl_div(log_probs, y_batch, reduction="batchmean")
+        if y_batch.ndim == 1 or (y_batch.ndim == 2 and y_batch.size(1) == 1):
+            loss = F.cross_entropy(logits, y_batch.long().view(-1))
+        else:
+            log_probs = F.log_softmax(logits, dim=1)
+            loss = F.kl_div(log_probs, y_batch, reduction="batchmean")
         loss.backward()
         self.substitute_optimizer.step()
 
@@ -295,10 +309,13 @@ class InverseNet(AttackRunner):
         mask = torch.zeros_like(probs)
         mask.scatter_(1, topk.indices, 1.0)
         truncated = probs * mask
-        truncated = truncated / (truncated.sum(dim=1, keepdim=True) + 1e-8)
         return truncated
 
-    def _augment_inversion(self, x: torch.Tensor) -> torch.Tensor:
+    def _augment_inversion(
+        self,
+        x: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         # Custom Gaussian Noise transform
         class GaussianNoise:
             def __init__(self, mean=0.0, std=0.1):
@@ -320,7 +337,27 @@ class InverseNet(AttackRunner):
                 transforms.RandomApply([GaussianNoise(mean=0.0, std=0.05)], p=0.3),
             ]
         )
-        return aug(x)
+        x_aug = aug(x)
+
+        if labels is None or x_aug.size(0) < 2:
+            return x_aug
+
+        if labels.ndim > 1:
+            class_ids = labels.argmax(dim=1)
+        else:
+            class_ids = labels
+
+        class_ids = class_ids.to(x_aug.device)
+        x_mix = x_aug.clone()
+        for class_id in class_ids.unique():
+            idxs = (class_ids == class_id).nonzero(as_tuple=False).view(-1)
+            if idxs.numel() < 2:
+                continue
+            perm = idxs[torch.randperm(idxs.numel())]
+            lam = torch.rand(idxs.numel(), 1, 1, 1, device=x_aug.device)
+            x_mix[idxs] = lam * x_aug[idxs] + (1.0 - lam) * x_aug[perm]
+
+        return x_mix
 
     def _train_substitute_from_queries(self, state: BenchmarkState) -> None:
         query_x = state.attack_state["query_data_x"]
@@ -346,6 +383,7 @@ class InverseNet(AttackRunner):
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=0)
 
         device = state.metadata.get("device", "cpu")
+        sub_config = state.metadata.get("substitute_config", {})
         if self.substitute is None:
             arch = sub_config.get("arch") or self.config.get("substitute_arch", "resnet18")
             width_mult = int(sub_config.get("width_mult", 1))
@@ -360,6 +398,8 @@ class InverseNet(AttackRunner):
         epochs = max(1, int(self.substitute_epochs))
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if targets.ndim == 1 or (targets.ndim == 2 and targets.size(1) == 1):
+                return F.cross_entropy(outputs, targets.long().view(-1))
             log_probs = F.log_softmax(outputs, dim=1)
             return F.kl_div(log_probs, targets, reduction="batchmean")
 
@@ -545,10 +585,9 @@ class InverseNet(AttackRunner):
             x_batch = x_batch.to(device)
             
             # DeepFool distance calculation (unchanged logic)
-            distances = self._deepfool_distance_batch(
+            distances = self._hcss_noise_distance_batch(
                 substitute,
                 x_batch,
-                overshoot=self.hcss_xi,
             )
             
             for i, dist in enumerate(distances):
@@ -557,27 +596,10 @@ class InverseNet(AttackRunner):
         scores.sort(key=lambda x: x[1], reverse=True)
         return [idx for idx, _ in scores[: min(k, len(scores))]]
 
-    def _deepfool_distance(
+    def _hcss_noise_distance_batch(
         self,
         model: nn.Module,
         x: torch.Tensor,
-        max_iter: int = 20,
-        overshoot: float = 0.02,
-    ) -> float:
-        distances = self._deepfool_distance_batch(
-            model,
-            x,
-            max_iter=max_iter,
-            overshoot=overshoot,
-        )
-        return distances[0].item()
-
-    def _deepfool_distance_batch(
-        self,
-        model: nn.Module,
-        x: torch.Tensor,
-        max_iter: int = 20,
-        overshoot: float = 0.02,
     ) -> torch.Tensor:
         device = x.device
         batch = x.shape[0]
@@ -585,59 +607,27 @@ class InverseNet(AttackRunner):
             return torch.empty(0, device=device)
 
         model.eval()
-        perturb = torch.zeros_like(x, device=device)
         with torch.no_grad():
             logits = model(x)
-            current = logits.argmax(dim=1)
+            original = logits.argmax(dim=1)
 
+        perturb = torch.zeros_like(x, device=device)
+        noise = torch.randn_like(x, device=device) * self.hcss_step_size
         active = torch.ones(batch, dtype=torch.bool, device=device)
-        for _ in range(max_iter):
+
+        for _ in range(self.hcss_max_iter):
             if not active.any():
                 break
 
-            x_adv = (x + perturb).detach()
-            x_adv.requires_grad_(True)
-            logits = model(x_adv)
-            current = logits.argmax(dim=1)
-            num_classes = logits.shape[1]
-
-            grads = []
-            for k in range(num_classes):
-                grad_k = torch.autograd.grad(
-                    logits[:, k].sum(),
-                    x_adv,
-                    retain_graph=(k != num_classes - 1),
-                    create_graph=False,
-                )[0]
-                grads.append(grad_k)
-
-            grads = torch.stack(grads, dim=1)
-            grad_current = grads[torch.arange(batch), current]
-            w = grads - grad_current.unsqueeze(1)
-            f = logits - logits.gather(1, current.unsqueeze(1))
-            w_norm = torch.norm(w.view(batch, num_classes, -1), dim=2)
-            dist = torch.abs(f) / (w_norm + 1e-8)
-            dist = torch.where(
-                w_norm > 0,
-                dist,
-                torch.full_like(dist, float("inf")),
-            )
-            dist[torch.arange(batch), current] = float("inf")
-            min_dist, best_idx = dist.min(dim=1)
-            valid = torch.isfinite(min_dist)
-            active = active & valid
-            if not active.any():
-                break
-
-            best_w = w[torch.arange(batch), best_idx]
-            best_w_norm = torch.norm(best_w.view(batch, -1), dim=1)
-            r_i = (min_dist + 1e-6).view(-1, 1, 1, 1) * best_w
-            r_i = r_i / (best_w_norm.view(-1, 1, 1, 1) + 1e-8)
+            perturb[active] = perturb[active] + noise[active]
+            x_adv = torch.clamp(x + perturb, 0.0, 1.0)
             with torch.no_grad():
-                perturb[active] = perturb[active] + r_i[active]
-                x_adv_next = x + (1 + overshoot) * perturb
-                new_pred = model(x_adv_next).argmax(dim=1)
+                preds = model(x_adv).argmax(dim=1)
 
-            active = active & (new_pred == current)
+            active = active & (preds == original)
+            if not active.any():
+                break
+
+            noise[active] = noise[active] * (1.0 + self.hcss_xi)
 
         return torch.norm(perturb.view(batch, -1), dim=1)
