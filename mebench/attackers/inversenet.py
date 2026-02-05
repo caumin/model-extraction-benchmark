@@ -18,6 +18,7 @@ from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.models.inversion import InversionGenerator
+from mebench.utils.adversarial import deepfool_distance_vectorized
 
 
 class InverseNet(AttackRunner):
@@ -285,19 +286,47 @@ class InverseNet(AttackRunner):
             )
 
         device = state.metadata.get("device", "cpu")
-        x_batch = x_batch.to(device)
-        y_batch = y_batch.to(device)
+        query_x = state.attack_state.get("query_data_x", [])
+        query_y = state.attack_state.get("query_data_y", [])
+        if len(query_x) == 0:
+            return
+
+        x_all = torch.cat(query_x, dim=0)
+        y_all = torch.cat(query_y, dim=0)
+
+        class ReplayDataset(torch.utils.data.Dataset):
+            def __init__(self, x: torch.Tensor, y: torch.Tensor):
+                self.x = x
+                self.y = y
+
+            def __len__(self) -> int:
+                return int(self.x.size(0))
+
+            def __getitem__(self, idx: int):
+                return self.x[idx], self.y[idx]
+
+        loader = DataLoader(
+            ReplayDataset(x_all, y_all),
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=0,
+        )
 
         self.substitute.train()
-        self.substitute_optimizer.zero_grad()
-        logits = self.substitute(x_batch)
-        if y_batch.ndim == 1 or (y_batch.ndim == 2 and y_batch.size(1) == 1):
-            loss = F.cross_entropy(logits, y_batch.long().view(-1))
-        else:
-            log_probs = F.log_softmax(logits, dim=1)
-            loss = F.kl_div(log_probs, y_batch, reduction="batchmean")
-        loss.backward()
-        self.substitute_optimizer.step()
+        epochs = max(1, int(self.substitute_epochs))
+        for _ in range(epochs):
+            for x_replay, y_replay in loader:
+                x_replay = x_replay.to(device)
+                y_replay = y_replay.to(device)
+                self.substitute_optimizer.zero_grad(set_to_none=True)
+                logits = self.substitute(x_replay)
+                if y_replay.ndim == 1 or (y_replay.ndim == 2 and y_replay.size(1) == 1):
+                    loss = F.cross_entropy(logits, y_replay.long().view(-1))
+                else:
+                    log_probs = F.log_softmax(logits, dim=1)
+                    loss = F.kl_div(log_probs, y_replay, reduction="batchmean")
+                loss.backward()
+                self.substitute_optimizer.step()
 
         state.attack_state["substitute"] = self.substitute
 
@@ -522,7 +551,7 @@ class InverseNet(AttackRunner):
             # Let's simply loop over centers for initialization (N_centers is small initially)
             for j in range(c_chunk.size(0)):
                 c_vec = c_chunk[j].unsqueeze(0) # [1, D]
-                d = torch.norm(candidates_matrix - c_vec, p=1, dim=1) # [N_rem]
+                d = torch.norm(candidates_matrix - c_vec, p=2, dim=1) # [N_rem]
                 min_dists = torch.minimum(min_dists, d)
 
         # Greedy selection loop
@@ -539,7 +568,7 @@ class InverseNet(AttackRunner):
             
             # Update min_dists for all candidates using the new center
             # New min_dist = min(old_min_dist, dist(x, new_center))
-            new_dists = torch.norm(candidates_matrix - new_center_vec, p=1, dim=1)
+            new_dists = torch.norm(candidates_matrix - new_center_vec, p=2, dim=1)
             min_dists = torch.minimum(min_dists, new_dists)
             
             # Effectively remove the selected one by setting its dist to -1
@@ -584,7 +613,7 @@ class InverseNet(AttackRunner):
             
             x_batch = x_batch.to(device)
             
-            # DeepFool distance calculation (unchanged logic)
+            # DeepFool distance calculation
             distances = self._hcss_noise_distance_batch(
                 substitute,
                 x_batch,
@@ -602,32 +631,13 @@ class InverseNet(AttackRunner):
         x: torch.Tensor,
     ) -> torch.Tensor:
         device = x.device
-        batch = x.shape[0]
-        if batch == 0:
+        if x.shape[0] == 0:
             return torch.empty(0, device=device)
 
-        model.eval()
-        with torch.no_grad():
-            logits = model(x)
-            original = logits.argmax(dim=1)
-
-        perturb = torch.zeros_like(x, device=device)
-        noise = torch.randn_like(x, device=device) * self.hcss_step_size
-        active = torch.ones(batch, dtype=torch.bool, device=device)
-
-        for _ in range(self.hcss_max_iter):
-            if not active.any():
-                break
-
-            perturb[active] = perturb[active] + noise[active]
-            x_adv = torch.clamp(x + perturb, 0.0, 1.0)
-            with torch.no_grad():
-                preds = model(x_adv).argmax(dim=1)
-
-            active = active & (preds == original)
-            if not active.any():
-                break
-
-            noise[active] = noise[active] * (1.0 + self.hcss_xi)
-
-        return torch.norm(perturb.view(batch, -1), dim=1)
+        with torch.enable_grad():
+            return deepfool_distance_vectorized(
+                model,
+                x,
+                max_iter=self.hcss_max_iter,
+                batch_size=min(self.batch_size, x.shape[0]),
+            )

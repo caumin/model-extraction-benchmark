@@ -39,8 +39,12 @@ def generate_gradcam_heatmap(
     model.eval()
 
     def _get_target_layer(net: nn.Module) -> nn.Module:
+        if hasattr(net, "layer4"):
+            return net.layer4
         if hasattr(net, "layer3"):
             return net.layer3
+        if hasattr(net, "dense4"):
+            return net.dense4
         if hasattr(net, "dense3"):
             return net.dense3
         if hasattr(net, "features"):
@@ -177,6 +181,69 @@ def random_erase(
     return variants
 
 
+def random_erase_batch(
+    img_batch: torch.Tensor,
+    n: int = 10,
+    sl: float = 0.02,
+    sh: float = 0.4,
+    r1: float = 0.3,
+    r2: float = 3.3,
+    fill_min: float = 0.0,
+    fill_max: float = 1.0,
+) -> torch.Tensor:
+    """Generate N random erasing variants for a batch of images.
+
+    Args:
+        img_batch: [B, C, H, W]
+        n: Number of variants per image
+
+    Returns:
+        erased_batch: [B * n, C, H, W]
+    """
+    b, c, h, w = img_batch.shape
+    device = img_batch.device
+
+    imgs_repeated = img_batch.unsqueeze(1).repeat(1, n, 1, 1, 1).view(-1, c, h, w)
+    total_imgs = b * n
+
+    area = float(h * w)
+    center_y = torch.randint(0, h, (total_imgs,), device=device)
+    center_x = torch.randint(0, w, (total_imgs,), device=device)
+    target_areas = torch.empty(total_imgs, device=device).uniform_(sl, sh) * area
+    aspect_ratios = torch.empty(total_imgs, device=device).uniform_(r1, r2)
+
+    h_erase = torch.sqrt(target_areas * aspect_ratios).round().long()
+    w_erase = torch.sqrt(target_areas / aspect_ratios).round().long()
+
+    h_erase = torch.clamp(h_erase, min=1, max=h)
+    w_erase = torch.clamp(w_erase, min=1, max=w)
+
+    y1 = torch.clamp(center_y - h_erase // 2, min=0)
+    x1 = torch.clamp(center_x - w_erase // 2, min=0)
+
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(h, device=device),
+        torch.arange(w, device=device),
+        indexing="ij",
+    )
+    grid_y = grid_y.unsqueeze(0)
+    grid_x = grid_x.unsqueeze(0)
+
+    y1 = y1.view(total_imgs, 1, 1)
+    x1 = x1.view(total_imgs, 1, 1)
+    h_e = h_erase.view(total_imgs, 1, 1)
+    w_e = w_erase.view(total_imgs, 1, 1)
+
+    mask = (grid_y >= y1) & (grid_y < y1 + h_e) & (grid_x >= x1) & (grid_x < x1 + w_e)
+    mask = mask.unsqueeze(1).expand(-1, c, -1, -1)
+
+    fill_values = torch.empty_like(imgs_repeated).uniform_(fill_min, fill_max)
+    erased_batch = imgs_repeated.clone()
+    erased_batch[mask] = fill_values[mask]
+
+    return erased_batch
+
+
 def cam_erase(
     img: torch.Tensor,
     model: nn.Module,
@@ -250,7 +317,82 @@ def cam_erase(
     return erased
 
 
-from mebench.attackers.blackbox_dissector_batch import cam_erase_batch, random_erase_batch
+def cam_erase_batch(
+    img_batch: torch.Tensor,
+    model: nn.Module,
+    sl: float = 0.02,
+    sh: float = 0.4,
+    r1: float = 0.3,
+    r2: float = 3.3,
+    fill_min: float = 0.0,
+    fill_max: float = 1.0,
+    target_class: torch.Tensor = None,
+) -> torch.Tensor:
+    """Generate CAM-driven erasing variants for a batch of images.
+
+    Args:
+        img_batch: [B, C, H, W]
+        model: Substitute model
+        sl, sh, r1, r2, fill_min, fill_max: Erasing parameters
+        target_class: Optional target classes for Grad-CAM
+
+    Returns:
+        erased_batch: [B, C, H, W]
+    """
+    b, c, h, w = img_batch.shape
+    heatmap = generate_gradcam_heatmap(model, img_batch, target_class)
+
+    h_map, w_map = heatmap.shape[1], heatmap.shape[2]
+    heatmap_flat = heatmap.view(b, -1)
+    heatmap_sum = heatmap_flat.sum(dim=1, keepdim=True)
+    mask_zero = (heatmap_sum <= 1e-8).squeeze(1)
+    probs = heatmap_flat / (heatmap_sum + 1e-8)
+    probs[mask_zero] = 1.0 / heatmap_flat.size(1)
+
+    max_indices = torch.multinomial(probs, 1).squeeze(1)
+    center_y_feat = max_indices // w_map
+    center_x_feat = max_indices % w_map
+
+    scale_h = h / h_map
+    scale_w = w / w_map
+    center_y = (center_y_feat.float() * scale_h).long()
+    center_x = (center_x_feat.float() * scale_w).long()
+
+    area = float(h * w)
+    device = img_batch.device
+    target_areas = torch.empty(b, device=device).uniform_(sl, sh) * area
+    aspect_ratios = torch.empty(b, device=device).uniform_(r1, r2)
+
+    h_erase = torch.sqrt(target_areas * aspect_ratios).round().long()
+    w_erase = torch.sqrt(target_areas / aspect_ratios).round().long()
+
+    h_erase = torch.clamp(h_erase, min=1, max=h)
+    w_erase = torch.clamp(w_erase, min=1, max=w)
+
+    y1 = torch.clamp(center_y - h_erase // 2, min=0)
+    x1 = torch.clamp(center_x - w_erase // 2, min=0)
+
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(h, device=device),
+        torch.arange(w, device=device),
+        indexing="ij",
+    )
+    grid_y = grid_y.unsqueeze(0).expand(b, -1, -1)
+    grid_x = grid_x.unsqueeze(0).expand(b, -1, -1)
+
+    y1 = y1.view(b, 1, 1)
+    x1 = x1.view(b, 1, 1)
+    h_e = h_erase.view(b, 1, 1)
+    w_e = w_erase.view(b, 1, 1)
+
+    mask = (grid_y >= y1) & (grid_y < y1 + h_e) & (grid_x >= x1) & (grid_x < x1 + w_e)
+    mask = mask.unsqueeze(1).expand(-1, c, -1, -1)
+
+    fill_values = torch.empty_like(img_batch).uniform_(fill_min, fill_max)
+    erased_batch = img_batch.clone()
+    erased_batch[mask] = fill_values[mask]
+
+    return erased_batch
 
 class BlackboxDissector(AttackRunner):
     """Black-box Dissector: CAM-driven erasing for hard-label victims.
@@ -322,6 +464,8 @@ class BlackboxDissector(AttackRunner):
     def _advance_iteration_if_needed(self, state: BenchmarkState) -> None:
         target_q = int(state.attack_state.get("iter_target_q", 0))
         if target_q > 0 and int(state.query_count) >= target_q:
+            teacher_model = state.attack_state.get("substitute")
+            self._generate_pseudo_labels(state, teacher_model)
             self.train_substitute(state)
 
             ptr = int(state.attack_state.get("iter_ptr", 0))
@@ -569,6 +713,8 @@ class BlackboxDissector(AttackRunner):
 
         # Stage B
         if len(state.attack_state.get("D_T_x", [])) > 0 and not state.attack_state.get("step1_trained", False):
+            teacher_model = state.attack_state.get("substitute")
+            self._generate_pseudo_labels(state, teacher_model)
             self.train_substitute(state)
             state.attack_state["step1_trained"] = True
             substitute = state.attack_state.get("substitute")
@@ -672,6 +818,75 @@ class BlackboxDissector(AttackRunner):
             },
         )
 
+    def _generate_pseudo_labels(self, state: BenchmarkState, teacher: Optional[nn.Module]) -> None:
+        pseudo_labels: dict[int, torch.Tensor] = {}
+        if teacher is None:
+            state.attack_state["pseudo_labels"] = pseudo_labels
+            return
+
+        unlabeled_indices = state.attack_state.get("unlabeled_indices", [])
+        if len(unlabeled_indices) == 0:
+            state.attack_state["pseudo_labels"] = pseudo_labels
+            return
+
+        if self.pool_dataset is None:
+            dataset_config = state.metadata.get("dataset_config", {})
+            if "data_mode" not in dataset_config:
+                dataset_config = {"data_mode": "seed", **dataset_config}
+            if "name" not in dataset_config:
+                dataset_config = {"name": "CIFAR10", **dataset_config}
+            self.pool_dataset = create_dataloader(
+                dataset_config,
+                batch_size=1,
+                shuffle=False,
+            ).dataset
+
+        device = state.metadata.get("device", "cpu")
+        victim_config = state.metadata.get("victim_config", {})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
+        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
+        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+
+        teacher.eval()
+        subset = Subset(self.pool_dataset, unlabeled_indices)
+        loader = DataLoader(
+            subset,
+            batch_size=min(self.selection_batch_size, len(unlabeled_indices)),
+            shuffle=False,
+            num_workers=0,
+        )
+
+        current_idx_ptr = 0
+        with torch.no_grad():
+            for x_batch, _ in loader:
+                batch_size = x_batch.size(0)
+                batch_indices = unlabeled_indices[current_idx_ptr : current_idx_ptr + batch_size]
+                current_idx_ptr += batch_size
+
+                x_batch = x_batch.to(device)
+                x_variants = random_erase_batch(
+                    x_batch,
+                    n=self.n_variants,
+                    sl=self.sl,
+                    sh=self.sh,
+                    r1=self.r1,
+                    r2=self.r2,
+                    fill_min=self.fill_min,
+                    fill_max=self.fill_max,
+                )
+                x_variants_norm = (x_variants - norm_mean) / norm_std
+                logits_variants = teacher(x_variants_norm)
+                probs_variants = F.softmax(logits_variants, dim=1)
+                probs_variants = probs_variants.view(batch_size, self.n_variants, -1)
+                soft_targets = probs_variants.mean(dim=1)
+
+                for i, idx in enumerate(batch_indices):
+                    pseudo_labels[int(idx)] = soft_targets[i].detach().cpu()
+
+        state.attack_state["pseudo_labels"] = pseudo_labels
+
     def train_substitute(self, state: BenchmarkState) -> None:
         """Train substitute model with Self-KD on Unlabeled Data.
 
@@ -714,24 +929,18 @@ class BlackboxDissector(AttackRunner):
 
         labeled_dataset = LabeledDataset(x_all, y_all)
 
-        # Create unlabeled dataset (D_U)
-        unlabeled_indices = state.attack_state.get("unlabeled_indices", [])
         if self.pool_dataset is None:
-             # Should be initialized in selection, but safe check
-             dataset_config = state.metadata.get("dataset_config", {})
-             if "data_mode" not in dataset_config:
-                 dataset_config = {"data_mode": "seed", **dataset_config}
-             if "name" not in dataset_config:
-                 dataset_config = {"name": "CIFAR10", **dataset_config}
-             self.pool_dataset = create_dataloader(
-                 dataset_config,
-                 batch_size=1,
-                 shuffle=False,
-             ).dataset
-
-        # Use Subset for unlabeled data
-        # Note: pool_dataset returns (img, label), we ignore label
-        unlabeled_dataset = Subset(self.pool_dataset, unlabeled_indices)
+            # Should be initialized in selection, but safe check
+            dataset_config = state.metadata.get("dataset_config", {})
+            if "data_mode" not in dataset_config:
+                dataset_config = {"data_mode": "seed", **dataset_config}
+            if "name" not in dataset_config:
+                dataset_config = {"name": "CIFAR10", **dataset_config}
+            self.pool_dataset = create_dataloader(
+                dataset_config,
+                batch_size=1,
+                shuffle=False,
+            ).dataset
 
         # Use 20% validation split from Labeled Data
         total_size = len(labeled_dataset)
@@ -772,22 +981,6 @@ class BlackboxDissector(AttackRunner):
             num_workers=0,
         )
 
-        # Unlabeled loader (cycle it)
-        if len(unlabeled_dataset) > 0:
-            unlabeled_loader = torch.utils.data.DataLoader(
-                unlabeled_dataset,
-                batch_size=train_batch_size,
-                shuffle=True,
-                num_workers=0,
-                drop_last=True, # Drop last to avoid tiny batches
-            )
-            unlabeled_iter = iter(unlabeled_loader)
-            unlabeled_desc = tqdm(total=len(train_loader), desc="[BlackboxDissector] Predicting Pool", leave=False)
-        else:
-            unlabeled_loader = None
-            unlabeled_iter = None
-            unlabeled_desc = None
-
         # Teacher model = frozen copy of previous substitute (Eq. 7)
         teacher_model = state.attack_state.get("substitute")
         teacher: Optional[nn.Module]
@@ -798,6 +991,44 @@ class BlackboxDissector(AttackRunner):
             teacher.eval()
             for p in teacher.parameters():
                 p.requires_grad_(False)
+
+        if teacher is not None and len(state.attack_state.get("pseudo_labels", {})) == 0:
+            self._generate_pseudo_labels(state, teacher)
+
+        pseudo_labels = state.attack_state.get("pseudo_labels", {})
+        pseudo_loader = None
+        pseudo_iter = None
+        if len(pseudo_labels) > 0:
+            pseudo_indices = list(pseudo_labels.keys())
+
+            class PseudoDataset(torch.utils.data.Dataset):
+                def __init__(
+                    self,
+                    indices: List[int],
+                    labels: dict[int, torch.Tensor],
+                    pool: torch.utils.data.Dataset,
+                ):
+                    self.indices = indices
+                    self.labels = labels
+                    self.pool = pool
+
+                def __len__(self) -> int:
+                    return len(self.indices)
+
+                def __getitem__(self, idx: int):
+                    real_idx = self.indices[idx]
+                    x, _ = self.pool[real_idx]
+                    y = self.labels[real_idx]
+                    return x, y
+
+            pseudo_loader = torch.utils.data.DataLoader(
+                PseudoDataset(pseudo_indices, pseudo_labels, self.pool_dataset),
+                batch_size=train_batch_size,
+                shuffle=True,
+                num_workers=0,
+                drop_last=False,
+            )
+            pseudo_iter = iter(pseudo_loader)
 
         # Initialize student model FROM SCRATCH each iteration
         width_mult = int(sub_config.get("width_mult", 1))
@@ -823,44 +1054,24 @@ class BlackboxDissector(AttackRunner):
         norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
 
         def step_fn(model_local: nn.Module, x_batch: torch.Tensor, y_batch: torch.Tensor) -> torch.Tensor:
-            nonlocal unlabeled_iter
-            if unlabeled_desc is not None:
-                unlabeled_desc.update(1)
-
+            nonlocal pseudo_iter
             x_norm = (x_batch - norm_mean) / norm_std
             outputs = model_local(x_norm)
             loss_sup = F.cross_entropy(outputs, y_batch.long())
 
             loss_kd = torch.tensor(0.0, device=device)
-            if unlabeled_loader is not None and unlabeled_iter is not None and teacher is not None:
+            if pseudo_loader is not None and pseudo_iter is not None:
                 try:
-                    x_unlab, _ = next(unlabeled_iter)
+                    x_pseudo, y_pseudo = next(pseudo_iter)
                 except StopIteration:
-                    unlabeled_iter = iter(unlabeled_loader)
-                    x_unlab, _ = next(unlabeled_iter)
+                    pseudo_iter = iter(pseudo_loader)
+                    x_pseudo, y_pseudo = next(pseudo_iter)
 
-                if len(x_unlab) > 1:
-                    x_unlab = x_unlab.to(device)
-                    x_variants = random_erase_batch(
-                        x_unlab,
-                        n=self.n_variants,
-                        sl=self.sl,
-                        sh=self.sh,
-                        r1=self.r1,
-                        r2=self.r2,
-                        fill_min=self.fill_min,
-                        fill_max=self.fill_max,
-                    )
-                    x_variants_norm = (x_variants - norm_mean) / norm_std
-                    with torch.no_grad():
-                        logits_variants = teacher(x_variants_norm)
-                        probs_variants = F.softmax(logits_variants, dim=1)
-                        probs_variants = probs_variants.view(len(x_unlab), self.n_variants, num_classes)
-                        pseudo_labels = probs_variants.mean(dim=1)
-
-                    x_unlab_norm = (x_unlab.to(device) - norm_mean) / norm_std
-                    logits_unlab = model_local(x_unlab_norm)
-                    loss_kd = soft_cross_entropy(logits_unlab, pseudo_labels).mean()
+                x_pseudo = x_pseudo.to(device)
+                y_pseudo = y_pseudo.to(device)
+                x_pseudo_norm = (x_pseudo - norm_mean) / norm_std
+                logits_pseudo = model_local(x_pseudo_norm)
+                loss_kd = soft_cross_entropy(logits_pseudo, y_pseudo).mean()
 
             return loss_sup + loss_kd
 
@@ -888,9 +1099,6 @@ class BlackboxDissector(AttackRunner):
             self.logger.info("Dissector substitute trained. Best Val F1: %.4f", result.best_value)
         else:
             self.logger.info("Dissector substitute trained.")
-        if unlabeled_desc is not None:
-            unlabeled_desc.close()
-
         # Round Evaluation
         # self._evaluate_current_substitute(model, device)
 

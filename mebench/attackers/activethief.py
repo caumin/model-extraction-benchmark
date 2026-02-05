@@ -75,7 +75,12 @@ class ActiveThief(AttackRunner):
     def _initialize_state(self, state: BenchmarkState) -> None:
         """Initialize attack-specific state."""
         state.attack_state["labeled_indices"] = []
-        state.attack_state["unlabeled_indices"] = []
+        dataset_config = state.metadata.get("dataset_config", {})
+        seed_size = dataset_config.get("seed_size")
+        if seed_size is None and isinstance(dataset_config.get("dataset"), dict):
+            seed_size = dataset_config["dataset"].get("seed_size")
+        default_pool_size = int(seed_size) if seed_size is not None else 10000
+        state.attack_state["unlabeled_indices"] = list(range(default_pool_size))
         state.attack_state["round"] = 0
         state.attack_state["initialized"] = False
         state.attack_state["initial_seed_indices"] = []
@@ -112,27 +117,11 @@ class ActiveThief(AttackRunner):
         # Initialize labeled/unlabeled splits
         pool_size = len(self.pool_dataset)
         self.unlabeled_indices = list(range(pool_size))
-        
-        # Select initial random seed
-        if len(self.unlabeled_indices) > self.initial_seed_size:
-            seed_indices = np.random.choice(
-                self.unlabeled_indices, 
-                size=self.initial_seed_size, 
-                replace=False
-            ).tolist()
-        else:
-            seed_indices = self.unlabeled_indices.copy()
-        
-        # Move from unlabeled to labeled
-        for idx in seed_indices:
-            self.unlabeled_indices.remove(idx)
-            self.labeled_indices.append(idx)
-
-        self.initial_seed_indices = seed_indices
+        self.initial_seed_indices = []
 
         state.attack_state["labeled_indices"] = self.labeled_indices
         state.attack_state["unlabeled_indices"] = self.unlabeled_indices
-        state.attack_state["initial_seed_indices"] = seed_indices
+        state.attack_state["initial_seed_indices"] = []
         state.attack_state["initialized"] = True
 
     def _create_substitute(self, input_shape: tuple) -> nn.Module:
@@ -226,6 +215,10 @@ class ActiveThief(AttackRunner):
             load_best=True,
         )
         trainer.train(request)
+
+    def train_substitute(self, state: BenchmarkState) -> None:
+        self._train_substitute(state)
+        state.attack_state["substitute"] = self.substitute
 
     def _select_uncertainty(self, probs: torch.Tensor, k: int) -> List[int]:
         """Select samples with highest entropy.
@@ -539,6 +532,15 @@ class ActiveThief(AttackRunner):
             selected_indices = [self.unlabeled_indices[i] for i in selected_local]
             return self._finalize_query_batch(selected_indices, state, k)
 
+        if self.initial_seed_size is not None and len(self.labeled_indices) < self.initial_seed_size:
+            selected_local = np.random.choice(
+                len(self.unlabeled_indices),
+                size=min(k, len(self.unlabeled_indices)),
+                replace=False,
+            ).tolist()
+            selected_indices = [self.unlabeled_indices[i] for i in selected_local]
+            return self._finalize_query_batch(selected_indices, state, k)
+
         if self.substitute is None:
             self._train_substitute(state)
 
@@ -694,3 +696,15 @@ class ActiveThief(AttackRunner):
         
         # ActiveThief state updates are handled in _select_query_batch (index management)
         # and _train_substitute (model update).
+
+    def _handle_oracle_output(
+        self,
+        query_batch: QueryBatch,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        if not getattr(query_batch, "meta", None):
+            return
+        if not query_batch.meta.get("indices"):
+            return
+        self.observe(query_batch, oracle_output, state)

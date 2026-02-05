@@ -89,6 +89,7 @@ class DFME(AttackRunner):
                 loss_base = torch.norm(v_out - s_out, p=1, dim=1) # L1 Loss (Eq. 5)
                 
                 # Estimating Gradient
+                d = pre_tanh.view(pre_tanh.size(0), -1).size(1)
                 grad_est = torch.zeros_like(pre_tanh)
                 for _ in range(self.m):
                     u = torch.randn_like(pre_tanh)
@@ -101,7 +102,7 @@ class DFME(AttackRunner):
                 
                 self.g_opt.zero_grad()
                 # Maximize L1 Disagreement (Gradient Ascent)
-                pre_tanh.backward(- (grad_est / (self.m * self.epsilon)))
+                pre_tanh.backward(- (grad_est * d / (self.m * self.epsilon)))
                 self.g_opt.step()
                 pbar.update(batch * (1 + self.m))
 

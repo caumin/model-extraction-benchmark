@@ -14,6 +14,10 @@ from mebench.attackers.blackbox_ripper import BlackboxRipper
 from mebench.attackers.copycatcnn import CopycatCNN
 from mebench.attackers.inversenet import InverseNet
 from mebench.attackers.knockoff_nets import KnockoffNets
+from mebench.attackers.random_baseline import RandomBaseline
+
+# Backwards-compatible alias
+DFMS = DFMSHL
 
 __all__ = [
     "AttackRunner",
@@ -21,6 +25,7 @@ __all__ = [
     "DFME",
     "MAZE",
     "DFMSHL",
+    "DFMS",
     "GAME",
     "ESAttack",
     "SwiftThief",
@@ -30,4 +35,5 @@ __all__ = [
     "CopycatCNN",
     "InverseNet",
     "KnockoffNets",
+    "RandomBaseline",
 ]

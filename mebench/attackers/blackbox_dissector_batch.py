@@ -24,8 +24,12 @@ def generate_gradcam_heatmap_batch(
     B = x.size(0)
 
     def _get_target_layer(net: nn.Module) -> nn.Module:
+        if hasattr(net, "layer4"):
+            return net.layer4
         if hasattr(net, "layer3"):
             return net.layer3
+        if hasattr(net, "dense4"):
+            return net.dense4
         if hasattr(net, "dense3"):
             return net.dense3
         if hasattr(net, "features"):
@@ -293,4 +297,3 @@ def random_erase_batch(
     erased_batch[mask] = fill_values[mask]
     
     return erased_batch
-

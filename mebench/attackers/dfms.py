@@ -314,7 +314,12 @@ class DFMSHL(AttackRunner):
         self.generator_optimizer.step()
 
     def _pretrain_gan(self, device: str) -> None:
-        pre_pbar = tqdm(range(self.pretrain_steps), desc="[DFMSHL] Pre-training GAN", leave=False)
+        pre_pbar = tqdm(
+            range(self.pretrain_steps),
+            desc="[DFMSHL] Pre-training GAN",
+            leave=False,
+            disable=True,
+        )
         for _ in pre_pbar:
             real_x = self._next_proxy_batch(device)
             z = torch.randn(real_x.size(0), self.noise_dim, device=device)
@@ -395,14 +400,22 @@ class DFMSHL(AttackRunner):
     def _fine_tune_generator(self, x_collected: torch.Tensor, y_collected: torch.Tensor, epochs: int) -> None:
         device = x_collected.device
         # Train clone first on collected data
-        self.logger.info(f"Fine-tuning: Training clone for 50 epochs on {x_collected.size(0)} samples...")
-        for _ in tqdm(range(50), desc="[DFMSHL] Fine-tuning Clone", leave=False): 
+        self.logger.debug(
+            "Fine-tuning: Training clone for 50 epochs on %s samples...",
+            x_collected.size(0),
+        )
+        for _ in tqdm(range(50), desc="[DFMSHL] Fine-tuning Clone", leave=False, disable=True):
             self._train_clone(x_collected, y_collected)
         
         # Then tune G
-        self.logger.info(f"Fine-tuning: Training generator for {epochs} epochs...")
+        self.logger.debug("Fine-tuning: Training generator for %s epochs...", epochs)
         self.generator.train()
-        for i in tqdm(range(epochs), desc="[DFMSHL] Fine-tuning Generator", leave=False):
+        for i in tqdm(
+            range(epochs),
+            desc="[DFMSHL] Fine-tuning Generator",
+            leave=False,
+            disable=True,
+        ):
             real_x = self._next_proxy_batch(device)
             z = torch.randn(self.batch_size, self.noise_dim, device=device)
             fake_x = self.generator(z) * 0.5 + 0.5

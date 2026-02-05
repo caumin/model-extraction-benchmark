@@ -48,6 +48,20 @@ class QueryDataset(torch.utils.data.Dataset):
         return self.x[idx], self.y[idx]
 
 
+class PoolUDataset(torch.utils.data.Dataset):
+    def __init__(self, indices, pool):
+        self.indices = indices
+        self.pool = pool
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        pool_idx = self.indices[idx]
+        img, _ = self.pool[pool_idx]
+        return img
+
+
 # ============================================================
 # Repo: normalize.py
 # ============================================================
@@ -368,9 +382,9 @@ class SwiftThief(AttackRunner):
         self.cl_epochs = int(config.get("cl_epochs", 40))
         self.patience = int(config.get("patience", 50))
 
-        # KD hardcoded (requested)
-        self.kd_epochs = 10
-        self.kd_lr = 1e-2
+        # KD defaults aligned to paper
+        self.kd_epochs = int(config.get("kd_epochs", 40))
+        self.kd_lr = float(config.get("kd_lr", self.lr))
 
         # internal
         self.pool_dataset = None
@@ -863,22 +877,12 @@ class SwiftThief(AttackRunner):
         if len(unlabeled_indices) == 0:
             unlabeled_loader = None
         else:
-            class PoolU(torch.utils.data.Dataset):
-                def __init__(self, indices, pool):
-                    self.indices = indices
-                    self.pool = pool
-                def __len__(self): return len(self.indices)
-                def __getitem__(self, i):
-                    idx = self.indices[i]
-                    img, _ = self.pool[idx]
-                    return img
-
             # Use ALL unlabeled samples for training (Strict Protocol)
             u_indices = unlabeled_indices
             if len(u_indices) == 0:
                 unlabeled_loader = None
             else:
-                dataset_u = PoolU(u_indices, self.pool_dataset)
+                dataset_u = PoolUDataset(u_indices, self.pool_dataset)
                 # Wrap unlabeled set
                 dataset_u_ssl = SimSiamDataset(dataset_u, two_crop)
                 
@@ -1086,7 +1090,9 @@ class SwiftThief(AttackRunner):
             **loader_kwargs,
         )
 
-        optimizer_kd = self._build_optimizer(substitute.parameters(), opt_config)
+        kd_opt_config = dict(opt_config)
+        kd_opt_config["lr"] = self.kd_lr
+        optimizer_kd = self._build_optimizer(substitute.parameters(), kd_opt_config)
 
         kd_pbar = tqdm(range(self.kd_epochs), desc="[SwiftThief] Training (KD)", leave=False)
         for e in kd_pbar:

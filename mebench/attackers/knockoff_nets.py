@@ -260,11 +260,18 @@ class KnockoffNets(AttackRunner):
 
         last_train_count = state.attack_state.get("last_train_count", 0)
         if state.attack_state["query_count"] - last_train_count >= self.train_every:
-            self.logger.info(f"Training substitute at query count {state.attack_state['query_count']}...")
-            self._train_substitute(state, reset_model=False, epochs=self.online_train_epochs, store_key="online_substitute")
+            self.logger.debug(
+                "Training substitute at query count %s...",
+                state.attack_state["query_count"],
+            )
+            self._train_substitute(
+                state,
+                reset_model=False,
+                epochs=self.online_train_epochs,
+                store_key="online_substitute",
+            )
             state.attack_state["substitute"] = state.attack_state.get("online_substitute")
             state.attack_state["last_train_count"] = state.attack_state["query_count"]
-            self._evaluate_current_substitute(state.attack_state.get("substitute"), state.metadata.get("device", "cpu"))
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["queried_indices"] = []
@@ -548,7 +555,7 @@ class KnockoffNets(AttackRunner):
         if len(state.attack_state["query_data_x"]) == 0:
             return
 
-        self.logger.info("Final offline retraining for KnockoffNets...")
+        self.logger.debug("Final offline retraining for KnockoffNets...")
         sub_config = state.metadata.get("substitute_config", {})
         default_epochs = int(sub_config.get("max_epochs", self.train_epochs))
         offline_epochs = self.offline_train_epochs or default_epochs

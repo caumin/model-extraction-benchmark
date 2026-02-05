@@ -257,11 +257,16 @@ class GAME(AttackRunner):
         cache = state.attack_state.get("victim_class_avg_prob")
         counts = state.attack_state.get("victim_class_counts")
         
-        if cache is None:
+        if cache is None or counts is None:
             cache = torch.zeros(self.num_classes, self.num_classes, device=victim_probs.device)
             # Init with uniform to avoid log(0)
             cache.fill_(1.0 / self.num_classes)
             counts = torch.zeros(self.num_classes, device=victim_probs.device)
+        else:
+            if cache.device != victim_probs.device:
+                cache = cache.to(victim_probs.device)
+            if counts.device != victim_probs.device:
+                counts = counts.to(victim_probs.device)
             
         labels = labels.to(victim_probs.device)
         
