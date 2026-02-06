@@ -8,8 +8,6 @@ import tempfile
 
 def test_dfme_config_validity_and_activethief_lr():
     """Test DFME config and ActiveThief lr compliance."""
-    test_dfme_config_validity()
-    
     # Test ActiveThief learning rate compliance
     activethief_config_path = Path(__file__).parent.parent / "configs" / "activethief_experiment.yaml"
     if not activethief_config_path.exists():

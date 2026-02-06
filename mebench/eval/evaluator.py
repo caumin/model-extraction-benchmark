@@ -25,6 +25,46 @@ class Evaluator:
         self.query_storage = query_storage
         self.device = state.metadata["device"]
 
+    def _evaluate_track_b(
+        self,
+        victim: nn.Module,
+        test_loader: DataLoader,
+        checkpoint_budget: int,
+    ) -> Dict[str, float]:
+        """Evaluate the current Track B substitute (best-effort helper).
+
+        Track B attacks may fail to produce a substitute in some edge cases.
+        For reporting stability, return zero metrics when substitute is missing.
+
+        Args:
+            victim: Victim model
+            test_loader: Test set loader
+            checkpoint_budget: Query budget at which this evaluation is recorded
+
+        Returns:
+            Metrics dict (acc_gt, agreement, kl_mean, l1_mean)
+        """
+        _ = checkpoint_budget
+        substitute = self.state.attack_state.get("substitute")
+        if substitute is None:
+            return {"acc_gt": 0.0, "agreement": 0.0, "kl_mean": 0.0, "l1_mean": 0.0}
+
+        output_mode = self.config["victim"]["output_mode"]
+        temperature = float(self.config["victim"].get("temperature", 1.0))
+        metrics = evaluate_substitute(
+            substitute=substitute,
+            victim=victim,
+            test_loader=test_loader,
+            device=self.device,
+            output_mode=output_mode,
+            temperature=temperature,
+        )
+
+        # Ensure numeric defaults even if a metric is absent in a mode.
+        metrics.setdefault("kl_mean", 0.0)
+        metrics.setdefault("l1_mean", 0.0)
+        return metrics
+
     def evaluate(
         self,
         victim: nn.Module,

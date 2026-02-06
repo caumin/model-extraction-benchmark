@@ -15,7 +15,7 @@ victim:
   - 28
   checkpoint_ref: runs/victims/mnist_lenet_seed0.pt
   normalization: null
-  output_mode: soft_prob
+  output_mode: hard_top1
   temperature: 1.0
 dataset:
   name: MNIST
@@ -24,7 +24,7 @@ dataset:
   train_split: true
 attack:
   name: inversenet
-  output_mode: soft_prob
+  output_mode: hard_top1
   max_budget: 10000
 substitute:
   arch: lenet_mnist

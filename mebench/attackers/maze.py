@@ -92,7 +92,7 @@ class MAZE(AttackRunner):
                 
                 # Base output for estimation
                 x_base = self.generator(z)
-                y_t_base = ctx.oracle.query((x_base + 1.0) / 2.0).y.to(device) # Victim input in [0, 1]
+                y_t_base = ctx.query((x_base + 1.0) / 2.0).y.to(device) # Victim input in [0, 1]
                 y_c_base = F.softmax(self.clone(self._normalize(x_base)), dim=1)
                 
                 # Objective LG: -KL(yT || yC) to maximize disagreement
@@ -105,7 +105,7 @@ class MAZE(AttackRunner):
                     u = torch.randn_like(x_base)
                     u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
                     x_pert = torch.clamp(x_base + self.epsilon * u, -1.0, 1.0)
-                    y_t_pert = ctx.oracle.query((x_pert + 1.0) / 2.0).y.to(device)
+                    y_t_pert = ctx.query((x_pert + 1.0) / 2.0).y.to(device)
                     y_c_pert = F.softmax(self.clone(self._normalize(x_pert)), dim=1)
                     loss_pert = -F.kl_div(torch.log(y_c_pert + 1e-10), y_t_pert, reduction='none').sum(dim=1)
                     
@@ -125,13 +125,22 @@ class MAZE(AttackRunner):
                 self.generator.eval(); self.clone.train()
                 z = torch.randn(batch, self.noise_dim, device=device)
                 x_gen = self.generator(z).detach()
-                y_t = ctx.oracle.query((x_gen + 1.0) / 2.0).y.to(device)
+                y_t = ctx.query((x_gen + 1.0) / 2.0).y.to(device)
+
+                # Avoid BatchNorm crashes on tiny final batches (e.g., batch=1)
+                # while still consuming the remaining query budget.
+                clone_was_training = self.clone.training
+                if batch < 2:
+                    self.clone.eval()
                 
                 # Minimize KL Divergence (Eq. 4)
                 self.c_opt.zero_grad()
                 y_c = F.log_softmax(self.clone(self._normalize(x_gen)), dim=1)
                 loss = F.kl_div(y_c, y_t, reduction='batchmean')
                 loss.backward(); self.c_opt.step()
+
+                if clone_was_training:
+                    self.clone.train()
                 
                 # Experience Replay Storage
                 self._append_replay(x_gen, y_t)

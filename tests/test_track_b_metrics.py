@@ -36,6 +36,7 @@ def test_track_b_metrics_when_substitute_missing() -> None:
     }
 
     state = BenchmarkState()
+    state.metadata = {"device": "cpu"}
     evaluator = Evaluator(config, state, query_storage=None)
 
     victim = nn.Sequential(nn.Flatten(), nn.Linear(3 * 4 * 4, 10))

@@ -92,7 +92,15 @@ def generate_configs():
             
             victim_id = f"{setup['victim_dataset'].lower()}_{victim_arch_clean}"
             
-            output_mode = "hard_top1" if attack == "blackbox_dissector" else "soft_prob"
+            # Output mode by attack capability.
+            # - soft_only: probabilities required
+            # - hard_only: top-1 only
+            # - both: default to soft_prob for stronger oracle (hard variants can be generated separately)
+            HARD_ONLY = {"copycatcnn", "inversenet", "dfms", "blackbox_dissector"}
+            if attack_name in HARD_ONLY:
+                output_mode = "hard_top1"
+            else:
+                output_mode = "soft_prob"
             data_mode = "data_free" if attack_name in BATCH_FREE_ATTACKS else "surrogate"
 
             # Determine execution plan based on category

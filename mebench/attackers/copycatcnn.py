@@ -1,5 +1,6 @@
 from typing import Dict, Any, List, Tuple, Optional
 import logging
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -29,6 +30,9 @@ class CopycatCNN(AttackRunner):
         self.substitute_momentum = float(config.get("substitute_momentum", 0.9))
         self.substitute_weight_decay = float(config.get("substitute_weight_decay", 5e-4))
         self.substitute_epochs = int(config.get("substitute_epochs", 5))
+        # Round-based execution: query -> (re)train substitute, repeated.
+        # Default aligns with common "10 round" reporting in prior works.
+        self.rounds = int(config.get("rounds", 10))
         # Paper CopycatCNN balances the fake dataset by class by default.
         self.balance_by_class = bool(config.get("balance_by_class", True))
         # Official CopycatCNN code expands each image with ~22 offline augmentation methods.
@@ -56,15 +60,27 @@ class CopycatCNN(AttackRunner):
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
         device = self.state.metadata.get("device", "cpu")
-        total_budget = self.state.budget_remaining
+        total_budget = int(
+            self.state.metadata.get("max_budget")
+            or self.config.get("max_budget", ctx.budget_remaining)
+        )
+
+        rounds = max(1, int(self.rounds))
+        round_size = max(1, int(math.ceil(total_budget / rounds)))
+
         pbar = tqdm(total=total_budget, desc="[CopycatCNN] Extracting")
-        
+        round_id = 0
         while ctx.budget_remaining > 0:
-            step_size = self._default_step_size(ctx)
+            round_id += 1
+            step_size = min(round_size, ctx.budget_remaining)
             x, indices = self._select_query_batch(step_size, self.state)
-            oracle_output = ctx.query(x, meta={"indices": indices})
+            oracle_output = ctx.query(x, meta={"indices": indices, "round": round_id})
             self._handle_oracle_output(x, oracle_output, self.state)
             pbar.update(x.size(0))
+
+            # Offline training after each round on accumulated labeled set.
+            self._train_substitute(self.state)
+
         pbar.close()
 
     def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, list[int]]:
@@ -93,9 +109,6 @@ class CopycatCNN(AttackRunner):
 
         state.attack_state["query_data_x"].append(x_batch.detach().cpu())
         state.attack_state["query_data_y"].append(labels.detach().cpu())
-
-        if state.query_count in self.train_checkpoints and state.query_count > 0:
-            self._train_substitute(state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["query_data_x"] = []
@@ -233,6 +246,7 @@ class CopycatCNN(AttackRunner):
                 return x, self.y[base_idx]
 
         dataset = OfflineAugmentedTensorDataset(x_train, y_train, augs, self.augmentation_multiplier)
+        sub_config = state.metadata.get("substitute_config", {})
         train_batch_size = int(
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
@@ -245,8 +259,6 @@ class CopycatCNN(AttackRunner):
             pin_memory=True,
         )
 
-        sub_config = state.metadata.get("substitute_config", {})
-        
         device = state.metadata.get("device", "cpu")
         if self.substitute is None:
             width_mult = int(sub_config.get("width_mult", 1))

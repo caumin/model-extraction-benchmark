@@ -83,8 +83,10 @@ class DFME(AttackRunner):
                 z = torch.randn(batch, 100, device=device)
                 
                 # Forward Difference for Gradient Estimation (Eq. 6)
-                pre_tanh, x = self.generator(z, return_pre_tanh=True)
-                v_out = self._recover_logits(ctx.oracle.query(x).y.to(device))
+                pre_tanh, x_raw = self.generator(z, return_pre_tanh=True)
+                # Benchmark contract: oracle inputs are in [0, 1] (no mean/std normalization).
+                x = torch.clamp(x_raw * 0.5 + 0.5, 0.0, 1.0)
+                v_out = self._recover_logits(ctx.query(x).y.to(device))
                 s_out = self.student(x)
                 loss_base = torch.norm(v_out - s_out, p=1, dim=1) # L1 Loss (Eq. 5)
                 
@@ -94,8 +96,9 @@ class DFME(AttackRunner):
                 for _ in range(self.m):
                     u = torch.randn_like(pre_tanh)
                     u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
-                    x_pert = torch.tanh(pre_tanh + self.epsilon * u)
-                    v_pert = self._recover_logits(ctx.oracle.query(x_pert).y.to(device))
+                    x_pert_raw = torch.tanh(pre_tanh + self.epsilon * u)
+                    x_pert = torch.clamp(x_pert_raw * 0.5 + 0.5, 0.0, 1.0)
+                    v_pert = self._recover_logits(ctx.query(x_pert).y.to(device))
                     s_pert = self.student(x_pert)
                     loss_pert = torch.norm(v_pert - s_pert, p=1, dim=1)
                     grad_est += (loss_pert - loss_base).view(-1, 1, 1, 1) * u
@@ -113,12 +116,22 @@ class DFME(AttackRunner):
                     break
                 self.generator.eval(); self.student.train()
                 z = torch.randn(batch, 100, device=device)
-                x = self.generator(z).detach()
-                v_out = self._recover_logits(ctx.oracle.query(x).y.to(device))
+                x_raw = self.generator(z).detach()
+                x = torch.clamp(x_raw * 0.5 + 0.5, 0.0, 1.0)
+                v_out = self._recover_logits(ctx.query(x).y.to(device))
                 
                 self.s_opt.zero_grad()
+                # Avoid BatchNorm crashes on tiny final batches (e.g., batch=1)
+                # while still consuming the remaining query budget.
+                student_was_training = self.student.training
+                if batch < 2:
+                    self.student.eval()
+
                 loss = F.l1_loss(self.student(x), v_out)
                 loss.backward(); self.s_opt.step()
+
+                if student_was_training:
+                    self.student.train()
                 pbar.update(batch)
         
         self.state.attack_state["substitute"] = self.student

@@ -391,13 +391,14 @@ class ActiveThief(AttackRunner):
     def _select_dfal(self, state: BenchmarkState, k: int) -> List[int]:
         """Select samples using DeepFool Active Learning."""
         device = state.metadata.get("device", "cpu")
+        pin_memory = str(device).startswith("cuda")
         unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
         unlabeled_loader = DataLoader(
             unlabeled_dataset, 
             batch_size=self.batch_size, 
             shuffle=False, 
-            num_workers=4,
-            pin_memory=True
+            num_workers=0,
+            pin_memory=pin_memory,
         )
         
         all_distances = []
@@ -431,6 +432,8 @@ class ActiveThief(AttackRunner):
 
     def _select_dfal_k_center(self, state: BenchmarkState, k: int) -> List[int]:
         """DFAL pre-filtering + K-center selection."""
+        device = state.metadata.get("device", "cpu")
+        pin_memory = str(device).startswith("cuda")
         # Pre-filter with DFAL to get rho candidates
         base_rho = self.dfal_rho
         if base_rho is None:
@@ -456,11 +459,10 @@ class ActiveThief(AttackRunner):
             candidate_dataset, 
             batch_size=self.batch_size, 
             shuffle=False, 
-            num_workers=4,
-            pin_memory=True
+            num_workers=0,
+            pin_memory=pin_memory,
         )
-        
-        device = state.metadata.get("device", "cpu")
+
         if self.substitute is None:
             self._train_substitute(state)
         probs = self._collect_probs(candidate_loader, device)
@@ -634,7 +636,7 @@ class ActiveThief(AttackRunner):
                         "unlabeled_size": len(self.unlabeled_indices),
                     },
                 )
-                oracle_output = ctx.oracle.query(query_batch.x)
+                oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
                 self.observe(query_batch, oracle_output, state)
                 state.attack_state["initial_seed_queried"] = True
                 if self.labeled_indices:
@@ -661,7 +663,7 @@ class ActiveThief(AttackRunner):
             if query_batch.x.shape[0] == 0:
                 break
             
-            oracle_output = ctx.oracle.query(query_batch.x)
+            oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
             self.observe(query_batch, oracle_output, state)
             
             if self.labeled_indices:

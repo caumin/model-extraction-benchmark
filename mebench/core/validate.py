@@ -30,16 +30,39 @@ def validate_config(config: Dict[str, Any]) -> None:
     if victim_mode != attack_mode:
         raise ValueError(f"Mode mismatch: victim={victim_mode}, attack={attack_mode}")
 
-    # Attacks that can work with soft labels (also compatible with hard labels)
-    # Note: CloudLeak and SwiftThief can work in hard mode with one-hot vectors
-    # but may have performance degradation compared to soft mode
-    # InverseNet kept as soft-only due to its inversion-based nature
-    soft_only_attacks = {"inversenet", "cloudleak", "swiftthief", "blackbox_ripper"}
-    hard_only_attacks = {"blackbox_dissector"}
+    # Output-mode capability (soft-only / hard-only / both).
+    # This is a *capability* taxonomy used for fair evaluation grouping.
+    # Some attacks may run in the other mode by discarding information, but we
+    # enforce the intended oracle capability per attack to avoid silent misuse.
+    soft_only_attacks = {
+        # Soft label (probabilities) required.
+        "knockoff_nets",
+        "maze",
+        "dfme",
+        "cloudleak",
+        "game",
+        "blackbox_ripper",
+    }
+    hard_only_attacks = {
+        # Hard label (top-1) only.
+        "copycatcnn",
+        "inversenet",
+        "dfms",  # DFMS-HL
+        "blackbox_dissector",
+    }
+    both_attacks = {
+        # Works under both soft_prob and hard_top1.
+        "activethief",
+        "swiftthief",
+        "es",
+    }
+
     if attack in soft_only_attacks and attack_mode != "soft_prob":
         raise ValueError(f"{attack} requires soft_prob output mode")
     if attack in hard_only_attacks and attack_mode != "hard_top1":
         raise ValueError(f"{attack} requires hard_top1 output mode")
+    if attack in both_attacks and attack_mode not in {"soft_prob", "hard_top1"}:
+        raise ValueError(f"{attack} requires output_mode to be soft_prob or hard_top1")
 
     # BlackboxRipper requires a pretrained generator checkpoint (official repo behavior).
     if attack == "blackbox_ripper":

@@ -1,9 +1,15 @@
 """Random selection baseline attack."""
 
 import logging
+import math
 import numpy as np
 import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+from mebench.models.substitute_factory import create_substitute
+from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
@@ -25,6 +31,9 @@ class RandomBaseline(AttackRunner):
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state.setdefault("queried_indices", [])
         state.attack_state.setdefault("unqueried_indices", [])
+        state.attack_state.setdefault("query_data_x", [])
+        state.attack_state.setdefault("query_data_y", [])
+        state.attack_state.setdefault("substitute", None)
 
     def _ensure_pool_dataset(self, state: BenchmarkState) -> None:
         if self.pool_dataset is None:
@@ -71,7 +80,9 @@ class RandomBaseline(AttackRunner):
             pbar.update(query_batch.x.size(0))
             offset += k
         pbar.close()
-        # Final Evaluation (handled by engine)
+        # Train once on the collected labeled set.
+        self._train_substitute(self.state)
+        # Final evaluation is handled by the engine.
 
     def _sample_indices(self, k: int, state: BenchmarkState) -> tuple[list[int], bool]:
         self._ensure_pool_dataset(state)
@@ -118,5 +129,75 @@ class RandomBaseline(AttackRunner):
         oracle_output: OracleOutput,
         state: BenchmarkState,
     ) -> None:
-        # Random baseline doesn't update state based on output
-        return
+        state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
+        state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
+
+    def _train_substitute(self, state: BenchmarkState) -> None:
+        query_x = state.attack_state.get("query_data_x", [])
+        query_y = state.attack_state.get("query_data_y", [])
+        if len(query_x) == 0:
+            return
+
+        x_all = torch.cat(query_x, dim=0)
+        y_all = torch.cat(query_y, dim=0)
+        if x_all.size(0) < 2:
+            return
+
+        sub_config = state.metadata.get("substitute_config", {})
+        device = state.metadata.get("device", "cpu")
+
+        num_classes = int(
+            state.metadata.get("num_classes")
+            or state.metadata.get("victim_config", {}).get("num_classes")
+            or state.metadata.get("dataset_config", {}).get("num_classes", 10)
+        )
+        input_channels = int(state.metadata.get("input_shape", (3, 32, 32))[0])
+
+        width_mult = int(sub_config.get("width_mult", 1))
+        dropout_prob = float(sub_config.get("dropout_prob", 0.0))
+        substitute = create_substitute(
+            arch=sub_config.get("arch", "resnet18"),
+            num_classes=num_classes,
+            input_channels=input_channels,
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
+        ).to(device)
+
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size")
+            or int(self.config.get("batch_size", 128))
+        )
+        loader = DataLoader(
+            torch.utils.data.TensorDataset(x_all, y_all),
+            batch_size=train_batch_size,
+            shuffle=True,
+            num_workers=0,
+        )
+
+        output_mode = str(self.config.get("output_mode", "soft_prob"))
+
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if output_mode == "soft_prob":
+                targets = targets.clamp_min(1e-10)
+                targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                log_probs = torch.log_softmax(outputs, dim=1)
+                return nn.KLDivLoss(reduction="batchmean")(log_probs, targets)
+            return nn.CrossEntropyLoss()(outputs, targets.long())
+
+        # Use Track-A style step budget by default (keeps runtime bounded).
+        steps_coeff_c = float(sub_config.get("trackA", {}).get("steps_coeff_c", 0.2))
+        max_steps = int(math.ceil(steps_coeff_c * x_all.size(0)))
+        max_steps = max(1, max_steps)
+
+        trainer = SubstituteTrainer(dict(sub_config), device=device, logger=self.logger)
+        request = TrainRequest(
+            model=substitute,
+            train_loader=loader,
+            loss_fn=loss_fn,
+            max_steps=max_steps,
+            load_best=True,
+        )
+        trainer.train(request)
+
+        state.attack_state["substitute"] = substitute

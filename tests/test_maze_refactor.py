@@ -1,60 +1,79 @@
 import torch
-import numpy as np
-from mebench.core.state import BenchmarkState
-from mebench.attackers.maze import MAZE
-from mebench.core.types import QueryBatch, OracleOutput
+import torch.nn as nn
 
-def test_maze_algorithm_cycle():
-    config = {
+from mebench.attackers.maze import MAZE
+from mebench.core.context import BenchmarkContext
+from mebench.core.state import BenchmarkState
+from mebench.oracles.oracle import Oracle
+
+
+def test_maze_checkpoint_tracking_uses_ctx_query() -> None:
+    """MAZE should route oracle queries through ctx.query.
+
+    This test guards against accidentally calling ctx.oracle.query directly,
+    which would bypass BenchmarkContext checkpoint tracking.
+    """
+
+    budget = 12
+    num_classes = 10
+
+    attack_config = {
         "batch_size": 2,
-        "n_g_steps": 1,
-        "n_c_steps": 2,
-        "grad_approx_m": 2,
-        "generator_lr": 1e-4,
-        "clone_lr": 0.1,
-        "grad_approx_epsilon": 1e-3,
         "noise_dim": 8,
-        "replay_max": 10
+        "num_classes": num_classes,
+        "n_g_steps": 1,
+        "n_c_steps": 1,
+        "n_r_steps": 0,
+        "grad_approx_m": 2,
+        "grad_approx_epsilon": 1e-3,
     }
-    state = BenchmarkState()
+
+    full_config = {
+        "run": {"device": "cpu"},
+        "victim": {
+            "output_mode": "soft_prob",
+            "temperature": 1.0,
+            "channels": 3,
+            "num_classes": num_classes,
+            "input_size": [32, 32],
+        },
+        "attack": {"name": "maze", "output_mode": "soft_prob"},
+        "budget": {"max_budget": budget, "checkpoints": [6, 12]},
+        "dataset": {"data_mode": "data_free"},
+        "substitute": {
+            "arch": "resnet18",
+            "optimizer": {"name": "sgd", "lr": 0.01, "momentum": 0.9, "weight_decay": 5e-4},
+        },
+    }
+
+    class RangeCheckedVictim(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.net = nn.Sequential(nn.Flatten(), nn.Linear(3 * 32 * 32, num_classes))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            assert x.min().item() >= -1e-6
+            assert x.max().item() <= 1.0 + 1e-6
+            return self.net(x)
+
+    state = BenchmarkState(budget_remaining=budget)
     state.metadata = {
         "device": "cpu",
         "input_shape": (3, 32, 32),
-        "num_classes": 2,
-        "max_budget": 100,
-        "victim_config": {"normalization": {"mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5]}}
+        "num_classes": num_classes,
+        "max_budget": budget,
+        "victim_config": full_config["victim"],
+        "substitute_config": full_config["substitute"],
+        "dataset_config": full_config.get("dataset", {}),
     }
-    
-    attack = MAZE(config, state)
-    
-    # 1 Cycle = (1 * (2+1)) + 2 = 5 batches
-    # 5 batches * 2 samples = 10 queries
-    
-    # Propose 10 queries (exactly one cycle)
-    qb = attack._select_query_batch(10, state)
-    assert qb.x.shape[0] == 10
-    assert "blocks" in qb.meta
-    blocks = qb.meta["blocks"]
-    assert len(blocks) == 5
-    
-    # Block types should be: G_BASE, G_PERT, G_PERT, C_BASE, C_BASE
-    assert blocks[0]["type"] == "G_BASE"
-    assert blocks[1]["type"] == "G_PERT"
-    assert blocks[2]["type"] == "G_PERT"
-    assert blocks[3]["type"] == "C_BASE"
-    assert blocks[4]["type"] == "C_BASE"
-    
-    # Simulate Oracle response
-    y = torch.softmax(torch.randn(10, 2), dim=1)
-    oo = OracleOutput(kind="soft_prob", y=y)
-    
-    # Observe should update both models
-    attack._handle_oracle_output(qb, oo, state)
-    
-    # C_BASE count = 2 blocks * 2 samples = 4.
-    assert state.attack_state["replay_count"] == 4 
-    
-    print("MAZE refactor sanity check passed!")
 
-if __name__ == "__main__":
-    test_maze_algorithm_cycle()
+    victim = RangeCheckedVictim()
+    oracle = Oracle(victim, full_config["victim"], state)
+    ctx = BenchmarkContext(state=state, oracle=oracle, logger=None, config=full_config)
+
+    attack = MAZE(attack_config, state)
+    attack.run(ctx)
+
+    assert state.query_count == budget
+    assert state.budget_remaining == 0
+    assert state.attack_state.get("checkpoint_reached") == [6, 12]

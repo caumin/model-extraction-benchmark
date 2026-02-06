@@ -64,16 +64,12 @@ def _make_attack() -> ActiveThief:
 
 def test_select_uncertainty_prefers_high_entropy() -> None:
     attack = _make_attack()
-    state = BenchmarkState()
+    probs = torch.tensor([
+        [0.5, 0.5],  # high entropy
+        [0.999, 0.001],  # low entropy
+    ])
 
-    high_entropy = torch.zeros(1, 1, 2)
-    low_entropy = torch.ones(1, 1, 2) * 10.0
-    attack.pool_dataset = IndexedDataset([high_entropy, low_entropy])
-
-    state.attack_state["unlabeled_indices"] = [0, 1]
-    state.attack_state["substitute"] = EntropyModel()
-
-    selected = attack._select_uncertainty(1, state)
+    selected = attack._select_uncertainty(probs, 1)
 
     assert selected == [0]
 
@@ -144,20 +140,25 @@ def test_select_k_center_no_labeled_fallback() -> None:
 def test_select_dfal_prefers_smallest_perturbation() -> None:
     attack = _make_attack()
     state = BenchmarkState()
+    state.metadata = {"device": "cpu"}
 
     close = torch.tensor([[[0.1, 0.1]]])
     far = torch.tensor([[[1.0, 1.0]]])
     attack.pool_dataset = IndexedDataset([close, far])
 
-    state.attack_state["unlabeled_indices"] = [0, 1]
-    state.attack_state["substitute"] = FeatureModel()
+    attack.unlabeled_indices = [0, 1]
+    attack.batch_size = 32
+    attack.substitute = FeatureModel()
+    attack.dfal_max_iter = 1
 
-    def fake_compute_input_gradient(self, model, x, target_class):
-        scale = float(x.mean().item())
-        return torch.ones_like(x) * scale
+    def fake_deepfool_distance_dfal(self, model, x, max_iter, internal_batch_size):
+        _ = model
+        _ = max_iter
+        _ = internal_batch_size
+        return x.view(x.size(0), -1).mean(dim=1)
 
-    attack._compute_input_gradient = types.MethodType(fake_compute_input_gradient, attack)
+    attack._deepfool_distance_dfal = types.MethodType(fake_deepfool_distance_dfal, attack)
 
-    selected = attack._select_dfal(1, state)
+    selected = attack._select_dfal(state, 1)
 
     assert selected == [0]
