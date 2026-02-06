@@ -10,6 +10,10 @@ python_bin=${PYTHON_BIN:-python}
 pool_budget=${POOL_BUDGET:-20000}
 synthetic_budget=${SYNTHETIC_BUDGET:-2000000}
 
+# Config generation. IMPORTANT: for parallel runs, generate once (clean) and
+# run workers with GENERATE_CONFIGS=0 to avoid races deleting/regenerating YAMLs.
+generate_configs=${GENERATE_CONFIGS:-1}
+
 # Generate configs (cleans existing YAMLs by default)
 include_both_hard=${INCLUDE_BOTH_HARD:-1}
 both_flag=""
@@ -17,7 +21,9 @@ if [ "$include_both_hard" -ne 0 ]; then
   both_flag="--include-both-hard"
 fi
 
-$python_bin generate_configs.py --out "$matrix_dir" --device "$device" --pool-budget "$pool_budget" --synthetic-budget "$synthetic_budget" $both_flag
+if [ "$generate_configs" -ne 0 ]; then
+  $python_bin generate_configs.py --out "$matrix_dir" --device "$device" --pool-budget "$pool_budget" --synthetic-budget "$synthetic_budget" $both_flag
+fi
 
 configs=$(ls "${matrix_dir}"/${pattern})
 
