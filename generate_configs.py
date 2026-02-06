@@ -1,6 +1,7 @@
-import yaml
 import os
 from pathlib import Path
+
+import yaml
 
 def generate_configs():
     # Experimental Setup
