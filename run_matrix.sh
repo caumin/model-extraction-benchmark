@@ -1,12 +1,24 @@
 #!/bin/bash
 
-# Find all configs in the matrix folder (override with MATRIX_DIR)
 matrix_dir=${MATRIX_DIR:-configs/matrix}
 device=${MEBENCH_DEVICE:-cuda:0}
 pattern=${MATRIX_PATTERN:-*.yaml}
 max_runs=${MATRIX_LIMIT:-0}
-aggregate=${AGGREGATE_MATRIX:-1}
 python_bin=${PYTHON_BIN:-python}
+
+# Budgets (fixed for fairness runs)
+pool_budget=${POOL_BUDGET:-20000}
+synthetic_budget=${SYNTHETIC_BUDGET:-2000000}
+
+# Generate configs (cleans existing YAMLs by default)
+include_both_hard=${INCLUDE_BOTH_HARD:-1}
+both_flag=""
+if [ "$include_both_hard" -ne 0 ]; then
+  both_flag="--include-both-hard"
+fi
+
+$python_bin generate_configs.py --out "$matrix_dir" --device "$device" --pool-budget "$pool_budget" --synthetic-budget "$synthetic_budget" $both_flag
+
 configs=$(ls "${matrix_dir}"/${pattern})
 
 echo "Starting Experimental Matrix Execution..."
@@ -41,6 +53,3 @@ for config in $configs; do
 done
 
 echo "Matrix execution complete."
-if [ "$aggregate" -ne 0 ]; then
-    $python_bin aggregate_matrix.py
-fi

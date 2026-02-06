@@ -1,216 +1,304 @@
-import os
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
 import yaml
 
-def generate_configs():
-    # Experimental Setup
-    configs = [
-        {
-            "id": "SET-A1",
-            "victim_dataset": "MNIST",
-            "victim_arch": "lenet_mnist",
-            "surrogate": "EMNIST",
-            "substitute_arch": "lenet_mnist",
-            "channels": 1,
-            "size": 28
-        },
-        {
-            "id": "SET-A2",
-            "victim_dataset": "MNIST",
-            "victim_arch": "lenet_mnist",
-            "surrogate": "FashionMNIST",
-            "substitute_arch": "lenet_mnist",
-            "channels": 1,
-            "size": 28
-        },
-        {
-            "id": "SET-B1",
-            "victim_dataset": "CIFAR10",
-            "victim_arch": "resnet18",
-            "surrogate": "SVHN",
-            "substitute_arch": "resnet18",
-            "channels": 3,
-            "size": 32
-        },
-        {
-            "id": "SET-B2",
-            "victim_dataset": "CIFAR10",
-            "victim_arch": "resnet18",
-            "surrogate": "GTSRB",
-            "substitute_arch": "resnet18",
-            "channels": 3,
-            "size": 32
-        }
+
+@dataclass(frozen=True)
+class Setup:
+    set_id: str
+    victim_dataset: str
+    victim_arch: str
+    surrogate_name: str
+    substitute_arch: str
+    channels: int
+    size: int
+    num_classes: int
+
+
+@dataclass(frozen=True)
+class AttackSpec:
+    name: str
+    kind: str  # pool | synthetic
+    label_capability: str  # soft_only | hard_only | both
+    extra: Optional[Dict[str, Any]] = None
+
+
+def _victim_id(setup: Setup) -> str:
+    arch_clean = setup.victim_arch
+    if arch_clean == "lenet_mnist":
+        arch_clean = "lenet"
+    return f"{setup.victim_dataset.lower()}_{arch_clean}"
+
+
+def _attack_output_modes(capability: str, include_both_hard: bool) -> List[str]:
+    if capability == "soft_only":
+        return ["soft_prob"]
+    if capability == "hard_only":
+        return ["hard_top1"]
+    if capability == "both":
+        return ["soft_prob", "hard_top1"] if include_both_hard else ["soft_prob"]
+    raise ValueError(f"Unknown label_capability: {capability}")
+
+
+def _budget_for_kind(kind: str, pool_budget: int, synthetic_budget: int) -> int:
+    if kind == "pool":
+        return int(pool_budget)
+    if kind == "synthetic":
+        return int(synthetic_budget)
+    raise ValueError(f"Unknown attack kind: {kind}")
+
+
+def _checkpoints_for_budget(max_budget: int) -> List[int]:
+    # Monitoring-only checkpoints (not used for cross-attack comparison).
+    if max_budget <= 20_000:
+        return [5_000, 10_000, max_budget]
+    if max_budget <= 100_000:
+        return [10_000, 50_000, max_budget]
+    return [100_000, 500_000, 1_000_000, max_budget]
+
+
+def _clean_yaml_dir(out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for p in out_dir.glob("*.yaml"):
+        p.unlink()
+
+
+def generate_configs(
+    out_dir: Path,
+    device: str,
+    seeds: List[int],
+    pool_budget: int,
+    synthetic_budget: int,
+    include_both_hard: bool,
+    clean: bool,
+) -> int:
+    setups = [
+        Setup(
+            set_id="SET-A1",
+            victim_dataset="MNIST",
+            victim_arch="lenet_mnist",
+            surrogate_name="EMNIST",
+            substitute_arch="lenet_mnist",
+            channels=1,
+            size=28,
+            num_classes=10,
+        ),
+        Setup(
+            set_id="SET-A2",
+            victim_dataset="MNIST",
+            victim_arch="lenet_mnist",
+            surrogate_name="FashionMNIST",
+            substitute_arch="lenet_mnist",
+            channels=1,
+            size=28,
+            num_classes=10,
+        ),
+        Setup(
+            set_id="SET-B1",
+            victim_dataset="CIFAR10",
+            victim_arch="resnet18",
+            surrogate_name="SVHN",
+            substitute_arch="resnet18",
+            channels=3,
+            size=32,
+            num_classes=10,
+        ),
+        Setup(
+            set_id="SET-B2",
+            victim_dataset="CIFAR10",
+            victim_arch="resnet18",
+            surrogate_name="GTSRB",
+            substitute_arch="resnet18",
+            channels=3,
+            size=32,
+            num_classes=10,
+        ),
     ]
 
-    attacks = [
-        "random", "activethief", "knockoff_nets", "copycatcnn",
-        "dfme", "maze", "dfms", "game", "es", "blackbox_ripper",
-        "cloudleak", "swiftthief", "inversenet"
+    # Attack taxonomy used for a single-run-per-attack evaluation.
+    # - pool: selection from a public image pool (surrogate)
+    # - synthetic: query synthesis / data-free generation
+    attacks: List[AttackSpec] = [
+        AttackSpec("random", kind="pool", label_capability="both"),
+        AttackSpec("knockoff_nets", kind="pool", label_capability="soft_only"),
+        AttackSpec("cloudleak", kind="pool", label_capability="soft_only"),
+        AttackSpec("copycatcnn", kind="pool", label_capability="hard_only"),
+        AttackSpec("inversenet", kind="pool", label_capability="hard_only"),
+        AttackSpec("blackbox_dissector", kind="pool", label_capability="hard_only"),
+
+        AttackSpec(
+            "activethief",
+            kind="pool",
+            label_capability="both",
+            extra={"strategy": "dfal_k_center"},
+        ),
+        AttackSpec(
+            "activethief",
+            kind="pool",
+            label_capability="both",
+            extra={"strategy": "uncertainty", "variant": "uncertainty"},
+        ),
+        AttackSpec(
+            "activethief",
+            kind="pool",
+            label_capability="both",
+            extra={"strategy": "dfal", "variant": "dfal"},
+        ),
+        AttackSpec("swiftthief", kind="pool", label_capability="both"),
+
+        AttackSpec("dfme", kind="synthetic", label_capability="soft_only"),
+        AttackSpec("maze", kind="synthetic", label_capability="soft_only"),
+        AttackSpec("game", kind="synthetic", label_capability="soft_only"),
+        AttackSpec("blackbox_ripper", kind="synthetic", label_capability="soft_only"),
+        AttackSpec("dfms", kind="synthetic", label_capability="hard_only"),
+        AttackSpec("es", kind="synthetic", label_capability="both"),
     ]
 
-    # Add hard-labeled versions for Dissecor
-    attacks.append("blackbox_dissector")
-    
-    # Add ActiveThief variants
-    attacks.append("activethief_uncertainty")
-    attacks.append("activethief_dfal")
+    if clean:
+        _clean_yaml_dir(out_dir)
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Define attack categories for strategy-specific budget handling
-    # Category 1: AL/Phase-based (Need separate runs per budget for fair round distribution)
-    AL_ATTACKS = {"activethief", "swiftthief", "cloudleak", "inversenet"}
-    
-    # Category 2: Batch-based (Single long run with checkpoints is fair)
-    BATCH_POOL_ATTACKS = {"random", "knockoff_nets", "copycatcnn", "blackbox_dissector"}
-    BATCH_FREE_ATTACKS = {"dfme", "maze", "dfms", "game", "es", "blackbox_ripper"}
-
-    seeds = [0, 1, 2]
-    budget_checkpoints = [1000, 10000, 20000]
-    data_free_max = 100000
-    data_free_checkpoints = [1000, 10000, 20000, 50000, 100000]
     protocol_version = "1.2"
     substitute_batch_size = 256
 
-    os.makedirs("configs/matrix", exist_ok=True)
-
-    for setup in configs:
+    count = 0
+    for setup in setups:
         for attack in attacks:
-            # Base attack name and strategy handling
-            attack_name = attack
-            attack_strategy = None
-            if attack.startswith("activethief_"):
-                attack_strategy = attack.split("_")[1]
-                attack_name = "activethief"
-            elif attack == "activethief":
-                attack_strategy = "dfal_k_center"
+            max_budget = _budget_for_kind(attack.kind, pool_budget=pool_budget, synthetic_budget=synthetic_budget)
+            checkpoints = _checkpoints_for_budget(max_budget)
 
-            # Clean victim ID for filenames (e.g., mnist_lenet instead of mnist_lenet_mnist)
-            victim_arch_clean = setup['victim_arch']
-            if victim_arch_clean == 'lenet_mnist':
-                victim_arch_clean = 'lenet'
-            
-            victim_id = f"{setup['victim_dataset'].lower()}_{victim_arch_clean}"
-            
-            # Output mode by attack capability.
-            # - soft_only: probabilities required
-            # - hard_only: top-1 only
-            # - both: default to soft_prob for stronger oracle (hard variants can be generated separately)
-            HARD_ONLY = {"copycatcnn", "inversenet", "dfms", "blackbox_dissector"}
-            if attack_name in HARD_ONLY:
-                output_mode = "hard_top1"
-            else:
-                output_mode = "soft_prob"
-            data_mode = "data_free" if attack_name in BATCH_FREE_ATTACKS else "surrogate"
+            victim_id = _victim_id(setup)
+            data_mode = "data_free" if attack.kind == "synthetic" else "surrogate"
 
-            # Determine execution plan based on category
-            if attack_name in AL_ATTACKS:
-                # Generate SEPARATE configs for each budget
-                budgets_to_gen = [(b, [b]) for b in budget_checkpoints]
-            elif attack_name in BATCH_POOL_ATTACKS:
-                # Single run up to 20k
-                budgets_to_gen = [(20000, budget_checkpoints)]
-            else: # BATCH_FREE_ATTACKS
-                # Single run up to 100k
-                budgets_to_gen = [(data_free_max, data_free_checkpoints)]
-
-            for max_b, checkpoints in budgets_to_gen:
+            for output_mode in _attack_output_modes(attack.label_capability, include_both_hard=include_both_hard):
                 for seed in seeds:
-                    budget_suffix = f"_{max_b//1000}k"
-                    config_name = f"{setup['id']}_{attack}{budget_suffix}_seed{seed}"
+                    suffix_mode = "soft" if output_mode == "soft_prob" else "hard"
+                    suffix_budget = "20k" if attack.kind == "pool" else "2m"
 
-                    config = {
-                        "run": {
-                            "name": config_name,
-                            "seeds": [seed],
-                            "device": "cuda:0"
-                        },
-                        "benchmark": {
-                            "protocol_version": protocol_version
-                        },
+                    attack_variant = None
+                    attack_extra = dict(attack.extra or {})
+                    if "variant" in attack_extra:
+                        attack_variant = str(attack_extra.pop("variant"))
+
+                    attack_name_for_filename = attack.name
+                    if attack_variant:
+                        attack_name_for_filename = f"{attack.name}_{attack_variant}"
+
+                    run_name = f"{setup.set_id}_{attack_name_for_filename}_{suffix_mode}_{suffix_budget}_seed{seed}"
+                    cfg: Dict[str, Any] = {
+                        "run": {"name": run_name, "seeds": [seed], "device": device},
+                        "benchmark": {"protocol_version": protocol_version},
                         "victim": {
                             "victim_id": victim_id,
-                            "arch": setup['victim_arch'],
-                            "channels": setup['channels'],
-                            "num_classes": 10 if setup['victim_dataset'] != "GTSRB" else 43,
-                            "input_size": [setup['size'], setup['size']],
+                            "arch": setup.victim_arch,
+                            "channels": setup.channels,
+                            "num_classes": setup.num_classes,
+                            "input_size": [setup.size, setup.size],
                             "checkpoint_ref": f"runs/victims/{victim_id}_seed0.pt",
                             "normalization": None,
                             "output_mode": output_mode,
-                            "temperature": 1.0
+                            "temperature": 1.0,
                         },
                         "dataset": {
-                            "name": setup['victim_dataset'],
+                            "name": setup.victim_dataset,
                             "data_mode": data_mode,
-                            "surrogate_name": setup['surrogate'],
-                            "train_split": True
+                            "surrogate_name": setup.surrogate_name,
+                            "train_split": True,
                         },
                         "attack": {
-                            "name": attack_name,
+                            "name": attack.name,
                             "output_mode": output_mode,
-                            "max_budget": max_b # Added for internal round calculation
+                            "max_budget": max_budget,
+                            **attack_extra,
                         },
                         "substitute": {
-                            "arch": setup['substitute_arch'],
+                            "arch": setup.substitute_arch,
                             "init_seed": 1234 + seed,
                             "batch_size": substitute_batch_size,
-                            "trackA": {
-                                "batch_size": substitute_batch_size,
-                                "steps_coeff_c": 0.2
-                            },
+                            "trackA": {"batch_size": substitute_batch_size, "steps_coeff_c": 0.2},
                             "optimizer": {
                                 "name": "sgd",
                                 "lr": 0.01,
                                 "momentum": 0.9,
-                                "weight_decay": 0.0005
+                                "weight_decay": 5e-4,
                             },
                             "max_epochs": 1000,
-                            "patience": 100
+                            "patience": 100,
                         },
-                        "budget": {
-                            "max_budget": max_b,
-                            "checkpoints": checkpoints
-                        },
+                        "budget": {"max_budget": max_budget, "checkpoints": checkpoints},
                         "cache": {
                             "enabled": True,
                             "policy": "temporary",
-                            "delete_on_finish": True
-                        }
+                            "delete_on_finish": True,
+                        },
                     }
 
-                    if attack_name == "knockoff_nets":
-                        config["attack"]["offline_train_epochs"] = config["substitute"]["max_epochs"]
+                    if attack.name == "knockoff_nets":
+                        cfg["attack"]["offline_train_epochs"] = cfg["substitute"]["max_epochs"]
 
-                    if attack_strategy:
-                        config["attack"]["strategy"] = attack_strategy
-
-                    if attack in ["blackbox_ripper", "game", "dfms"]:
-                        config["attack"]["proxy_dataset"] = {
-                            "name": setup['surrogate'],
+                    if attack.name in {"blackbox_ripper", "game", "dfms"}:
+                        cfg["attack"]["proxy_dataset"] = {
+                            "name": setup.surrogate_name,
                             "data_mode": "surrogate",
-                            "surrogate_name": setup['surrogate'],
-                            "train_split": True
+                            "surrogate_name": setup.surrogate_name,
+                            "train_split": True,
                         }
 
-                    if attack == "blackbox_ripper":
-                        # BlackboxRipper uses a fixed pretrained generator (no GAN training during extraction).
-                        # Default to official generator checkpoints downloaded via:
-                        #   python scripts/download_blackbox_ripper_checkpoints.py
-                        if setup["victim_dataset"] == "CIFAR10":
-                            gen_name = "cifar_100_6_classes_gan"  # ProGAN (official Table 1)
-                            gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}"  # no extension in upstream
+                    if attack.name == "blackbox_ripper":
+                        if setup.victim_dataset == "CIFAR10":
+                            gen_name = "cifar_100_6_classes_gan"
+                            gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}"
                         else:
-                            gen_name = "cifar_10_gan"  # SNGAN (official Table 2)
+                            gen_name = "cifar_10_gan"
                             gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}.pth"
+                        cfg["attack"]["generator_name"] = gen_name
+                        cfg["attack"]["generator_checkpoint"] = gen_ckpt
 
-                        config["attack"]["generator_name"] = gen_name
-                        config["attack"]["generator_checkpoint"] = gen_ckpt
+                    out_path = out_dir / f"{run_name}.yaml"
+                    out_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+                    count += 1
 
-                    filename = f"configs/matrix/{config_name}.yaml"
-                    with open(filename, 'w') as f:
-                        yaml.dump(config, f, sort_keys=False)
+    return count
 
-    print(f"Generated configurations in configs/matrix/")
+
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate configs for the fairness benchmark runs")
+    parser.add_argument("--out", type=str, default="configs/matrix")
+    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    parser.add_argument("--pool-budget", type=int, default=20_000)
+    parser.add_argument("--synthetic-budget", type=int, default=2_000_000)
+    parser.add_argument(
+        "--include-both-hard",
+        action="store_true",
+        help="Generate hard_top1 variants for 'both' attacks (in addition to soft_prob)",
+    )
+    parser.add_argument(
+        "--no-clean",
+        action="store_true",
+        help="Do not delete existing *.yaml in output dir before generation",
+    )
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    out_dir = Path(args.out)
+    count = generate_configs(
+        out_dir=out_dir,
+        device=str(args.device),
+        seeds=list(args.seeds),
+        pool_budget=int(args.pool_budget),
+        synthetic_budget=int(args.synthetic_budget),
+        include_both_hard=bool(args.include_both_hard),
+        clean=(not args.no_clean),
+    )
+    print(f"Generated {count} configs in {out_dir}")
+    return 0
+
 
 if __name__ == "__main__":
-    generate_configs()
+    raise SystemExit(main())
