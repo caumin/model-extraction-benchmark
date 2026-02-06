@@ -1,470 +1,437 @@
-from typing import Dict, Any, List, Tuple, Optional
-import logging
-import numpy as np
+from __future__ import annotations
+
+from typing import Any, Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from tqdm import tqdm
 
 from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
-from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
-from mebench.models.gan import (
-    DCGANGenerator,
-    DCGANDiscriminator,
-    SNDCGANGenerator,
-    SNDCGANDiscriminator,
-    ProGANGenerator,
-    ACGANGenerator,
-    ACGANDiscriminator,
+from mebench.models.blackbox_ripper import (
+    create_blackbox_ripper_generator,
+    load_blackbox_ripper_generator_weights,
 )
 from mebench.models.substitute_factory import create_substitute
-from mebench.data.loaders import create_dataloader
 
 
-class QueryDataset(torch.utils.data.Dataset):
-    """Simple dataset for query data that can be pickled."""
-    
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
+def _clamp_to_unit_range(x: torch.Tensor) -> torch.Tensor:
+    """Match benchmark contract: inputs in [0, 1].
 
-    def __len__(self):
-        return len(self.x)
+    Upstream generators often produce unbounded or tanh outputs in [-1, 1].
+    The official repo visualizes with `clamp(-1, 1) / 2 + 0.5`.
+    """
 
-    def __getitem__(self, idx):
-        return self.x[idx], self.y[idx]
+    x = x.clamp(-1.0, 1.0)
+    return x * 0.5 + 0.5
+
+
+def _rgb_to_grayscale(x_rgb: torch.Tensor) -> torch.Tensor:
+    """Convert NCHW RGB in [0,1] to 1-channel grayscale in [0,1]."""
+
+    if x_rgb.ndim != 4 or x_rgb.size(1) != 3:
+        raise ValueError("Expected RGB tensor of shape [N, 3, H, W]")
+    multipliers = torch.tensor([0.2126, 0.7152, 0.0722], device=x_rgb.device, dtype=x_rgb.dtype)
+    multipliers = multipliers.view(1, 3, 1, 1)
+    x = (x_rgb * multipliers).sum(dim=1, keepdim=True)
+    return x
+
+
+def _match_input_shape(x: torch.Tensor, input_shape: Tuple[int, int, int]) -> torch.Tensor:
+    """Force x to match victim input shape (C,H,W) for Oracle.view()."""
+
+    c, h, w = input_shape
+    if x.ndim != 4:
+        raise ValueError(f"Expected NCHW tensor, got shape {tuple(x.shape)}")
+    if int(x.size(1)) != int(c):
+        if int(c) == 1 and int(x.size(1)) == 3:
+            x = _rgb_to_grayscale(x)
+        else:
+            raise ValueError(
+                f"Channel mismatch: victim expects C={c} but generator produced C={x.size(1)}"
+            )
+    if int(x.size(2)) != int(h) or int(x.size(3)) != int(w):
+        x = F.interpolate(x, size=(int(h), int(w)), mode="bilinear", align_corners=False)
+    return x
 
 
 class BlackboxRipper(AttackRunner):
-    """Black-box Ripper attack with proxy GAN and evolutionary search."""
+    """Upstream-faithful Black-Box Ripper (NeurIPS 2020).
 
-    def __init__(self, config: dict, state: BenchmarkState) -> None:
+    Reference implementations/spec:
+    - Official repo: https://github.com/antoniobarbalau/black-box-ripper
+    - Paper: `papers/blackbox-ripper.pdf`
+
+    Key behavior we replicate:
+    - Fixed pretrained generator (no GAN training during extraction)
+    - Per-sample evolutionary search in latent space:
+      - Population K=30, elites k=10
+      - Init: U(-3.3, 3.3)
+      - Offspring: elites + N(0, 0.5) twice (two mutated copies)
+    - Student training uses SGD + BCELoss on softmax outputs.
+
+    Benchmark adaptation:
+    - All oracle queries go through `ctx.query` so budget is respected (1 image = 1 query).
+    - Generator outputs are clamped/rescaled to [0,1] to satisfy the global contract.
+    """
+
+    def __init__(self, config: Dict[str, Any], state: BenchmarkState) -> None:
         super().__init__(config, state)
 
-        self.batch_size = int(config.get("batch_size", 128))
-
-        # Paper: population 30, elite 10, max 10 iterations per image.
-        self.noise_dim = int(config.get("noise_dim", 128))
-        self.latent_bound = float(config.get("latent_bound", 3.0))
-        self.population_size = int(config.get("population_size", 30))
-        self.elite_size = int(config.get("elite_size", 10))
-        # mutation_scale removed/fixed to 1.0 later for strict N(0,1).
-        # self.mutation_scale = float(config.get("mutation_scale", 1.0)) 
-        self.fitness_threshold = float(config.get("fitness_threshold", 0.02))
-        self.max_evolve_iters = int(config.get("max_evolve_iters", 10))
-        
-        # Parallel slots limit for budget fairness
-        self.max_slots_per_round = int(config.get("max_slots_per_round", 1))
-        
-        total_budget = int(state.metadata.get("max_budget", 10000))
-        # train_every removed in favor of end-of-budget training.
-        # self.train_every = int(config.get("train_every", max(256, total_budget // 10)))
-        
-        self.pretrain_steps = int(config.get("pretrain_steps", 100))
-        self.substitute_lr = float(config.get("substitute_lr", 0.01))
-        
-        # [STRICT] Paper specifies training for 200 epochs.
-        self.substitute_epochs = int(config.get("substitute_epochs", 200))
-        
-        self.base_channels = int(config.get("base_channels", 64))
-        self.gan_backbone = str(config.get("gan_backbone", "sngan")).lower()
         self.num_classes = int(
             state.metadata.get("num_classes")
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
 
-        self.generator: nn.Module | None = None
-        self.discriminator: nn.Module | None = None
-        self.gen_optimizer: optim.Optimizer | None = None
-        self.dis_optimizer: optim.Optimizer | None = None
-        self.substitute: nn.Module | None = None
-        self.substitute_optimizer: optim.Optimizer | None = None
+        # Generator selection (upstream uses SNGAN or ProGAN checkpoints).
+        self.generator_name = str(config.get("generator_name") or config.get("gan_backbone") or "cifar_sngan")
+        self.generator_checkpoint = config.get("generator_checkpoint") or config.get("generator_ckpt")
+        self.generator_strict_load = bool(config.get("generator_strict_load", True))
 
-        self.proxy_loader = None
-        self.proxy_iter = None
-        self.pretrained = False
+        # Evolutionary search hyperparameters (upstream defaults).
+        self.population_size = int(config.get("population_size", 30))
+        self.elite_size = int(config.get("elite_size", 10))
+        self.latent_bound = float(config.get("latent_bound", 3.3))
+        self.mutation_scale = float(config.get("mutation_scale", 0.5))
+        self.confidence_threshold = float(config.get("confidence_threshold", 0.9))
+        # Keep as optional stop criterion.
+        # Upstream `torch_optimizer.optimize()` stops based on confidence; default to 0.0 (disabled).
+        self.fitness_threshold = float(config.get("fitness_threshold", 0.0))
+        # Official repo has variants; `optimize()` uses up to 300 iterations.
+        self.max_evolve_iters = int(config.get("max_evolve_iters", 300))
 
-        self._initialize_state(state)
+        # Student training hyperparameters (upstream train_or_restore_predictor).
+        self.train_batch_size = int(config.get("train_batch_size", config.get("batch_size", 64)))
+        self.substitute_epochs = int(config.get("substitute_epochs", 200))
+        self.batches_per_epoch = int(config.get("batches_per_epoch", 1000))
+        self.substitute_lr = float(config.get("substitute_lr", 0.01))
+        self.momentum = float(config.get("momentum", 0.9))
+        self.weight_decay = float(config.get("weight_decay", 5e-4))
+        self.grad_clip = float(config.get("grad_clip", 0.1))
+        self.lr_decay_start = int(config.get("lr_decay_start", 17))
+        self.lr_decay_every = int(config.get("lr_decay_every", 1))
+        self.lr_decay_rate = float(config.get("lr_decay_rate", 0.9))
+        self.log_interval = int(config.get("log_interval", 25))
+
+        # Strict upstream artifact: in the official code, teacher is queried again to label
+        # the final optimized samples. Keep this optional since it doubles query cost.
+        self.strict_label_query = bool(config.get("strict_label_query", False))
+
+        self.generator: Optional[nn.Module] = None
+        self.substitute: Optional[nn.Module] = None
+        self.substitute_optimizer: Optional[torch.optim.Optimizer] = None
+        self.substitute_loss: Optional[nn.Module] = None
+
+        self._evaluated_checkpoints: set[int] = set(
+            state.attack_state.get("bbr_evaluated_checkpoints", [])
+        )
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
-        device = self.state.metadata.get("device", "cpu")
-        total_budget = self.state.budget_remaining
-        pbar = tqdm(total=total_budget, desc="[BlackboxRipper] Extracting")
-        
-        while ctx.budget_remaining > 0:
-            step_size = self._default_step_size(ctx)
-            x_query, meta = self._select_query_batch(step_size, self.state)
-            if int(x_query.size(0)) == 0:
+        device = str(self.state.metadata.get("device", "cpu"))
+
+        if self.config.get("output_mode", "soft_prob") != "soft_prob":
+            raise ValueError("BlackboxRipper requires soft_prob output mode")
+
+        self._init_generator(device)
+        self._init_substitute(device)
+
+        total_budget = int(self.state.budget_remaining)
+        pbar = tqdm(total=total_budget, desc="[BlackboxRipper] Queries", leave=True)
+
+        stop_all = False
+        for epoch in range(self.substitute_epochs):
+            if stop_all:
                 break
-            oracle_output = ctx.query(x_query, meta=meta)
-            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
-            pbar.update(x_query.size(0))
+
+            self._set_epoch_lr(epoch)
+            if self.substitute is None:
+                break
+            self.substitute.train(True)
+
+            for iter_n in range(self.batches_per_epoch):
+                if int(ctx.budget_remaining) < self.population_size:
+                    stop_all = True
+                    break
+
+                batch = self._generate_optimized_batch(ctx, device)
+                if batch is None:
+                    stop_all = True
+                    break
+                x_batch, y_batch = batch
+                self._train_on_batch(x_batch, y_batch, device)
+
+                # Expose current substitute for engine FINAL EVAL.
+                self.state.attack_state["substitute"] = self.substitute
+
+                # Progress bar: budget spent is tracked in ctx/state.
+                pbar.n = int(self.state.query_count)
+                pbar.refresh()
+
+                if self.log_interval > 0 and (iter_n % self.log_interval == 0):
+                    with torch.no_grad():
+                        logits = self.substitute(x_batch)
+                        probs = torch.softmax(logits, dim=-1)
+                        acc = probs.argmax(dim=1).eq(y_batch.argmax(dim=1)).float().mean().item()
+                    self.logger.info(
+                        "Epoch %d/%d, iter %d/%d, acc=%.4f",
+                        epoch,
+                        self.substitute_epochs,
+                        iter_n,
+                        self.batches_per_epoch,
+                        acc,
+                    )
+
+                self._maybe_evaluate_on_checkpoints(ctx, device)
+
         pbar.close()
 
-    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
-        self._init_models(state)
-        device = state.metadata.get("device", "cpu")
+        # Persist evaluation state.
+        self.state.attack_state["bbr_evaluated_checkpoints"] = sorted(self._evaluated_checkpoints)
 
-        active_populations = state.attack_state["active_populations"]
-        active_targets = state.attack_state["active_targets"]
-        evolve_iters = state.attack_state["evolve_iters"]
-
-        pop_size = self.population_size
-        slots_budget = k // pop_size
-
-        if slots_budget == 0:
-            input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            return torch.empty((0, *input_shape), device=device), {"slot_ids": [], "batch_size": 0}
-
-        # Process as many slots as the current budget k allows
-        slots_to_process = slots_budget
-
-        current_active_keys = list(active_populations.keys())
-        needed = max(0, slots_to_process - len(current_active_keys))
-
-        next_id = max(current_active_keys, default=-1) + 1
-
-        for _ in range(needed):
-            u = float(self.latent_bound)
-            pop = (torch.rand(self.population_size, self.noise_dim, device=device) * 2.0 - 1.0) * u
-            target = torch.randint(0, self.num_classes, (1,), device=device).item()
-
-            active_populations[next_id] = pop
-            active_targets[next_id] = target
-            evolve_iters[next_id] = 0
-            next_id += 1
-
-        final_batch_ids = list(active_populations.keys())[:slots_to_process]
-
-        batch_pop_list = []
-        meta_indices = []
-
-        for slot_id in final_batch_ids:
-            pop = active_populations[slot_id].to(device)
-            batch_pop_list.append(pop)
-            meta_indices.extend([slot_id] * self.population_size)
-
-        x_raw = self.generator(torch.cat(batch_pop_list, dim=0))
-        x = x_raw * 0.5 + 0.5
-
-        meta = {
-            "slot_ids": meta_indices,
-            "batch_size": len(meta_indices),
-        }
-        return x, meta
-
-    def _handle_oracle_output(
-        self,
-        x_query: torch.Tensor,
-        meta: dict,
-        oracle_output: OracleOutput,
-        state: BenchmarkState,
-    ) -> None:
-        if self.generator is None:
+    def _init_generator(self, device: str) -> None:
+        if self.generator is not None:
             return
 
-        slot_ids = meta.get("slot_ids", [])
-        if not slot_ids:
+        gen_name = str(self.generator_name).lower()
+        # Backwards-compat: older config used gan_backbone="sngan"/"progan".
+        if gen_name in {"sngan", "sndcgan", "sn-dcgan", "sn_dcgan"}:
+            gen_name = "cifar_sngan"
+        if gen_name in {"progan", "pro-gan"}:
+            gen_name = "cifar_progan"
+
+        # Backwards-compat: official repo generator names.
+        if gen_name in {"cifar_10_gan", "cifar_100_90_classes_gan", "cifar_100_40_classes_gan"}:
+            gen_name = "cifar_sngan"
+        if gen_name in {"cifar_100_6_classes_gan", "cifar_100_10_classes_gan"}:
+            gen_name = "cifar_progan"
+
+        self.generator = create_blackbox_ripper_generator(gen_name, device)
+        if self.generator_checkpoint is None:
+            raise ValueError(
+                "BlackboxRipper requires a pretrained generator checkpoint. "
+                "Set `attack.generator_checkpoint` to the official weights."
+            )
+        load_blackbox_ripper_generator_weights(
+            self.generator,
+            str(self.generator_checkpoint),
+            device,
+            strict=self.generator_strict_load,
+        )
+        self.generator.eval()
+
+    def _init_substitute(self, device: str) -> None:
+        if self.substitute is not None:
             return
 
-        device = state.metadata.get("device", "cpu")
-        active_populations = state.attack_state["active_populations"]
-        active_targets = state.attack_state["active_targets"]
-        evolve_iters = state.attack_state["evolve_iters"]
-
-        if oracle_output.kind == "soft_prob":
-            all_probs = oracle_output.y.to(device)
-        else:
-            all_probs = F.one_hot(
-                oracle_output.y, num_classes=self.num_classes
-            ).float().to(device)
-
-        unique_slots = sorted(list(set(slot_ids)))
-
-        for slot_id in unique_slots:
-            indices = [i for i, sid in enumerate(slot_ids) if sid == slot_id]
-            count = len(indices)
-
-            if count != self.population_size:
-                raise RuntimeError(
-                    f"Expected {self.population_size} outputs for slot {slot_id}, got {count}"
-                )
-
-            is_contiguous = (indices == list(range(indices[0], indices[0] + count)))
-            if is_contiguous:
-                probs = all_probs[indices[0] : indices[0] + count]
-            else:
-                probs = all_probs[indices]
-
-            current_pop = active_populations[slot_id].to(device)
-            target_cls = active_targets[slot_id]
-
-            best_z, best_score, new_pop, best_idx_in_pop = self._evolve_single_slot(
-                current_pop, target_cls, probs
-            )
-
-            active_populations[slot_id] = new_pop.cpu()
-            evolve_iters[slot_id] += 1
-
-            if evolve_iters[slot_id] >= self.max_evolve_iters or best_score >= -self.fitness_threshold:
-                with torch.no_grad():
-                    best_img = self.generator(best_z.unsqueeze(0)) * 0.5 + 0.5
-
-                state.attack_state["query_data_x"].append(best_img.cpu())
-
-                best_prob = probs[best_idx_in_pop]
-                state.attack_state["query_data_y"].append(best_prob.cpu().unsqueeze(0))
-
-                del active_populations[slot_id]
-                del active_targets[slot_id]
-                del evolve_iters[slot_id]
-
-        max_budget = int(state.metadata.get("max_budget", 0))
-        remaining = max_budget - int(state.query_count)
-
-        if (not state.attack_state.get("substitute_trained")) and (remaining < self.population_size):
-            self._train_substitute(state)
-            state.attack_state["substitute_trained"] = True
-
-    def _initialize_state(self, state: BenchmarkState) -> None:
-        state.attack_state["active_populations"] = {}  # index -> population tensor
-        state.attack_state["active_targets"] = {}      # index -> target label
-        state.attack_state["evolve_iters"] = {}        # index -> iteration count
-        state.attack_state["query_data_x"] = []
-        state.attack_state["query_data_y"] = []
-        state.attack_state["substitute"] = None
-        state.attack_state["total_queries"] = 0
-        state.attack_state["substitute_trained"] = False
-
-    def _init_models(self, state: BenchmarkState) -> None:
-        device = state.metadata.get("device", "cpu")
-
-        if self.generator is None:
-            # [P0 ARCHITECTURE ENFORCEMENT] Blackbox Ripper requires ProGAN
-            gen_cls = DCGANGenerator
-            if self.gan_backbone in {"sngan", "sndcgan", "sn-dcgan"}:
-                gen_cls = SNDCGANGenerator
-            elif self.gan_backbone in {"progan", "pro-gan"}:
-                gen_cls = ProGANGenerator
-            elif self.gan_backbone not in {"dcgan", "sngan", "sndcgan", "sn-dcgan", "progan", "pro-gan"}:
-                raise ValueError(f"Blackbox Ripper requires ProGAN/SNGAN/DCGAN backbone, got {self.gan_backbone}")
-
-            self.generator = gen_cls(
-                noise_dim=self.noise_dim,
-                output_channels=int(self.config.get("output_channels", state.metadata.get("input_shape", (3, 32, 32))[0])),
-                base_channels=self.base_channels,
-                num_classes=None,
-                output_size=int(state.metadata.get("input_shape", (3, 32, 32))[1]),
-            ).to(device)
-            self.gen_optimizer = optim.Adam(
-                self.generator.parameters(), lr=2e-4, betas=(0.5, 0.999)
-            )
-
-        if self.discriminator is None:
-            dis_cls = DCGANDiscriminator
-            if self.gan_backbone in {"sngan", "sndcgan", "sn-dcgan"}:
-                dis_cls = SNDCGANDiscriminator
-
-            self.discriminator = dis_cls(
-                input_channels=int(self.config.get("output_channels", state.metadata.get("input_shape", (3, 32, 32))[0])),
-                base_channels=self.base_channels,
-                num_classes=None,
-                input_size=int(state.metadata.get("input_shape", (3, 32, 32))[1]),
-            ).to(device)
-            self.dis_optimizer = optim.Adam(
-                self.discriminator.parameters(), lr=2e-4, betas=(0.5, 0.999)
-            )
-
-        if self.proxy_loader is None:
-            proxy_config = self.config.get("attack", {}).get("proxy_dataset")
-            if proxy_config is None:
-                proxy_config = self.config.get("proxy_dataset")
-            if proxy_config is None:
-                raise ValueError("BlackboxRipper requires proxy_dataset configuration")
-            self.proxy_loader = create_dataloader(
-                proxy_config,
-                batch_size=self.batch_size,
-                shuffle=True,
-            )
-            self.proxy_iter = iter(self.proxy_loader)
-
-        if not self.pretrained and self.pretrain_steps > 0:
-            self._pretrain_gan(device)
-            self.pretrained = True
-
-    def _evolve_single_slot(
-        self,
-        population: torch.Tensor,
-        target_cls: int,
-        victim_probs: torch.Tensor
-    ):
-        device = population.device
-        target_onehot = F.one_hot(torch.tensor(target_cls), num_classes=self.num_classes).float().to(device)
-        
-        # Fitness = -Objective (Minimize Objective)
-        # Eq. (2) Objective: L(x) = || F(x) - t ||^2  (Sum of squared differences)
-        # Paper usually implies L2 norm squared.
-        diff = victim_probs - target_onehot
-        mse_sum = (diff * diff).sum(dim=1)
-        fitness = -mse_sum
-        
-        # Select Elites
-        elite_count = min(self.elite_size, population.size(0))
-        topk = torch.topk(fitness, elite_count)
-        elite_indices = topk.indices
-        best_score = topk.values[0].item() # This is -mse_sum
-        best_idx_in_pop = elite_indices[0].item()
-        
-        elites = population[elite_indices]
-        best_z = elites[0]
-        
-        # Mutation (Algorithm 1 Step 6)
-        # "Generate offspring by adding random noise to the elite samples."
-        # Implementation: Sample (K-k) parents from elites uniformly with replacement.
-        needed = self.population_size - elite_count
-        
-        offspring = []
-        if needed > 0:
-            parent_indices = torch.randint(0, elite_count, (needed,), device=device)
-            parents = elites[parent_indices]
-            
-            # Mutate all parents: child = parent + noise
-            # Note: Paper says "adding random noise". 
-            # Freeze mutation to strictly N(0,1) for reproducibility/fairness.
-            # mutation_scale controls the magnitude (sigma).
-            # noise = torch.randn_like(parents) * self.mutation_scale
-            noise = torch.randn_like(parents)
-            offspring_tensor = parents + noise
-            
-            new_population = torch.cat([elites, offspring_tensor], dim=0)
-        else:
-            new_population = elites
-            
-        # Clip is removed for strict fidelity to paper text unless code proves otherwise.
-        # Paper doesn't explicitly mention clamping latent vector after mutation.
-        # However, if latent_bound is used for initialization, it might be implied?
-        # "Zero Tolerance": If not in text/algorithm, don't add it.
-        # if self.latent_bound > 0:
-        #     new_population = new_population.clamp(-self.latent_bound, self.latent_bound)
-            
-        return best_z, best_score, new_population, best_idx_in_pop
-
-    def _next_proxy_batch(self, device: str) -> torch.Tensor:
-        try:
-            x_real, _ = next(self.proxy_iter)
-        except StopIteration:
-            self.proxy_iter = iter(self.proxy_loader)
-            x_real, _ = next(self.proxy_iter)
-        return x_real.to(device)
-
-    def _pretrain_gan(self, device: str) -> None:
-        pre_pbar = tqdm(range(self.pretrain_steps), desc="[BlackboxRipper] Pre-training GAN", leave=False)
-        for _ in pre_pbar:
-            real_x = self._next_proxy_batch(device)
-            z = torch.randn(real_x.size(0), self.noise_dim, device=device)
-            fake_x = self.generator(z) * 0.5 + 0.5
-
-            self.dis_optimizer.zero_grad()
-            real_logits = self.discriminator(real_x)
-            fake_logits = self.discriminator(fake_x.detach())
-            real_labels = torch.ones_like(real_logits)
-            fake_labels = torch.zeros_like(fake_logits)
-            loss_d = F.binary_cross_entropy_with_logits(real_logits, real_labels)
-            loss_d += F.binary_cross_entropy_with_logits(fake_logits, fake_labels)
-            loss_d.backward()
-            self.dis_optimizer.step()
-
-            self.gen_optimizer.zero_grad()
-            fake_logits = self.discriminator(fake_x)
-            loss_g = F.binary_cross_entropy_with_logits(fake_logits, real_labels)
-            loss_g.backward()
-            self.gen_optimizer.step()
-            pre_pbar.set_postfix({"Loss D": f"{loss_d.item():.4f}", "Loss G": f"{loss_g.item():.4f}"})
-
-    def _train_substitute(self, state: BenchmarkState) -> None:
-        # Strict fidelity: Train from scratch for 200 epochs on current data.
-        # This aligns with "Train the substitute for 200 epochs" on the dataset.
-        # Repeated training on checkpoints ensures Track B is valid.
-        
-        # Reset model to scratch?
-        # If we continue training, it's > 200 epochs effectively.
-        # Paper implies "Offline" training.
-        # So we should reset.
-        
-        device = state.metadata.get("device", "cpu")
-        sub_config = state.metadata.get("substitute_config", {})
-        opt_params = sub_config.get("optimizer", {})
-        
+        sub_config = self.state.metadata.get("substitute_config", {})
         width_mult = int(sub_config.get("width_mult", 1))
         dropout_prob = float(sub_config.get("dropout_prob", 0.0))
+
         self.substitute = create_substitute(
-            arch=sub_config.get("arch", "resnet18"),
+            arch=str(sub_config.get("arch", "resnet18")),
             num_classes=self.num_classes,
-            input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+            input_channels=int(self.state.metadata.get("input_shape", (3, 32, 32))[0]),
             width_mult=width_mult,
             dropout_prob=dropout_prob,
         ).to(device)
-        
-        self.substitute_optimizer = optim.Adam(
-            self.substitute.parameters(),
-            lr=float(opt_params.get("lr", self.substitute_lr)),
-)
 
-        query_x = state.attack_state["query_data_x"]
-        query_y = state.attack_state["query_data_y"]
-        if len(query_x) == 0:
+        self.substitute_optimizer = torch.optim.SGD(
+            self.substitute.parameters(),
+            lr=self.substitute_lr,
+            momentum=self.momentum,
+            weight_decay=self.weight_decay,
+        )
+        self.substitute_loss = nn.BCELoss()
+
+        # Make visible for FINAL EVAL even if budget ends early.
+        self.state.attack_state["substitute"] = self.substitute
+
+    def _set_epoch_lr(self, epoch: int) -> None:
+        if self.substitute_optimizer is None:
             return
 
-        x_all = torch.cat(query_x, dim=0)
-        y_all = torch.cat(query_y, dim=0)
+        lr = float(self.substitute_lr)
+        if epoch > self.lr_decay_start and self.lr_decay_start >= 0:
+            frac = (epoch - self.lr_decay_start) // max(1, int(self.lr_decay_every))
+            decay_factor = float(self.lr_decay_rate) ** int(frac)
+            lr = float(self.substitute_lr) * decay_factor
 
-        self.substitute.train()
-        output_mode = self.config.get("output_mode", "soft_prob")
-        victim_config = state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-        
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
-        
-        train_loader = torch.utils.data.DataLoader(
-            QueryDataset(x_all, y_all),
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=4,
-        )
-        
-        epochs = max(1, int(self.substitute_epochs))
-        epoch_pbar = tqdm(range(epochs), desc="[BlackboxRipper] Training Substitute", leave=False)
-        for _ in epoch_pbar:
-            epoch_loss = 0.0
-            for x_batch, y_batch in train_loader:
-                x_batch = x_batch.to(device)
-                x_batch = (x_batch - norm_mean) / norm_std
-                
-                self.substitute_optimizer.zero_grad()
-                logits = self.substitute(x_batch)
-                if output_mode == "soft_prob":
-                    y_batch = y_batch.to(device)
-                    # Use exact Cross-Entropy form for soft labels as per paper logic
-                    # H(p, q) = -sum p(x) log q(x)
-                    log_probs = F.log_softmax(logits, dim=1)
-                    # Note: y_batch are the target probabilities (teacher)
-                    loss = -(y_batch * log_probs).sum(dim=1).mean()
-                else:
-                    y_batch = y_batch.long().to(device)
-                    loss = F.cross_entropy(logits, y_batch)
-                loss.backward()
-                self.substitute_optimizer.step()
-                epoch_loss += loss.item()
-            epoch_pbar.set_postfix({"Loss": f"{epoch_loss/len(train_loader):.4f}"})
+        for group in self.substitute_optimizer.param_groups:
+            group["lr"] = lr
 
-        state.attack_state["substitute"] = self.substitute
-        self.logger.info(f"BlackboxRipper substitute trained.")
-        self._evaluate_current_substitute(self.substitute, device)
+    def _generate_optimized_batch(
+        self, ctx: BenchmarkContext, device: str
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        if self.generator is None:
+            raise RuntimeError("Generator not initialized")
+
+        input_shape = tuple(self.state.metadata.get("input_shape", (3, 32, 32)))
+        if len(input_shape) != 3:
+            raise ValueError(f"Invalid input_shape in state.metadata: {input_shape}")
+
+        x_list = []
+        y_list = []
+        for sample_id in range(self.train_batch_size):
+            sample = self._optimize_single_sample(ctx, device, input_shape, sample_id)
+            if sample is None:
+                break
+            x_i, y_i = sample
+            x_list.append(x_i)
+            y_list.append(y_i)
+
+        if not x_list:
+            return None
+
+        x_batch = torch.cat(x_list, dim=0).to(device)
+        y_batch = torch.cat(y_list, dim=0).to(device)
+        return x_batch, y_batch
+
+    def _optimize_single_sample(
+        self,
+        ctx: BenchmarkContext,
+        device: str,
+        input_shape: Tuple[int, int, int],
+        sample_id: int,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        if self.generator is None:
+            raise RuntimeError("Generator not initialized")
+
+        # Need at least one population query.
+        if int(ctx.budget_remaining) < self.population_size:
+            return None
+
+        latent_dim = int(getattr(self.generator, "latent_dim", 128))
+        population = torch.empty(self.population_size, latent_dim, device=device)
+        population.uniform_(-self.latent_bound, self.latent_bound)
+        target_cls = int(torch.randint(0, self.num_classes, (1,), device=device).item())
+        target_onehot = F.one_hot(torch.tensor(target_cls, device=device), num_classes=self.num_classes).float()
+
+        best_x: Optional[torch.Tensor] = None
+        best_probs: Optional[torch.Tensor] = None
+        best_obj: float = float("inf")
+        best_conf: float = 0.0
+
+        for it in range(self.max_evolve_iters):
+            if int(ctx.budget_remaining) < self.population_size:
+                break
+
+            with torch.no_grad():
+                x_raw = self.generator(population)
+                x = _clamp_to_unit_range(x_raw)
+                x = _match_input_shape(x, input_shape)
+
+            oracle_out = ctx.query(
+                x,
+                meta={
+                    "attack": "blackbox_ripper",
+                    "phase": "evolution",
+                    "sample_id": int(sample_id),
+                    "iter": int(it),
+                    "target_cls": int(target_cls),
+                },
+            )
+            if oracle_out.kind != "soft_prob":
+                raise ValueError("BlackboxRipper requires soft_prob oracle output")
+            probs = oracle_out.y.to(device)
+
+            obj = self._objective_mse_sum(probs, target_onehot)
+            # Select top-10 elites by objective (lower is better).
+            elite_k = min(self.elite_size, int(obj.numel()))
+            elite_indices = torch.argsort(obj)[:elite_k]
+
+            best_idx = int(elite_indices[0].item())
+            best_obj = float(obj[best_idx].item())
+            best_conf = float(probs[best_idx, target_cls].item())
+            best_x = x[best_idx : best_idx + 1].detach()
+            best_probs = probs[best_idx : best_idx + 1].detach()
+
+            if best_conf >= self.confidence_threshold or best_obj <= self.fitness_threshold:
+                break
+
+            elites = population[elite_indices]
+            population = self._make_next_population_from_elites(elites)
+
+        if best_x is None or best_probs is None:
+            return None
+
+        # Strict upstream artifact: re-query teacher for final labels.
+        if self.strict_label_query and int(ctx.budget_remaining) >= 1:
+            out2 = ctx.query(
+                best_x,
+                meta={
+                    "attack": "blackbox_ripper",
+                    "phase": "label",
+                    "sample_id": int(sample_id),
+                    "target_cls": int(target_cls),
+                    "best_conf": float(best_conf),
+                    "best_obj": float(best_obj),
+                },
+            )
+            if out2.kind != "soft_prob":
+                raise ValueError("BlackboxRipper requires soft_prob oracle output")
+            best_probs = out2.y.to(device)
+
+        return best_x, best_probs
+
+    @staticmethod
+    def _objective_mse_sum(probs: torch.Tensor, target_onehot: torch.Tensor) -> torch.Tensor:
+        """Objective from paper Eq.(2): sum_j (p_j - y_j)^2.
+
+        Upstream uses an equivalent MSE-on-softmax objective during evolution.
+        """
+
+        diff = probs - target_onehot.view(1, -1)
+        return (diff * diff).sum(dim=1)
+
+    def _make_next_population_from_elites(self, elites: torch.Tensor) -> torch.Tensor:
+        """Upstream mutation rule.
+
+        Official repo pattern (see `temp_ripper/torch_optimizer.py`):
+        - keep elites
+        - add two mutated copies of elites with Gaussian noise (scale=0.5)
+        """
+
+        noise1 = torch.randn_like(elites) * self.mutation_scale
+        noise2 = torch.randn_like(elites) * self.mutation_scale
+        return torch.cat([elites, elites + noise1, elites + noise2], dim=0)
+
+    def _train_on_batch(self, x_batch: torch.Tensor, y_batch: torch.Tensor, device: str) -> None:
+        if self.substitute is None or self.substitute_optimizer is None or self.substitute_loss is None:
+            return
+
+        x_batch = x_batch.to(device)
+        y_batch = y_batch.to(device)
+
+        self.substitute_optimizer.zero_grad(set_to_none=True)
+        logits = self.substitute(x_batch)
+        probs = torch.softmax(logits, dim=-1)
+        loss = self.substitute_loss(probs, y_batch)
+        loss.backward()
+
+        # Upstream gradient clipping: clamp individual gradients.
+        if self.grad_clip > 0:
+            for param in self.substitute.parameters():
+                if param.grad is None:
+                    continue
+                param.grad.data.clamp_(-self.grad_clip, self.grad_clip)
+
+        self.substitute_optimizer.step()
+
+    def _maybe_evaluate_on_checkpoints(self, ctx: BenchmarkContext, device: str) -> None:
+        if self.substitute is None:
+            return
+
+        reached = self.state.attack_state.get("checkpoint_reached", [])
+        if not reached:
+            return
+
+        for checkpoint in reached:
+            cp = int(checkpoint)
+            if cp in self._evaluated_checkpoints:
+                continue
+            self._evaluated_checkpoints.add(cp)
+            self._evaluate_current_substitute(self.substitute, device)

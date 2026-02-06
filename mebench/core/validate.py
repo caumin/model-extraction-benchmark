@@ -34,12 +34,21 @@ def validate_config(config: Dict[str, Any]) -> None:
     # Note: CloudLeak and SwiftThief can work in hard mode with one-hot vectors
     # but may have performance degradation compared to soft mode
     # InverseNet kept as soft-only due to its inversion-based nature
-    soft_only_attacks = {"inversenet", "cloudleak", "swiftthief"}
+    soft_only_attacks = {"inversenet", "cloudleak", "swiftthief", "blackbox_ripper"}
     hard_only_attacks = {"blackbox_dissector"}
     if attack in soft_only_attacks and attack_mode != "soft_prob":
         raise ValueError(f"{attack} requires soft_prob output mode")
     if attack in hard_only_attacks and attack_mode != "hard_top1":
         raise ValueError(f"{attack} requires hard_top1 output mode")
+
+    # BlackboxRipper requires a pretrained generator checkpoint (official repo behavior).
+    if attack == "blackbox_ripper":
+        attack_cfg = config.get("attack", {})
+        ckpt = attack_cfg.get("generator_checkpoint") or attack_cfg.get("generator_ckpt")
+        if not ckpt:
+            raise ValueError(
+                "blackbox_ripper requires attack.generator_checkpoint (path to pretrained generator weights)"
+            )
     
     # Warning for soft attacks in hard mode (for awareness)
     # if attack in {"cloudleak", "swiftthief"} and attack_mode == "hard_top1":

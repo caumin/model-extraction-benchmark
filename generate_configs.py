@@ -184,6 +184,20 @@ def generate_configs():
                             "train_split": True
                         }
 
+                    if attack == "blackbox_ripper":
+                        # BlackboxRipper uses a fixed pretrained generator (no GAN training during extraction).
+                        # Default to official generator checkpoints downloaded via:
+                        #   python scripts/download_blackbox_ripper_checkpoints.py
+                        if setup["victim_dataset"] == "CIFAR10":
+                            gen_name = "cifar_100_6_classes_gan"  # ProGAN (official Table 1)
+                            gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}"  # no extension in upstream
+                        else:
+                            gen_name = "cifar_10_gan"  # SNGAN (official Table 2)
+                            gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}.pth"
+
+                        config["attack"]["generator_name"] = gen_name
+                        config["attack"]["generator_checkpoint"] = gen_ckpt
+
                     filename = f"configs/matrix/{config_name}.yaml"
                     with open(filename, 'w') as f:
                         yaml.dump(config, f, sort_keys=False)
