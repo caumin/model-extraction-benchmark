@@ -38,11 +38,22 @@ class ESAttack(AttackRunner):
         self.opt_lr = float(config.get("opt_lr", 0.01))
         self.syn_size = int(config.get("syn_size", 256))
         self.student_epochs = int(config.get("student_epochs", 10))
-        self.synthesis_steps = int(config.get("synthesis_steps", 1))
+        # [P0 FIX] Balance E-step (student) vs S-step (synthesis) strength.
+        # Paper emphasizes competitive co-evolution; generator must be updated sufficiently.
+        self.synthesis_steps = int(config.get("synthesis_steps", self.student_epochs))
+        if self.synthesis_mode == "dnn_syn":
+            self.synthesis_steps = max(self.synthesis_steps, self.student_epochs)
         self.mode_seeking_weight = float(config.get("mode_seeking_weight", 1.0))
         self.use_opt_augment = bool(config.get("use_opt_augment", True))
         self.use_class_conditional = bool(config.get("use_class_conditional", True))
         self.acgan_weight = float(config.get("acgan_weight", 1.0))
+
+        if self.synthesis_mode == "opt_syn" and self.opt_steps < 30:
+            self.logger.warning(
+                "OPT-SYN opt_steps=%d (<30). Paper setting uses m=30; "
+                "too few steps can severely reduce synthesis quality.",
+                self.opt_steps,
+            )
 
         self.student: nn.Module | None = None
         self.generator: nn.Module | None = None
@@ -82,6 +93,18 @@ class ESAttack(AttackRunner):
         self._init_models(state)
         device = state.metadata.get("device", "cpu")
 
+        # [P0 FIX] Step 0 initialization (paper Algorithm 1, Step 1):
+        # The first batch must be pure Gaussian noise (no OPT-SYN / DNN-SYN).
+        # Using an untrained student/generator to synthesize data is garbage-in/garbage-out.
+        step = int(state.attack_state.get("step", 0))
+        if step == 0:
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            c, h, w = int(input_shape[0]), int(input_shape[1]), int(input_shape[2])
+            z_img = torch.randn(k, c, h, w, device=device)
+            x_query = torch.clamp(z_img * 0.5 + 0.5, 0.0, 1.0)
+            meta = {"synthetic": True, "mode": "init_gaussian", "step": 0}
+            return x_query, meta
+
         if self.synthesis_mode == "opt_syn":
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             x_init = self._sample_syn_batch(k, device, input_shape)
@@ -90,6 +113,7 @@ class ESAttack(AttackRunner):
             meta = {"synthetic": True, "mode": "opt_syn"}
             return x_query, meta
 
+        # z should be from a Gaussian Distribution
         z = torch.randn(k, self.noise_dim, device=device)
         with torch.no_grad():
             if self.use_class_conditional:
@@ -331,17 +355,20 @@ class ESAttack(AttackRunner):
             
             def _norm(img):
                 return (img - norm_mean) / norm_std
-            
-            # [CRITICAL FIX] Switch student to eval mode during generator update to prevent BN corruption
+             
+            # [CRITICAL FIX] Switch student to eval mode during generator update to prevent BN corruption.
+            # Keep gradients enabled so generator can receive signal through the student,
+            # but freeze student parameters to avoid accumulating grads / updating them.
             student_training_mode = self.student.training
+            student_requires_grad = [p.requires_grad for p in self.student.parameters()]
+            for p in self.student.parameters():
+                p.requires_grad_(False)
             self.student.eval()
             
             # 1. Classification Loss (L_img)
             # Maximize probability of target class 'y'
             # L_img = CE(S(G(z)), y)
-            with torch.no_grad():
-                # Student should act as fixed discriminator - no gradients needed
-                logits_1 = self.student(_norm(x_gen_1))
+            logits_1 = self.student(_norm(x_gen_1))
             
             if y is not None:
                 # [P0 FIX] Paper Equation 6 mandates Cross-Entropy, NOT KL Divergence
@@ -378,13 +405,15 @@ class ESAttack(AttackRunner):
             epsilon = 1e-8
             l_ms = torch.mean(dz / (lz + epsilon))
             
-            # Total Loss
-            loss = l_img + self.mode_seeking_weight * l_ms
+            # Total Loss (paper Eq.5): L = L_img + lambda * L_ms
+            loss = self.acgan_weight * l_img + self.mode_seeking_weight * l_ms
             
             loss.backward()
             self.generator_optimizer.step()
-            
-            # [CRITICAL FIX] Restore student training mode after generator update
+             
+            # [CRITICAL FIX] Restore student state after generator update
+            for p, req_grad in zip(self.student.parameters(), student_requires_grad):
+                p.requires_grad_(req_grad)
             if student_training_mode:
                 self.student.train()
 
@@ -397,25 +426,26 @@ class ESAttack(AttackRunner):
         c, h, w = int(input_shape[0]), int(input_shape[1]), int(input_shape[2])
         return torch.randn(k, c, h, w, device=device)
 
+    def _sample_dirichlet_targets(self, batch_size: int, device: str) -> torch.Tensor:
+        """Sample target predictions for OPT-SYN.
+
+        Paper: sample alpha from N(0,1), then y ~ Dirichlet(alpha).
+        Dirichlet requires strictly-positive concentration, so we apply softplus(+eps).
+        """
+
+        alpha_raw = torch.randn(int(batch_size), self.num_classes, device=device)
+        alpha = F.softplus(alpha_raw) + 1e-3
+        return torch.distributions.Dirichlet(alpha).sample()
+
     def _optimize_syn_batch(self, x_init: torch.Tensor, device: str) -> torch.Tensor:
         x = x_init.clone().detach().to(device)
         x.requires_grad_(True)
         optimizer = optim.Adam([x], lr=self.opt_lr)
         
-        # [FIX] OPT-SYN Objective: Match a Dirichlet distribution
-        # Paper: "sample alpha from Gaussian N(0,1), then y ~ Dirichlet(alpha)"
-        # Since Dirichlet requires alpha > 0, we use abs(alpha).
-        # We sample ONE alpha per batch or per sample? Paper implies per sample variability or per batch.
-        # "randomly sample the parameter alpha from a Gaussian distribution"
-        
-        # We sample a different alpha vector for each sample in the batch to encourage diversity
-        # alpha_vec = torch.randn(x.size(0), self.num_classes, device=device).abs()
-        # But commonly symmetric Dirichlet is used. Let's assume symmetric alpha sampled from Gaussian.
-        
-        # Implementation: Sample alpha_val ~ |N(0,1)|, then y ~ Dirichlet(alpha_val * ones)
-        alpha_val = torch.randn(x.size(0), 1, device=device).abs()
-        dist = torch.distributions.Dirichlet(torch.ones(x.size(0), self.num_classes, device=device) * alpha_val)
-        y_target = dist.sample()
+        # [P0 FIX] OPT-SYN Objective: match a Dirichlet-sampled target distribution.
+        # Paper: alpha ~ N(0, 1), then y ~ Dirichlet(alpha).
+        # Dirichlet requires strictly-positive concentration; we use softplus(+eps) to guarantee.
+        y_target = self._sample_dirichlet_targets(int(x.size(0)), device)
 
         # Student normalization
         victim_config = self.state.metadata.get("victim_config", {})
