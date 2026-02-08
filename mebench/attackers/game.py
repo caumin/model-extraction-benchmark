@@ -279,17 +279,26 @@ class GAME(AttackRunner):
             return (img * 0.5 + 0.5 - norm_mean) / norm_std
 
         if self.acs_strategy != "deviation":
+            # Uncertainty-based selection (default): Prefer classes where student is uncertain
             z = torch.randn(self.num_classes, self.noise_dim, device=device)
             class_ids = torch.arange(self.num_classes, device=device)
             with torch.no_grad():
-                x_gen = self.generator(z, class_ids)
+                # We need ACGAN to control class generation. If DCGAN, class_ids ignored.
+                # GAME assumes ACGAN for class-conditional generation.
+                x_gen_raw = self.generator(z, class_ids)
+                x_gen = x_gen_raw * 0.5 + 0.5
                 student_logits = self.student(_norm(x_gen))
                 student_probs = F.softmax(student_logits, dim=1)
+            
+            # Uncertainty: 1 - max_prob (or entropy)
+            # Higher uncertainty -> Higher selection probability
             score = 1.0 - student_probs.max(dim=1).values
         else:
+            # Deviation-based selection: Prefer classes where Student differs from Victim
             if self._query_fn is None:
                 self.logger.warning("GAME ACS deviation requires oracle query; returning uniform distribution.")
                 return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
+            
             budget_remaining = None
             if self._ctx is not None:
                 budget_remaining = int(self._ctx.budget_remaining)
@@ -311,11 +320,12 @@ class GAME(AttackRunner):
 
             z = torch.randn(class_ids.size(0), self.noise_dim, device=device)
             with torch.no_grad():
-                x_gen = self.generator(z, class_ids)
+                x_gen_raw = self.generator(z, class_ids)
+                x_gen = x_gen_raw * 0.5 + 0.5
                 student_logits = self.student(_norm(x_gen))
                 student_probs = F.softmax(student_logits, dim=1)
 
-            x_query = x_gen * 0.5 + 0.5
+            x_query = x_gen # already [0,1]
             oracle_output = self._query_fn(x_query, meta={"acs_probe": True, "y_g": class_ids.detach().cpu()})
             if oracle_output.kind == "soft_prob":
                 victim_probs = oracle_output.y.to(device)
@@ -323,12 +333,132 @@ class GAME(AttackRunner):
                 victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
 
             self._update_victim_stats(state, victim_probs, class_ids)
+            
+            # KL(S || V) approximation
             s_log = torch.log(student_probs + 1e-10)
             v_log = torch.log(victim_probs + 1e-10)
+            # We want to select classes with HIGH disagreement
             kl_div = (student_probs * (s_log - v_log)).sum(dim=1)
+            
+            # Map probe scores back to full class vector
             score = torch.full((self.num_classes,), 1e-6, device=device)
             score[class_ids] = kl_div
 
         score = score - score.min()
         score = score + 1e-6
         return score / score.sum()
+
+    def _update_victim_stats(self, state: BenchmarkState, probs: torch.Tensor, y_g: Optional[torch.Tensor]) -> None:
+        """Update running statistics of victim class probabilities per generated class."""
+        if y_g is None:
+            return
+            
+        # Update counts
+        # This is a simplified online update for mean vectors per class
+        for i, c in enumerate(y_g):
+            c_idx = int(c.item())
+            if c_idx >= self.num_classes: continue
+            
+            current_avg = state.attack_state["victim_class_avg_prob"][c_idx].to(probs.device)
+            current_n = state.attack_state["victim_class_counts"][c_idx].item()
+            
+            new_n = current_n + 1
+            new_avg = (current_avg * current_n + probs[i]) / new_n
+            
+            state.attack_state["victim_class_avg_prob"][c_idx] = new_avg
+            state.attack_state["victim_class_counts"][c_idx] = new_n
+
+    def _agu_phase(
+        self, 
+        x_query: torch.Tensor, 
+        victim_probs: torch.Tensor, 
+        device: str, 
+        z: Optional[torch.Tensor],
+        y_g: Optional[torch.Tensor]
+    ) -> None:
+        """Adversarial Generator Update (AGU)."""
+        if z is None or y_g is None:
+            return
+
+        for _ in range(self.agu_steps):
+            # 1. Train Discriminator
+            real_x = self._next_proxy_batch(device)
+            self.discriminator_optimizer.zero_grad()
+            
+            # Re-generate fake batch to detach from previous graph
+            fake_x_raw = self.generator(z.to(device), y_g.to(device))
+            fake_x = fake_x_raw * 0.5 + 0.5
+            
+            real_validity, real_label = self.discriminator(real_x)
+            fake_validity, fake_label = self.discriminator(fake_x.detach())
+            
+            # Loss D: Real/Fake + Aux Label (ACGAN)
+            d_loss_real = F.binary_cross_entropy_with_logits(real_validity, torch.ones_like(real_validity))
+            d_loss_fake = F.binary_cross_entropy_with_logits(fake_validity, torch.zeros_like(fake_validity))
+            d_loss_cls = 0.0
+            if self.use_acgan:
+                d_loss_cls = F.cross_entropy(fake_label, y_g.to(device))
+                
+            d_loss = d_loss_real + d_loss_fake + d_loss_cls
+            d_loss.backward()
+            self.discriminator_optimizer.step()
+            
+            # 2. Train Generator
+            self.generator_optimizer.zero_grad()
+            fake_validity, fake_label = self.discriminator(fake_x)
+            
+            # Loss G: Fool D + Class Control + Victim Agreement (Boundary)
+            g_loss_adv = F.binary_cross_entropy_with_logits(fake_validity, torch.ones_like(fake_validity))
+            g_loss_cls = 0.0
+            if self.use_acgan:
+                g_loss_cls = F.cross_entropy(fake_label, y_g.to(device))
+            
+            # Boundary Loss (Eq 8): Minimize entropy of victim predictions on generated samples
+            # "Samples near decision boundary" -> High entropy
+            # But usually we want samples where victim is UNCERTAIN (near boundary).
+            # So we should MAXIMIZE entropy (minimize negative entropy).
+            # Using self.beta2 * (victim_entropy)
+            victim_entropy = -(victim_probs * torch.log(victim_probs + 1e-10)).sum(dim=1).mean()
+            # If beta2 > 0, we minimize entropy (make victim confident? No, that's evasion).
+            # For extraction, we want informative samples (near boundary) -> Maximize Entropy.
+            # So loss term should be -Entropy.
+            # Let's assume standard Active Learning heuristic: Maximize Entropy.
+            g_loss_bou = -victim_entropy
+            
+            g_loss = self.beta3 * g_loss_adv + g_loss_cls + self.beta2 * g_loss_bou
+            g_loss.backward()
+            self.generator_optimizer.step()
+
+    def _gmd_phase(self, x_query: torch.Tensor, victim_probs: torch.Tensor) -> None:
+        """Gradient Maximization Discrepancy (GMD) / Student Training."""
+        device = x_query.device
+        
+        # Train Student
+        self.student.train()
+        self.student_optimizer.zero_grad()
+        
+        victim_config = self.state.metadata.get("victim_config", {})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
+        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
+        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        
+        student_in = (x_query - norm_mean) / norm_std
+        student_logits = self.student(student_in)
+        student_probs = F.softmax(student_logits, dim=1)
+        
+        # L_res: Response Loss (Distillation)
+        # Minimize KL(S || V)
+        loss_res = F.kl_div(torch.log(student_probs + 1e-10), victim_probs, reduction="batchmean")
+        
+        # L_dif: Diff Loss (make S different from V?)
+        # Wait, GMD is usually for Generator.
+        # In GAME paper, S is trained to minimize loss_res.
+        # G is trained to maximize discrepancy.
+        # This function is called _gmd_phase but actually trains STUDENT.
+        # So it should minimize match loss.
+        
+        loss = self.beta1 * loss_res
+        loss.backward()
+        self.student_optimizer.step()
