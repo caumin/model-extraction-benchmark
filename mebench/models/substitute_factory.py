@@ -262,6 +262,60 @@ class LeNetMNIST(nn.Module):
         return x
 
 
+class LeNet5MNIST(nn.Module):
+    """LeNet-5 for MNIST (1x28x28).
+
+    Classic LeNet-5 uses tanh + average pooling. We keep the overall structure:
+    conv(6,5) -> avgpool -> conv(16,5) -> avgpool -> fc(120) -> fc(84) -> fc(K)
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 1,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if int(input_channels) != 1:
+            raise ValueError(f"LeNet5MNIST expects input_channels=1, got {input_channels}")
+
+        self.dropout_prob = float(dropout_prob)
+
+        self.conv1 = nn.Conv2d(1, 6, kernel_size=5)
+        self.conv2 = nn.Conv2d(6, 16, kernel_size=5)
+        self.pool = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.act = nn.Tanh()
+
+        self.dropout2d = nn.Dropout2d(self.dropout_prob) if self.dropout_prob > 0 else nn.Identity()
+        self.dropout = nn.Dropout(self.dropout_prob) if self.dropout_prob > 0 else nn.Identity()
+
+        # 28 -> 24 -> pool -> 12 -> 8 -> pool -> 4 => 16*4*4
+        self.fc1 = nn.Linear(16 * 4 * 4, 120)
+        self.fc2 = nn.Linear(120, 84)
+        self.fc3 = nn.Linear(84, int(num_classes))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.act(x)
+        x = self.pool(x)
+        x = self.dropout2d(x)
+
+        x = self.conv2(x)
+        x = self.act(x)
+        x = self.pool(x)
+        x = self.dropout2d(x)
+
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.fc3(x)
+        return x
+
+
 def create_substitute(
     arch: str,
     num_classes: int,
@@ -300,7 +354,7 @@ def create_substitute(
     elif arch == "lenet":
         return LeNet(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
     elif arch == "lenet_mnist":
-        return LeNetMNIST(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
+        return LeNet5MNIST(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
     else:
         raise ValueError(f"Unknown architecture: {arch}")
 

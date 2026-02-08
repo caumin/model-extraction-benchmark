@@ -106,15 +106,6 @@ def _build_transforms(dataset_name: str, arch: str, train: bool) -> transforms.C
         return transforms.Compose([transforms.ToTensor()])
 
     if dataset_name == "MNIST":
-        if arch == "alexnet":
-            # AlexNet expects 3-channel images; keep [0,1] scale.
-            return transforms.Compose(
-                [
-                    transforms.Resize((64, 64)),
-                    transforms.Grayscale(num_output_channels=3),
-                    transforms.ToTensor(),
-                ]
-            )
         return transforms.Compose([transforms.ToTensor()])
 
     raise ValueError(f"Unsupported dataset '{dataset_name}'. Supported: MNIST, CIFAR10")
@@ -143,8 +134,6 @@ def _load_dataset(dataset_name: str, arch: str, train: bool, data_root: Path) ->
 def _infer_dataset_info(dataset_name: str, arch: str) -> Tuple[int, int]:
     dataset_name = str(dataset_name)
     if dataset_name == "MNIST":
-        if str(arch) == "alexnet":
-            return 3, 10
         return 1, 10
     if dataset_name == "CIFAR10":
         return 3, 10
@@ -247,7 +236,7 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
     dataset = str(dataset)
     arch = str(arch)
 
-    if dataset == "MNIST" and arch == "alexnet":
+    if dataset == "MNIST" and arch == "lenet_mnist":
         return VictimTrainRecipe(
             dataset=dataset,
             arch=arch,
@@ -302,7 +291,7 @@ def train() -> None:
         "--arch",
         type=str,
         required=True,
-        choices=["alexnet", "resnet18"],
+        choices=["lenet_mnist", "resnet18"],
         help="Victim architecture (must match config victim.arch)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Training seed for victim checkpoint")
@@ -355,9 +344,9 @@ def train() -> None:
     )
     args = parser.parse_args()
 
-    # Benchmark defaults: MNIST uses AlexNet (torchvision), CIFAR10 uses ResNet18 (torchvision).
-    if args.dataset == "MNIST" and args.arch != "alexnet":
-        raise ValueError("For MNIST victim training, use --arch alexnet")
+    # Benchmark defaults: MNIST uses LeNet-5, CIFAR10 uses torchvision ResNet18.
+    if args.dataset == "MNIST" and args.arch != "lenet_mnist":
+        raise ValueError("For MNIST victim training, use --arch lenet_mnist")
     if args.dataset == "CIFAR10" and args.arch != "resnet18":
         raise ValueError("For CIFAR10 victim training, use --arch resnet18")
 
