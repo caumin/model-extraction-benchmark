@@ -55,10 +55,7 @@ def _default_device(user_device: Optional[str]) -> str:
 
 def _infer_victim_id(dataset_name: str, arch: str) -> str:
     dataset_name = str(dataset_name).lower()
-    arch_clean = str(arch)
-    if arch_clean == "lenet_mnist":
-        arch_clean = "lenet"
-    return f"{dataset_name}_{arch_clean}"
+    return f"{dataset_name}_{str(arch)}"
 
 
 def _backup_if_exists(path: Path) -> None:
@@ -85,8 +82,9 @@ def _worker_init_fn(base_seed: int):
     return _init
 
 
-def _build_transforms(dataset_name: str, train: bool) -> transforms.Compose:
+def _build_transforms(dataset_name: str, arch: str, train: bool) -> transforms.Compose:
     dataset_name = str(dataset_name)
+    arch = str(arch)
 
     # Contract alignment: keep raw pixel scale in [0, 1].
     if dataset_name == "CIFAR10":
@@ -101,14 +99,23 @@ def _build_transforms(dataset_name: str, train: bool) -> transforms.Compose:
         return transforms.Compose([transforms.ToTensor()])
 
     if dataset_name == "MNIST":
+        if arch == "alexnet":
+            # AlexNet expects 3-channel images; keep [0,1] scale.
+            return transforms.Compose(
+                [
+                    transforms.Resize((64, 64)),
+                    transforms.Grayscale(num_output_channels=3),
+                    transforms.ToTensor(),
+                ]
+            )
         return transforms.Compose([transforms.ToTensor()])
 
     raise ValueError(f"Unsupported dataset '{dataset_name}'. Supported: MNIST, CIFAR10")
 
 
-def _load_dataset(dataset_name: str, train: bool, data_root: Path) -> torch.utils.data.Dataset:
+def _load_dataset(dataset_name: str, arch: str, train: bool, data_root: Path) -> torch.utils.data.Dataset:
     dataset_name = str(dataset_name)
-    transform = _build_transforms(dataset_name, train=train)
+    transform = _build_transforms(dataset_name, arch=arch, train=train)
     if dataset_name == "MNIST":
         return datasets.MNIST(
             root=str(data_root),
@@ -126,9 +133,11 @@ def _load_dataset(dataset_name: str, train: bool, data_root: Path) -> torch.util
     raise ValueError(f"Unsupported dataset '{dataset_name}'.")
 
 
-def _infer_dataset_info(dataset_name: str) -> Tuple[int, int]:
+def _infer_dataset_info(dataset_name: str, arch: str) -> Tuple[int, int]:
     dataset_name = str(dataset_name)
     if dataset_name == "MNIST":
+        if str(arch) == "alexnet":
+            return 3, 10
         return 1, 10
     if dataset_name == "CIFAR10":
         return 3, 10
@@ -231,7 +240,7 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
     dataset = str(dataset)
     arch = str(arch)
 
-    if dataset == "MNIST" and arch == "lenet_mnist":
+    if dataset == "MNIST" and arch == "alexnet":
         return VictimTrainRecipe(
             dataset=dataset,
             arch=arch,
@@ -286,7 +295,7 @@ def train() -> None:
         "--arch",
         type=str,
         required=True,
-        choices=["lenet_mnist", "resnet18"],
+        choices=["alexnet", "resnet18"],
         help="Victim architecture (must match config victim.arch)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Training seed for victim checkpoint")
@@ -339,6 +348,12 @@ def train() -> None:
     )
     args = parser.parse_args()
 
+    # Benchmark defaults: MNIST uses AlexNet (torchvision), CIFAR10 uses ResNet18 (torchvision).
+    if args.dataset == "MNIST" and args.arch != "alexnet":
+        raise ValueError("For MNIST victim training, use --arch alexnet")
+    if args.dataset == "CIFAR10" and args.arch != "resnet18":
+        raise ValueError("For CIFAR10 victim training, use --arch resnet18")
+
     recipe = _default_recipe(args.dataset, args.arch)
     epochs = int(args.epochs) if args.epochs is not None else recipe.epochs
     batch_size = int(args.batch_size) if args.batch_size is not None else recipe.batch_size
@@ -362,8 +377,8 @@ def train() -> None:
     _backup_if_exists(out_path)
 
     data_root = project_root / "data"
-    train_dataset = _load_dataset(args.dataset, train=True, data_root=data_root)
-    test_dataset = _load_dataset(args.dataset, train=False, data_root=data_root)
+    train_dataset = _load_dataset(args.dataset, arch=args.arch, train=True, data_root=data_root)
+    test_dataset = _load_dataset(args.dataset, arch=args.arch, train=False, data_root=data_root)
 
     loader_gen = torch.Generator()
     loader_gen.manual_seed(int(args.seed))
@@ -386,7 +401,7 @@ def train() -> None:
         worker_init_fn=_worker_init_fn(int(args.seed)),
     )
 
-    input_channels, num_classes = _infer_dataset_info(args.dataset)
+    input_channels, num_classes = _infer_dataset_info(args.dataset, arch=args.arch)
     model = create_substitute(
         arch=args.arch,
         num_classes=num_classes,

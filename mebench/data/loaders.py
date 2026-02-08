@@ -30,6 +30,9 @@ class SeedDataset(Dataset):
         seed_size: int = 100,
         train_split: bool = True,
         seed_split: str = "balanced",
+        *,
+        output_size: Optional[Tuple[int, int]] = None,
+        output_channels: Optional[int] = None,
     ):
         """Initialize seed dataset.
 
@@ -46,9 +49,11 @@ class SeedDataset(Dataset):
 
         # Load full dataset
         if name == "CIFAR10":
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-            ])
+            tf = []
+            if output_size is not None:
+                tf.append(transforms.Resize(output_size))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             full_dataset = torchvision.datasets.CIFAR10(
                 root="./data",
                 train=train_split,
@@ -56,9 +61,13 @@ class SeedDataset(Dataset):
                 transform=transform,
             )
         elif name == "MNIST":
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-            ])
+            tf = []
+            if output_size is not None:
+                tf.append(transforms.Resize(output_size))
+            if output_channels is not None and int(output_channels) == 3:
+                tf.append(transforms.Grayscale(num_output_channels=3))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             full_dataset = torchvision.datasets.MNIST(
                 root="./data",
                 train=train_split,
@@ -66,9 +75,13 @@ class SeedDataset(Dataset):
                 transform=transform,
             )
         elif name == "EMNIST":
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-            ])
+            tf = []
+            if output_size is not None:
+                tf.append(transforms.Resize(output_size))
+            if output_channels is not None and int(output_channels) == 3:
+                tf.append(transforms.Grayscale(num_output_channels=3))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             full_dataset = torchvision.datasets.EMNIST(
                 root="./data",
                 split="balanced",
@@ -77,9 +90,13 @@ class SeedDataset(Dataset):
                 transform=transform,
             )
         elif name == "FashionMNIST":
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-            ])
+            tf = []
+            if output_size is not None:
+                tf.append(transforms.Resize(output_size))
+            if output_channels is not None and int(output_channels) == 3:
+                tf.append(transforms.Grayscale(num_output_channels=3))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             full_dataset = torchvision.datasets.FashionMNIST(
                 root="./data",
                 train=train_split,
@@ -87,8 +104,9 @@ class SeedDataset(Dataset):
                 transform=transform,
             )
         elif name == "GTSRB":
+            size = output_size if output_size is not None else (32, 32)
             transform = transforms.Compose([
-                transforms.Resize((32, 32)),  # GTSRB images have variable sizes, resize to 32x32
+                transforms.Resize(size),
                 transforms.ToTensor(),
             ])
             full_dataset = torchvision.datasets.GTSRB(
@@ -175,6 +193,7 @@ class SurrogateDataset(Dataset):
         resize: Optional[Tuple[int, int]] = None,
         max_samples: int = 0,
         subset_seed: int = 42,
+        output_channels: Optional[int] = None,
     ):
         """Initialize surrogate dataset.
 
@@ -187,9 +206,11 @@ class SurrogateDataset(Dataset):
 
         # Load surrogate dataset
         if surrogate_name == "SVHN":
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-            ])
+            tf = []
+            if resize is not None:
+                tf.append(transforms.Resize(resize))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.SVHN(
                 root="./data",
                 split="train" if train_split else "test",
@@ -197,9 +218,13 @@ class SurrogateDataset(Dataset):
                 transform=transform,
             )
         elif surrogate_name == "EMNIST":
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-            ])
+            tf = []
+            if resize is not None:
+                tf.append(transforms.Resize(resize))
+            if output_channels is not None and int(output_channels) == 3:
+                tf.append(transforms.Grayscale(num_output_channels=3))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.EMNIST(
                 root="./data",
                 split="balanced",
@@ -208,9 +233,13 @@ class SurrogateDataset(Dataset):
                 transform=transform,
             )
         elif surrogate_name == "FashionMNIST":
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-            ])
+            tf = []
+            if resize is not None:
+                tf.append(transforms.Resize(resize))
+            if output_channels is not None and int(output_channels) == 3:
+                tf.append(transforms.Grayscale(num_output_channels=3))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.FashionMNIST(
                 root="./data",
                 train=train_split,
@@ -218,9 +247,11 @@ class SurrogateDataset(Dataset):
                 transform=transform,
             )
         elif surrogate_name == "CIFAR10":
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-            ])
+            tf = []
+            if resize is not None:
+                tf.append(transforms.Resize(resize))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.CIFAR10(
                 root="./data",
                 train=train_split,
@@ -228,8 +259,9 @@ class SurrogateDataset(Dataset):
                 transform=transform,
             )
         elif surrogate_name == "GTSRB":
+            size = resize if resize is not None else (32, 32)
             transform = transforms.Compose([
-                transforms.Resize((32, 32)),  # GTSRB images have variable sizes, resize to 32x32
+                transforms.Resize(size),
                 transforms.ToTensor(),
             ])
             self.dataset = torchvision.datasets.GTSRB(
@@ -283,12 +315,17 @@ def get_test_dataloader(
     name: str,
     batch_size: int = 128,
     num_workers: Optional[int] = None,
+    *,
+    input_size: Optional[Tuple[int, int]] = None,
+    channels: Optional[int] = None,
 ) -> DataLoader:
     """Get test dataloader for victim dataset."""
     if name == "CIFAR10":
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
+        tf = []
+        if input_size is not None:
+            tf.append(transforms.Resize(input_size))
+        tf.append(transforms.ToTensor())
+        transform = transforms.Compose(tf)
         dataset = torchvision.datasets.CIFAR10(
             root="./data",
             train=False,
@@ -296,9 +333,13 @@ def get_test_dataloader(
             transform=transform,
         )
     elif name == "MNIST":
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
+        tf = []
+        if input_size is not None:
+            tf.append(transforms.Resize(input_size))
+        if channels is not None and int(channels) == 3:
+            tf.append(transforms.Grayscale(num_output_channels=3))
+        tf.append(transforms.ToTensor())
+        transform = transforms.Compose(tf)
         dataset = torchvision.datasets.MNIST(
             root="./data",
             train=False,
@@ -306,9 +347,13 @@ def get_test_dataloader(
             transform=transform,
         )
     elif name == "FashionMNIST":
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
+        tf = []
+        if input_size is not None:
+            tf.append(transforms.Resize(input_size))
+        if channels is not None and int(channels) == 3:
+            tf.append(transforms.Grayscale(num_output_channels=3))
+        tf.append(transforms.ToTensor())
+        transform = transforms.Compose(tf)
         dataset = torchvision.datasets.FashionMNIST(
             root="./data",
             train=False,
@@ -316,8 +361,9 @@ def get_test_dataloader(
             transform=transform,
         )
     elif name == "GTSRB":
+        size = input_size if input_size is not None else (32, 32)
         transform = transforms.Compose([
-            transforms.Resize((32, 32)),
+            transforms.Resize(size),
             transforms.ToTensor(),
         ])
         dataset = torchvision.datasets.GTSRB(
@@ -349,11 +395,22 @@ def create_dataloader(
     name = config.get("name", "CIFAR10")
     data_mode = config.get("data_mode", "surrogate")
     
+    output_channels = config.get("channels")
+    if output_channels is not None:
+        output_channels = int(output_channels)
+
+    desired_input_size = config.get("input_size")
+    desired_resize: Optional[Tuple[int, int]] = None
+    if isinstance(desired_input_size, (list, tuple)) and len(desired_input_size) == 2:
+        desired_resize = (int(desired_input_size[0]), int(desired_input_size[1]))
+
     if data_mode == "surrogate":
         surrogate_root = str(config.get("surrogate_root") or "./data")
         surrogate_resize = config.get("surrogate_resize")
         resize: Optional[Tuple[int, int]]
-        if surrogate_resize is None:
+        if desired_resize is not None:
+            resize = desired_resize
+        elif surrogate_resize is None:
             resize = None
         elif isinstance(surrogate_resize, (list, tuple)) and len(surrogate_resize) == 2:
             resize = (int(surrogate_resize[0]), int(surrogate_resize[1]))
@@ -367,12 +424,15 @@ def create_dataloader(
             resize=resize,
             max_samples=int(config.get("surrogate_max_samples", 0)),
             subset_seed=int(config.get("surrogate_subset_seed", 42)),
+            output_channels=output_channels,
         )
     elif data_mode == "seed":
         dataset = SeedDataset(
             name=name,
             seed_size=config.get("seed_size", 100),
             train_split=config.get("train_split", True),
+            output_size=desired_resize,
+            output_channels=output_channels,
         )
     else:
         raise ValueError(f"Unknown data_mode: {data_mode}")

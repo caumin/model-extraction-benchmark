@@ -72,7 +72,18 @@ class AttackRunner(ABC):
 
         if self.test_loader is None:
             dataset_name = self.state.metadata.get("dataset_config", {}).get("name", "CIFAR10")
-            self.test_loader = get_test_dataloader(dataset_name, batch_size=128)
+            victim_cfg = self.state.metadata.get("victim_config", {}) or {}
+            input_size = victim_cfg.get("input_size")
+            size = None
+            if isinstance(input_size, (list, tuple)) and len(input_size) == 2:
+                size = (int(input_size[0]), int(input_size[1]))
+            channels = victim_cfg.get("channels")
+            self.test_loader = get_test_dataloader(
+                dataset_name,
+                batch_size=128,
+                input_size=size,
+                channels=int(channels) if channels is not None else None,
+            )
 
         metrics = evaluate_substitute(
             substitute=substitute,

@@ -656,8 +656,8 @@ End
 ### 1. Design Matrix
 | Set ID | Victim (Data/Arch) | Surrogate Dataset | Substitute Arch | Budget | Seeds |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SET-A1** | MNIST / LeNet | **EMNIST (balanced)** | LeNet | 20k | 0, 1, 2 |
-| **SET-A2** | MNIST / LeNet | **FashionMNIST** | LeNet | 20k | 0, 1, 2 |
+| **SET-A1** | MNIST / AlexNet | **EMNIST (balanced)** | AlexNet | 20k | 0, 1, 2 |
+| **SET-A2** | MNIST / AlexNet | **FashionMNIST** | AlexNet | 20k | 0, 1, 2 |
 | **SET-B1** | CIFAR10 / ResNet18 | **SVHN** | ResNet18 | 20k | 0, 1, 2 |
 | **SET-B2** | CIFAR10 / ResNet18 | **GTSRB (32x32)** | ResNet18 | 20k | 0, 1, 2 |
 | **SET-B3** | CIFAR10 / ResNet18 | **ImageNet (ImageFolder, 100k subset)** | ResNet18 | 20k | 0, 1, 2 |
@@ -668,6 +668,7 @@ End
 - **Data Loaders**:
   - EMNIST uses the `balanced` split.
   - GTSRB is automatically resized to `32x32`.
+  - MNIST/EMNIST/FashionMNIST are resized to `64x64` and converted to `3` channels for AlexNet-based SET-A.
 - **Reproducibility**: Track A trains from scratch at each checkpoint using fixed seeds (init_seed + seed_offset).
 
 ### 3. Automation Tools

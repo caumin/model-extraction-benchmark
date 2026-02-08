@@ -3,6 +3,21 @@
 from typing import Dict, Any, Optional
 import torch
 import torch.nn as nn
+from torchvision import models
+
+
+def _require_torchvision_3ch_input(arch: str, input_channels: int) -> None:
+    """Torchvision classification models assume 3-channel images.
+
+    We intentionally avoid conv1 adaptation to keep architectures "as-is".
+    """
+
+    if int(input_channels) != 3:
+        raise ValueError(
+            f"Torchvision '{arch}' expects input_channels=3. "
+            "Do not modify model conv1; instead set dataset transforms/config to output 3 channels. "
+            f"Got input_channels={input_channels}"
+        )
 
 
 def _conv3x3(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
@@ -265,10 +280,23 @@ def create_substitute(
     Returns:
         Substitute model
     """
+    arch = str(arch).lower()
     if arch == "resnet18":
-        return ResNet(num_classes=num_classes, width_mult=width_mult, input_channels=input_channels, dropout_prob=dropout_prob)
+        _require_torchvision_3ch_input("resnet18", input_channels)
+        if int(width_mult) != 1:
+            raise ValueError("Torchvision resnet18 does not support width_mult; use width_mult=1")
+        if float(dropout_prob) != 0.0:
+            raise ValueError("Torchvision resnet18 does not support dropout_prob; use dropout_prob=0.0")
+        return models.resnet18(weights=None, num_classes=int(num_classes))
+    elif arch == "alexnet":
+        _require_torchvision_3ch_input("alexnet", input_channels)
+        if int(width_mult) != 1:
+            raise ValueError("Torchvision alexnet does not support width_mult; use width_mult=1")
+        if float(dropout_prob) != 0.0:
+            raise ValueError("Torchvision alexnet does not support dropout_prob override; use dropout_prob=0.0")
+        return models.alexnet(weights=None, num_classes=int(num_classes))
     elif arch == "resnet18-8x":
-        return ResNet(num_classes=num_classes, width_mult=8, input_channels=input_channels, dropout_prob=dropout_prob)
+        raise ValueError("resnet18-8x is not supported in torchvision mode; use resnet18")
     elif arch == "lenet":
         return LeNet(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
     elif arch == "lenet_mnist":
@@ -288,12 +316,12 @@ def get_model_info(arch: str) -> Dict[str, Any]:
     """
     info = {
         "resnet18": {
-            "num_params": 11173962,  # ~11M
+            "num_params": 11181642,  # torchvision resnet18 (num_classes=10)
             "default_width": 1,
         },
-        "resnet18-8x": {
-            "num_params": 11173962 * 64,  # ~714M (8x channels)
-            "default_width": 8,
+        "alexnet": {
+            "num_params": 57044810,  # torchvision alexnet (num_classes=10)
+            "default_width": 1,
         },
         "lenet": {
             "num_params": 61706,

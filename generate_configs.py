@@ -29,10 +29,7 @@ class AttackSpec:
 
 
 def _victim_id(setup: Setup) -> str:
-    arch_clean = setup.victim_arch
-    if arch_clean == "lenet_mnist":
-        arch_clean = "lenet"
-    return f"{setup.victim_dataset.lower()}_{arch_clean}"
+    return f"{setup.victim_dataset.lower()}_{setup.victim_arch}"
 
 
 def _attack_output_modes(capability: str, include_both_hard: bool) -> List[str]:
@@ -81,21 +78,21 @@ def generate_configs(
         Setup(
             set_id="SET-A1",
             victim_dataset="MNIST",
-            victim_arch="lenet_mnist",
+            victim_arch="alexnet",
             surrogate_name="EMNIST",
-            substitute_arch="lenet_mnist",
-            channels=1,
-            size=28,
+            substitute_arch="alexnet",
+            channels=3,
+            size=64,
             num_classes=10,
         ),
         Setup(
             set_id="SET-A2",
             victim_dataset="MNIST",
-            victim_arch="lenet_mnist",
+            victim_arch="alexnet",
             surrogate_name="FashionMNIST",
-            substitute_arch="lenet_mnist",
-            channels=1,
-            size=28,
+            substitute_arch="alexnet",
+            channels=3,
+            size=64,
             num_classes=10,
         ),
         Setup(
@@ -241,6 +238,8 @@ def generate_configs(
                             "data_mode": data_mode,
                             "surrogate_name": setup.surrogate_name,
                             "train_split": True,
+                            "channels": setup.channels,
+                            "input_size": [setup.size, setup.size],
                         },
                         "attack": {
                             "name": attack.name,
@@ -298,6 +297,8 @@ def generate_configs(
                             "data_mode": "surrogate",
                             "surrogate_name": setup.surrogate_name,
                             "train_split": True,
+                            "channels": setup.channels,
+                            "input_size": [setup.size, setup.size],
                         }
                         _maybe_add_imagenet_imagefolder_keys(cfg["attack"]["proxy_dataset"])
 
