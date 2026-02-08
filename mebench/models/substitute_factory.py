@@ -1,94 +1,143 @@
 """Substitute model factory."""
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import torch
 import torch.nn as nn
 
 
+def _conv3x3(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+    return nn.Conv2d(
+        in_planes,
+        out_planes,
+        kernel_size=3,
+        stride=stride,
+        padding=1,
+        bias=False,
+    )
+
+
+def _conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
+
+class BasicBlock(nn.Module):
+    """Standard ResNet BasicBlock (2 convs + skip)."""
+
+    expansion: int = 1
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+    ) -> None:
+        super().__init__()
+        self.conv1 = _conv3x3(inplanes, planes, stride=stride)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = _conv3x3(planes, planes, stride=1)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.downsample = downsample
+        self.stride = int(stride)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out = out + identity
+        out = self.relu(out)
+        return out
+
+
 class ResNet(nn.Module):
-    """Simplified ResNet for substitute model."""
-    
+    """ResNet-18 (CIFAR-style stem) with optional width multiplier.
+
+    Notes:
+    - Uses a 3x3, stride-1 conv stem and no maxpool to avoid aggressive early
+      downsampling on small inputs (e.g., 32x32 CIFAR).
+    - `width_mult` scales the channel width (used for resnet18-8x variants).
+    """
+
     def __init__(
         self,
         num_classes: int,
         width_mult: int = 1,
         input_channels: int = 3,
-        dropout_prob: float = 0.0,  # [P0 FIX] Add dropout for ActiveThief
-    ):
-        """Initialize ResNet.
-        
-        Args:
-            num_classes: Number of output classes
-            width_mult: Width multiplier (1=ResNet-18, 8=ResNet-18-8x)
-            input_channels: Number of input channels
-            dropout_prob: Dropout probability for ActiveThief paper compliance
-        """
+        dropout_prob: float = 0.0,
+    ) -> None:
         super().__init__()
-        self.width_mult = width_mult
-        self.dropout_prob = dropout_prob
+        self.width_mult = int(width_mult)
+        self.dropout_prob = float(dropout_prob)
 
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(input_channels, 64 * width_mult, 7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(64 * width_mult),
-            nn.ReLU(inplace=True),
-        )
+        if self.width_mult <= 0:
+            raise ValueError(f"width_mult must be >= 1, got {self.width_mult}")
 
-        self.layer1 = self._make_layer(64 * width_mult, 128 * width_mult, 2)
+        stem_width = 64 * self.width_mult
+        self.inplanes = stem_width
 
-        self.layer2 = self._make_layer(128 * width_mult, 256 * width_mult, 2)
+        self.conv1 = _conv3x3(int(input_channels), stem_width, stride=1)
+        self.bn1 = nn.BatchNorm2d(stem_width)
+        self.relu = nn.ReLU(inplace=True)
 
-        self.layer3 = self._make_layer(256 * width_mult, 512 * width_mult, 2)
+        self.layer1 = self._make_layer(64 * self.width_mult, blocks=2, stride=1)
+        self.layer2 = self._make_layer(128 * self.width_mult, blocks=2, stride=2)
+        self.layer3 = self._make_layer(256 * self.width_mult, blocks=2, stride=2)
+        self.layer4 = self._make_layer(512 * self.width_mult, blocks=2, stride=2)
 
-        # [P0 FIX] Add dropout after conv blocks for ActiveThief compliance
-        self.dropout1 = nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity()
-        self.dropout2 = nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity()
-        self.dropout3 = nn.Dropout2d(dropout_prob) if dropout_prob > 0 else nn.Identity()
-
+        self.dropout = nn.Dropout2d(self.dropout_prob) if self.dropout_prob > 0 else nn.Identity()
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * self.width_mult * BasicBlock.expansion, int(num_classes))
 
-        self.fc = nn.Linear(512 * width_mult, num_classes)
+    def _make_layer(self, planes: int, blocks: int, stride: int) -> nn.Module:
+        downsample = None
+        if stride != 1 or self.inplanes != planes * BasicBlock.expansion:
+            downsample = nn.Sequential(
+                _conv1x1(self.inplanes, planes * BasicBlock.expansion, stride=stride),
+                nn.BatchNorm2d(planes * BasicBlock.expansion),
+            )
 
-    def _make_layer(self, in_channels: int, out_channels: int, stride: int) -> nn.Module:
-        """Make a ResNet layer."""
-        layers = []
-        layers.append(
-            nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1, bias=False)
-        )
-        layers.append(nn.BatchNorm2d(out_channels))
-        layers.append(nn.ReLU(inplace=True))
+        layers = [
+            BasicBlock(
+                inplanes=self.inplanes,
+                planes=planes,
+                stride=stride,
+                downsample=downsample,
+            )
+        ]
+        self.inplanes = planes * BasicBlock.expansion
+        for _ in range(1, int(blocks)):
+            layers.append(BasicBlock(inplanes=self.inplanes, planes=planes, stride=1, downsample=None))
         return nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
-        x = self.dropout1(x)  # [P0 FIX] Apply dropout
-        x = nn.MaxPool2d(3, stride=2, padding=1)(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+
         x = self.layer1(x)
-        x = self.dropout2(x)  # [P0 FIX] Apply dropout
+        x = self.dropout(x)
         x = self.layer2(x)
-        x = self.dropout3(x)  # [P0 FIX] Apply dropout
+        x = self.dropout(x)
         x = self.layer3(x)
+        x = self.dropout(x)
+        x = self.layer4(x)
+        x = self.dropout(x)
+
         x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
+        x = torch.flatten(x, 1)
         x = self.fc(x)
         return x
-
-
-class ResidualBlock(nn.Module):
-    """Residual block with skip connection."""
-
-    def __init__(self, layers: nn.Module, shortcut: nn.Module):
-        """Initialize residual block."""
-        super().__init__()
-        self.layers = layers
-        self.shortcut = shortcut
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.layers(x)
-        identity = self.shortcut(x)
-        out += identity
-        out = self.relu(out)
-        return out
 
 
 class LeNet(nn.Module):
