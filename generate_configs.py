@@ -59,6 +59,17 @@ def _checkpoints_for_budget(max_budget: int) -> List[int]:
     return [100_000, 500_000, 1_000_000, max_budget]
 
 
+def _budget_suffix(budget: int) -> str:
+    b = int(budget)
+    if b <= 0:
+        return str(b)
+    if b % 1_000_000 == 0:
+        return f"{b // 1_000_000}m"
+    if b % 1_000 == 0:
+        return f"{b // 1_000}k"
+    return str(b)
+
+
 def _clean_yaml_dir(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for p in out_dir.glob("*.yaml"):
@@ -79,17 +90,7 @@ def generate_configs(
             set_id="SET-A1",
             victim_dataset="MNIST",
             victim_arch="lenet_mnist",
-            surrogate_name="EMNIST",
-            substitute_arch="lenet_mnist",
-            channels=1,
-            size=28,
-            num_classes=10,
-        ),
-        Setup(
-            set_id="SET-A2",
-            victim_dataset="MNIST",
-            victim_arch="lenet_mnist",
-            surrogate_name="FashionMNIST",
+            surrogate_name="ImageNet",
             substitute_arch="lenet_mnist",
             channels=1,
             size=28,
@@ -97,26 +98,6 @@ def generate_configs(
         ),
         Setup(
             set_id="SET-B1",
-            victim_dataset="CIFAR10",
-            victim_arch="resnet18",
-            surrogate_name="SVHN",
-            substitute_arch="resnet18",
-            channels=3,
-            size=32,
-            num_classes=10,
-        ),
-        Setup(
-            set_id="SET-B2",
-            victim_dataset="CIFAR10",
-            victim_arch="resnet18",
-            surrogate_name="GTSRB",
-            substitute_arch="resnet18",
-            channels=3,
-            size=32,
-            num_classes=10,
-        ),
-        Setup(
-            set_id="SET-B3",
             victim_dataset="CIFAR10",
             victim_arch="resnet18",
             surrogate_name="ImageNet",
@@ -207,7 +188,7 @@ def generate_configs(
             for output_mode in _attack_output_modes(attack.label_capability, include_both_hard=include_both_hard):
                 for seed in seeds:
                     suffix_mode = "soft" if output_mode == "soft_prob" else "hard"
-                    suffix_budget = "20k" if attack.kind == "pool" else "2m"
+                    suffix_budget = _budget_suffix(max_budget)
 
                     attack_variant = None
                     attack_extra = dict(attack.extra or {})
@@ -325,7 +306,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--pool-budget", type=int, default=20_000)
-    parser.add_argument("--synthetic-budget", type=int, default=2_000_000)
+    parser.add_argument("--synthetic-budget", type=int, default=20_000_000)
     parser.add_argument(
         "--include-both-hard",
         action="store_true",

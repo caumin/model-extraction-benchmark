@@ -656,27 +656,29 @@ End
 ### 1. Design Matrix
 | Set ID | Victim (Data/Arch) | Surrogate Dataset | Substitute Arch | Budget | Seeds |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SET-A1** | MNIST / LeNet-5 | **EMNIST (balanced)** | LeNet-5 | 20k | 0, 1, 2 |
-| **SET-A2** | MNIST / LeNet-5 | **FashionMNIST** | LeNet-5 | 20k | 0, 1, 2 |
-| **SET-B1** | CIFAR10 / ResNet18 | **SVHN** | ResNet18 | 20k | 0, 1, 2 |
-| **SET-B2** | CIFAR10 / ResNet18 | **GTSRB (32x32)** | ResNet18 | 20k | 0, 1, 2 |
-| **SET-B3** | CIFAR10 / ResNet18 | **ImageNet (ImageFolder, 100k subset)** | ResNet18 | 20k | 0, 1, 2 |
+| **SET-A1** | MNIST / LeNet-5 | **ImageNet (ImageFolder, 100k subset; grayscale+28x28)** | LeNet-5 | Pool: 20k / Data-free: 20m | 0, 1, 2 |
+| **SET-B1** | CIFAR10 / ResNet18 | **ImageNet (ImageFolder, 100k subset; RGB+32x32)** | ResNet18 | Pool: 20k / Data-free: 20m | 0, 1, 2 |
 
 ### 2. Global Contract Updates
 - **Normalization**: Additional mean/std normalization has been **removed**. All inputs are assumed to be in **[0, 1] scale** to ensure compatibility with Data-Free attacks (DFME, MAZE, etc.).
 - **Learning Rate**: Default substitute LR is fixed to **0.01** across all experiments.
 - **Data Loaders**:
-  - EMNIST uses the `balanced` split.
-  - GTSRB is automatically resized to `32x32`.
-  - MNIST/EMNIST/FashionMNIST use native grayscale inputs for LeNet-5-based SET-A.
+  - ImageNet surrogate is loaded via `ImageFolder` and deterministically subsampled to 100k images.
+  - SET-A (MNIST) uses grayscale conversion + resize to 28x28 for ImageNet surrogate inputs.
+  - SET-B (CIFAR10) uses RGB + resize to 32x32 for ImageNet surrogate inputs.
 - **Reproducibility**: Track A trains from scratch at each checkpoint using fixed seeds (init_seed + seed_offset).
 
 ### 3. Automation Tools
 - `generate_configs.py`: Generates the full YAML matrix in `configs/matrix/`.
 - NOTE: Data-free (synthetic) attacks are generated **once per victim** (they do not depend on the surrogate dataset).
-- Current default: MNIST synthetic configs are generated under `SET-A1`, CIFAR10 synthetic configs under `SET-B3`.
+- Current default: MNIST synthetic configs are generated under `SET-A1`, CIFAR10 synthetic configs under `SET-B1`.
 - `run_matrix.sh`: Sequentially executes experiments with a skip-if-exists logic.
 - `aggregate_matrix.py`: Aggregates seed results into Mean ± Std format (LaTeX/CSV/Markdown).
+
+Planned schedule:
+- Stage 1: Pool budget 20k, Data-free budget 20m. Run seeds in order: 0, then 1, then 2.
+- Stage 2: Pool budget 10k, Data-free budget 10m. Repeat seeds 0, 1, 2.
+- Future: add additional surrogate datasets (EMNIST/FashionMNIST/SVHN/GTSRB) as extra SETs.
 
 ### 4. Known Implementation Fixes (Session 1)
 - **NaN Loss**: Fixed by applying `clamp(min=1e-10)` and `log_softmax` in KLDivLoss calculations.

@@ -285,12 +285,18 @@ class SurrogateDataset(Dataset):
                 )
 
             size = resize if resize is not None else (32, 32)
-            transform = transforms.Compose(
-                [
-                    transforms.Resize((int(size[0]), int(size[1]))),
-                    transforms.ToTensor(),
-                ]
-            )
+            tf = [transforms.Resize((int(size[0]), int(size[1])))]
+            if output_channels is not None:
+                if int(output_channels) == 1:
+                    # SET-A: MNIST/LeNet-5 expects grayscale 1xHxW.
+                    tf.append(transforms.Grayscale(num_output_channels=1))
+                elif int(output_channels) == 3:
+                    # SET-B: keep RGB for CIFAR10/ResNet18.
+                    pass
+                else:
+                    raise ValueError(f"Unsupported output_channels for ImageNet surrogate: {output_channels}")
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
             full_dataset = torchvision.datasets.ImageFolder(root=split_dir, transform=transform)
 
             max_n = int(max_samples)

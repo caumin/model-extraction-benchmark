@@ -8,7 +8,7 @@ python_bin=${PYTHON_BIN:-python}
 
 # Budgets (fixed for fairness runs)
 pool_budget=${POOL_BUDGET:-20000}
-synthetic_budget=${SYNTHETIC_BUDGET:-2000000}
+synthetic_budget=${SYNTHETIC_BUDGET:-20000000}
 
 # Config generation. IMPORTANT: for parallel runs, generate once (clean) and
 # run workers with GENERATE_CONFIGS=0 to avoid races deleting/regenerating YAMLs.
