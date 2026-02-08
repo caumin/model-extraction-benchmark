@@ -15,6 +15,7 @@ from mebench.core.state import BenchmarkState
 from mebench.models.gan import DCGANGenerator, DCGANDiscriminator
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
+from mebench.utils.dataloader import load_pool_to_memory
 
 
 class DFMSHL(AttackRunner):
@@ -56,8 +57,7 @@ class DFMSHL(AttackRunner):
         self.discriminator_optimizer: optim.Optimizer | None = None
         self.clone_optimizer: optim.Optimizer | None = None
         self.clone_scheduler: optim.lr_scheduler.CosineAnnealingLR | None = None
-        self.proxy_loader = None
-        self.proxy_iter = None
+        self.proxy_data: torch.Tensor | None = None
         self.pretrained = False
 
         self._initialize_state(state)
@@ -228,21 +228,23 @@ class DFMSHL(AttackRunner):
                 max_budget = state.metadata.get("max_budget", 1000)
                 t_max = max(1, int(max_budget / self.batch_size))
                 self.clone_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                    self.clone_optimizer, t_max
-                )
+                self.clone_optimizer, t_max
+            )
 
-        if self.proxy_loader is None:
+        if self.proxy_data is None:
             proxy_config = self.config.get("attack", {}).get("proxy_dataset")
             if proxy_config is None:
                 proxy_config = self.config.get("proxy_dataset")
             if proxy_config is None:
                 raise ValueError("DFMS-HL requires proxy_dataset configuration")
-            self.proxy_loader = create_dataloader(
+            
+            # Cache entire proxy dataset to RAM/GPU
+            self.proxy_data = load_pool_to_memory(
                 proxy_config,
-                batch_size=self.batch_size,
-                shuffle=True,
+                device=device,
+                desc="[DFMSHL] Caching proxy data",
+                max_samples=100_000,
             )
-            self.proxy_iter = iter(self.proxy_loader)
 
         if not self.pretrained and self.pretrain_steps > 0:
             self._pretrain_gan(device)
@@ -250,24 +252,15 @@ class DFMSHL(AttackRunner):
 
     def _next_proxy_batch(self, device: str, batch_size: int | None = None) -> torch.Tensor:
         bs = batch_size or self.batch_size
-        batches = []
-        collected = 0
-        while collected < bs:
-            try:
-                x_real, _ = next(self.proxy_iter)
-            except StopIteration:
-                self.proxy_iter = iter(self.proxy_loader)
-                x_real, _ = next(self.proxy_iter)
+        if self.proxy_data is None or self.proxy_data.size(0) == 0:
+            raise RuntimeError("Proxy data not loaded")
             
-            needed = bs - collected
-            if x_real.size(0) > needed:
-                batches.append(x_real[:needed])
-                collected += needed
-            else:
-                batches.append(x_real)
-                collected += x_real.size(0)
+        # Random sampling from cached tensor
+        indices = torch.randint(0, self.proxy_data.size(0), (bs,), device=self.proxy_data.device)
+        batch = self.proxy_data[indices]
         
-        return torch.cat(batches, dim=0).to(device)
+        # If cache is on CPU, move to target device. If on GPU, it's a no-op (or cheap copy).
+        return batch.to(device)
 
     def _train_discriminator(self, real_x: torch.Tensor, fake_x: torch.Tensor) -> None:
         self.discriminator_optimizer.zero_grad()

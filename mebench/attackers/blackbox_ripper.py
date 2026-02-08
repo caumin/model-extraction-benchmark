@@ -15,46 +15,8 @@ from mebench.models.blackbox_ripper import (
     load_blackbox_ripper_generator_weights,
 )
 from mebench.models.substitute_factory import create_substitute
-
-
-def _clamp_to_unit_range(x: torch.Tensor) -> torch.Tensor:
-    """Match benchmark contract: inputs in [0, 1].
-
-    Upstream generators often produce unbounded or tanh outputs in [-1, 1].
-    The official repo visualizes with `clamp(-1, 1) / 2 + 0.5`.
-    """
-
-    x = x.clamp(-1.0, 1.0)
-    return x * 0.5 + 0.5
-
-
-def _rgb_to_grayscale(x_rgb: torch.Tensor) -> torch.Tensor:
-    """Convert NCHW RGB in [0,1] to 1-channel grayscale in [0,1]."""
-
-    if x_rgb.ndim != 4 or x_rgb.size(1) != 3:
-        raise ValueError("Expected RGB tensor of shape [N, 3, H, W]")
-    multipliers = torch.tensor([0.2126, 0.7152, 0.0722], device=x_rgb.device, dtype=x_rgb.dtype)
-    multipliers = multipliers.view(1, 3, 1, 1)
-    x = (x_rgb * multipliers).sum(dim=1, keepdim=True)
-    return x
-
-
-def _match_input_shape(x: torch.Tensor, input_shape: Tuple[int, int, int]) -> torch.Tensor:
-    """Force x to match victim input shape (C,H,W) for Oracle.view()."""
-
-    c, h, w = input_shape
-    if x.ndim != 4:
-        raise ValueError(f"Expected NCHW tensor, got shape {tuple(x.shape)}")
-    if int(x.size(1)) != int(c):
-        if int(c) == 1 and int(x.size(1)) == 3:
-            x = _rgb_to_grayscale(x)
-        else:
-            raise ValueError(
-                f"Channel mismatch: victim expects C={c} but generator produced C={x.size(1)}"
-            )
-    if int(x.size(2)) != int(h) or int(x.size(3)) != int(w):
-        x = F.interpolate(x, size=(int(h), int(w)), mode="bilinear", align_corners=False)
-    return x
+from mebench.data.loaders import create_dataloader
+from mebench.utils.dataloader import load_pool_to_memory
 
 
 class BlackboxRipper(AttackRunner):

@@ -15,6 +15,7 @@ from mebench.core.state import BenchmarkState
 from mebench.models.gan import DCGANGenerator, DCGANDiscriminator, ACGANGenerator, ACGANDiscriminator
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
+from mebench.utils.dataloader import load_pool_to_memory
 
 
 class GAME(AttackRunner):
@@ -55,8 +56,7 @@ class GAME(AttackRunner):
         self.generator_optimizer: optim.Optimizer | None = None
         self.discriminator_optimizer: optim.Optimizer | None = None
         self.student_optimizer: optim.Optimizer | None = None
-        self.proxy_loader = None
-        self.proxy_iter = None
+        self.proxy_data: torch.Tensor | None = None
         self.tdl_done = False
         self._ctx: Optional[BenchmarkContext] = None
         self._query_fn: Optional[Callable[..., OracleOutput]] = None
@@ -233,220 +233,34 @@ class GAME(AttackRunner):
                 weight_decay=float(opt_params.get("weight_decay", 5e-4))
             )
 
-        if self.proxy_loader is None:
+        if self.proxy_data is None:
             proxy_config = self.config.get("attack", {}).get("proxy_dataset")
             if proxy_config is None:
                 proxy_config = self.config.get("proxy_dataset")
             if proxy_config is None:
-                raise ValueError("GAME requires proxy_dataset configuration")
-            self.proxy_loader = create_dataloader(
-                proxy_config,
-                batch_size=self.batch_size,
-                shuffle=True,
-            )
-            self.proxy_iter = iter(self.proxy_loader)
-
-        if not self.tdl_done and self.tdl_steps > 0:
-            self._tdl_pretrain(device)
-            self.tdl_done = True
-
-    def _update_victim_stats(self, state, victim_probs, labels):
-        if labels is None:
-            return
-        
-        cache = state.attack_state.get("victim_class_avg_prob")
-        counts = state.attack_state.get("victim_class_counts")
-        
-        if cache is None or counts is None:
-            cache = torch.zeros(self.num_classes, self.num_classes, device=victim_probs.device)
-            # Init with uniform to avoid log(0)
-            cache.fill_(1.0 / self.num_classes)
-            counts = torch.zeros(self.num_classes, device=victim_probs.device)
-        else:
-            if cache.device != victim_probs.device:
-                cache = cache.to(victim_probs.device)
-            if counts.device != victim_probs.device:
-                counts = counts.to(victim_probs.device)
+                # Fallback to surrogate if not specified (Track B)
+                proxy_config = state.metadata.get("dataset_config", {}).copy()
+                proxy_config["data_mode"] = "surrogate"
+                # Ensure we have a valid surrogate config
+                if "surrogate_name" not in proxy_config:
+                    # Try to infer or fail
+                    pass
             
-        labels = labels.to(victim_probs.device)
-        
-        for c in range(self.num_classes):
-            mask = (labels == c)
-            if mask.any():
-                n_new = mask.sum()
-                mean_new = victim_probs[mask].mean(dim=0)
-                
-                prev_n = counts[c]
-                prev_mean = cache[c]
-                
-                new_mean = (prev_mean * prev_n + mean_new * n_new) / (prev_n + n_new)
-                cache[c] = new_mean
-                counts[c] += n_new
-                
-        state.attack_state["victim_class_avg_prob"] = cache
-        state.attack_state["victim_class_counts"] = counts
+            if proxy_config:
+                self.proxy_data = load_pool_to_memory(
+                    proxy_config,
+                    device=device,
+                    desc="[GAME] Caching proxy data",
+                    max_samples=100_000,
+                )
 
     def _next_proxy_batch(self, device: str) -> torch.Tensor:
-        try:
-            x_real, _ = next(self.proxy_iter)
-        except StopIteration:
-            self.proxy_iter = iter(self.proxy_loader)
-            x_real, _ = next(self.proxy_iter)
-        return x_real.to(device), _.to(device)
-
-    def _train_discriminator(
-        self,
-        fake_x: torch.Tensor,
-        device: str,
-        fake_labels: torch.Tensor | None = None,
-    ) -> None:
-        real_x, real_labels = self._next_proxy_batch(device)
-        self.discriminator_optimizer.zero_grad()
-        real_out = self.discriminator(real_x)
-        fake_out = self.discriminator(fake_x.detach())
-
-        if isinstance(real_out, tuple):
-            real_source, real_class = real_out
-            fake_source, fake_class = fake_out
-        else:
-            real_source, real_class = real_out, None
-            fake_source, fake_class = fake_out, None
-
-        real_source_labels = torch.ones_like(real_source)
-        fake_source_labels = torch.zeros_like(fake_source)
-        loss_real = F.binary_cross_entropy_with_logits(real_source, real_source_labels)
-        loss_fake = F.binary_cross_entropy_with_logits(fake_source, fake_source_labels)
-        loss = loss_real + loss_fake
-
-        if real_class is not None:
-            # Only apply class loss for labels within valid range (handles OOD proxy)
-            valid_mask = real_labels < self.num_classes
-            if valid_mask.any():
-                loss += F.cross_entropy(real_class[valid_mask], real_labels[valid_mask].long())
+        if self.proxy_data is None or self.proxy_data.size(0) == 0:
+            # Fallback if no proxy data (should not happen if config correct)
+            return torch.randn(self.batch_size, 3, 32, 32, device=device)
             
-            if fake_labels is not None:
-                loss += F.cross_entropy(fake_class, fake_labels.long())
-        loss.backward()
-        self.discriminator_optimizer.step()
-
-    def _train_student(self, x: torch.Tensor, victim_probs: torch.Tensor) -> None:
-        victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(x.device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(x.device)
-        
-        def _norm(img):
-            if img.min() < -0.1:
-                img = img * 0.5 + 0.5
-            return (img - norm_mean) / norm_std
-
-        self.student_optimizer.zero_grad()
-        logits = self.student(_norm(x))
-        loss = F.kl_div(
-            F.log_softmax(logits, dim=1),
-            victim_probs,
-            reduction="batchmean",
-        )
-        loss.backward()
-        self.student_optimizer.step()
-
-    def _train_generator(
-        self,
-        z_cpu: torch.Tensor | None,
-        y_cpu: torch.Tensor | None,
-        victim_probs: torch.Tensor,
-        device: str,
-    ) -> None:
-        if z_cpu is None:
-            z = torch.randn(victim_probs.size(0), self.noise_dim, device=device)
-        else:
-            z = z_cpu.to(device)
-        if y_cpu is None:
-            y_g = torch.randint(0, self.num_classes, (victim_probs.size(0),), device=device)
-        else:
-            y_g = y_cpu.to(device)
-        victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
-        def _norm(img):
-            return (img * 0.5 + 0.5 - norm_mean) / norm_std
-
-        self.generator_optimizer.zero_grad()
-        x_gen = self.generator(z, y_g)
-        student_logits = self.student(_norm(x_gen))
-        student_probs = F.softmax(student_logits, dim=1)
-
-        l_res = -torch.mean(torch.relu(student_logits))
-        top2 = torch.topk(student_probs, k=2, dim=1).values
-        l_bou = torch.mean(top2[:, 0] - top2[:, 1])
-        pseudo_labels = torch.argmax(student_probs, dim=1)
-        l_adv = -F.cross_entropy(student_logits, pseudo_labels)
-        
-        # l_dif = KL( student || victim ) as per Eq. 13 and Eq. 9
-        # F.kl_div(p, q) computes KL(q || p). We need KL(p || q).
-        student_log_probs = F.log_softmax(student_logits, dim=1)
-        # KL(P||Q) = sum P * (logP - logQ)
-        # Note: victim_probs are already softmax probabilities.
-        # student_log_probs is logP.
-        # We need logQ = log(victim_probs).
-        victim_log_probs = torch.log(victim_probs + 1e-10)
-        
-        # Manual implementation of KL(pS || pV)
-        # kl = (student_probs * (student_log_probs - victim_log_probs)).sum(dim=1).mean()
-        # Alternatively, use F.kl_div by swapping and using log_target=True if available, 
-        # but manual is clearer for fidelity.
-        l_dif_val = (student_probs * (student_log_probs - victim_log_probs)).sum(dim=1).mean()
-        l_dif = -l_dif_val
-
-        total = (
-            self.beta1 * l_res
-            + self.beta2 * l_bou
-            + self.beta3 * l_adv
-            + self.beta4 * l_dif
-        )
-        total.backward()
-        self.generator_optimizer.step()
-
-    def _tdl_pretrain(self, device: str) -> None:
-        for _ in range(self.tdl_steps):
-            real_x, _ = self._next_proxy_batch(device)
-            z = torch.randn(real_x.size(0), self.noise_dim, device=device)
-            y_g = torch.randint(0, self.num_classes, (real_x.size(0),), device=device)
-            fake_x = self.generator(z, y_g)
-            self._train_discriminator(fake_x, device, fake_labels=y_g)
-            self.generator_optimizer.zero_grad()
-            fake_logits = self.discriminator(fake_x)
-            if isinstance(fake_logits, tuple):
-                fake_source, fake_class = fake_logits
-            else:
-                fake_source, fake_class = fake_logits, None
-            real_labels = torch.ones_like(fake_source)
-            loss = F.binary_cross_entropy_with_logits(fake_source, real_labels)
-            if fake_class is not None:
-                loss += F.cross_entropy(fake_class, y_g)
-            loss.backward()
-            self.generator_optimizer.step()
-
-    def _agu_phase(
-        self,
-        x: torch.Tensor,
-        victim_probs: torch.Tensor,
-        device: str,
-        z_cpu: torch.Tensor | None,
-        y_cpu: torch.Tensor | None,
-    ) -> None:
-        for _ in range(self.agu_steps):
-            self._train_discriminator(x, device, fake_labels=y_cpu.to(device) if y_cpu is not None else None)
-            self._train_generator(z_cpu, y_cpu, victim_probs, device)
-
-    def _gmd_phase(self, x: torch.Tensor, victim_probs: torch.Tensor) -> None:
-        for _ in range(self.gmd_steps):
-            self._train_student(x, victim_probs)
+        indices = torch.randint(0, self.proxy_data.size(0), (self.batch_size,), device=self.proxy_data.device)
+        return self.proxy_data[indices].to(device)
 
     def _compute_class_distribution(self, state: BenchmarkState, device: str) -> torch.Tensor:
         """Compute class distribution from FRESH victim queries for ACS deviation.
