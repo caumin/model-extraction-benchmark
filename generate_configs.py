@@ -177,9 +177,30 @@ def generate_configs(
     protocol_version = "1.2"
     substitute_batch_size = 256
 
+    # Synthetic/data-free attacks do not depend on the surrogate dataset.
+    # Generate them once per victim. Prefer an ImageNet-based SET when available
+    # (useful as a canonical location for configs), otherwise keep the first.
+    synthetic_canonical_by_victim: Dict[str, Setup] = {}
+    for s in setups:
+        key = _victim_id(s)
+        if key not in synthetic_canonical_by_victim:
+            synthetic_canonical_by_victim[key] = s
+            continue
+
+        prev = synthetic_canonical_by_victim[key]
+        prev_is_imagenet = str(prev.surrogate_name).lower() == "imagenet"
+        curr_is_imagenet = str(s.surrogate_name).lower() == "imagenet"
+        if curr_is_imagenet and not prev_is_imagenet:
+            synthetic_canonical_by_victim[key] = s
+
     count = 0
     for setup in setups:
         for attack in attacks:
+            if attack.kind == "synthetic":
+                victim_key = _victim_id(setup)
+                canonical = synthetic_canonical_by_victim.get(victim_key)
+                if canonical is not None and setup.set_id != canonical.set_id:
+                    continue
             max_budget = _budget_for_kind(attack.kind, pool_budget=pool_budget, synthetic_budget=synthetic_budget)
             checkpoints = _checkpoints_for_budget(max_budget)
 
@@ -249,11 +270,15 @@ def generate_configs(
                         },
                     }
 
-                    # ImageNet surrogate (ImageFolder format): use a deterministic 100k subset.
-                    # Local path should be provided by the user later via `dataset.surrogate_root`
-                    # or env var `MEBENCH_IMAGENET_ROOT`.
-                    if setup.surrogate_name == "ImageNet":
-                        cfg["dataset"].update(
+                    def _maybe_add_imagenet_imagefolder_keys(d: Dict[str, Any]) -> None:
+                        if str(d.get("data_mode")).lower() != "surrogate":
+                            return
+                        if str(d.get("surrogate_name")).lower() != "imagenet":
+                            return
+                        # ImageNet surrogate (ImageFolder format): use a deterministic 100k subset.
+                        # Local path should be provided by the user later via `surrogate_root`
+                        # or env var `MEBENCH_IMAGENET_ROOT`.
+                        d.update(
                             {
                                 "surrogate_root": "<FILL_ME>",
                                 "surrogate_resize": [setup.size, setup.size],
@@ -261,6 +286,8 @@ def generate_configs(
                                 "surrogate_subset_seed": 42,
                             }
                         )
+
+                    _maybe_add_imagenet_imagefolder_keys(cfg["dataset"])
 
                     if attack.name == "knockoff_nets":
                         cfg["attack"]["offline_train_epochs"] = cfg["substitute"]["max_epochs"]
@@ -272,6 +299,7 @@ def generate_configs(
                             "surrogate_name": setup.surrogate_name,
                             "train_split": True,
                         }
+                        _maybe_add_imagenet_imagefolder_keys(cfg["attack"]["proxy_dataset"])
 
                     if attack.name == "blackbox_ripper":
                         if setup.victim_dataset == "CIFAR10":

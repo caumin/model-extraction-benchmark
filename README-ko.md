@@ -90,6 +90,10 @@ bash run_matrix.sh
 python aggregate_matrix.py
 ```
 
+참고:
+- Pool 기반 공격은 surrogate 데이터셋에 의존하므로 SET별로 생성됩니다.
+- Data-free(합성) 공격은 surrogate에 의존하지 않으므로 victim별 1회만 생성됩니다.
+
 ---
 
 ## 📂 디렉토리 구조

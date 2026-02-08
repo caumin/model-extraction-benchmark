@@ -656,10 +656,11 @@ End
 ### 1. Design Matrix
 | Set ID | Victim (Data/Arch) | Surrogate Dataset | Substitute Arch | Budget | Seeds |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SET-A1** | MNIST / LeNet | **EMNIST (balanced)** | LeNet | 10k | 0, 1, 2 |
-| **SET-A2** | MNIST / LeNet | **FashionMNIST** | LeNet | 10k | 0, 1, 2 |
-| **SET-B1** | CIFAR10 / ResNet18 | **SVHN** | ResNet18 | 10k | 0, 1, 2 |
-| **SET-B2** | CIFAR10 / ResNet18 | **GTSRB (32x32)** | ResNet18 | 10k | 0, 1, 2 |
+| **SET-A1** | MNIST / LeNet | **EMNIST (balanced)** | LeNet | 20k | 0, 1, 2 |
+| **SET-A2** | MNIST / LeNet | **FashionMNIST** | LeNet | 20k | 0, 1, 2 |
+| **SET-B1** | CIFAR10 / ResNet18 | **SVHN** | ResNet18 | 20k | 0, 1, 2 |
+| **SET-B2** | CIFAR10 / ResNet18 | **GTSRB (32x32)** | ResNet18 | 20k | 0, 1, 2 |
+| **SET-B3** | CIFAR10 / ResNet18 | **ImageNet (ImageFolder, 100k subset)** | ResNet18 | 20k | 0, 1, 2 |
 
 ### 2. Global Contract Updates
 - **Normalization**: Additional mean/std normalization has been **removed**. All inputs are assumed to be in **[0, 1] scale** to ensure compatibility with Data-Free attacks (DFME, MAZE, etc.).
@@ -670,7 +671,9 @@ End
 - **Reproducibility**: Track A trains from scratch at each checkpoint using fixed seeds (init_seed + seed_offset).
 
 ### 3. Automation Tools
-- `generate_configs.py`: Generates 168 YAML files in `configs/matrix/`.
+- `generate_configs.py`: Generates the full YAML matrix in `configs/matrix/`.
+- NOTE: Data-free (synthetic) attacks are generated **once per victim** (they do not depend on the surrogate dataset).
+- Current default: MNIST synthetic configs are generated under `SET-A1`, CIFAR10 synthetic configs under `SET-B3`.
 - `run_matrix.sh`: Sequentially executes experiments with a skip-if-exists logic.
 - `aggregate_matrix.py`: Aggregates seed results into Mean ± Std format (LaTeX/CSV/Markdown).
 

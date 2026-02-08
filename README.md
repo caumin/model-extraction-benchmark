@@ -91,6 +91,10 @@ bash run_matrix.sh
 python aggregate_matrix.py
 ```
 
+Notes:
+- Pool-based attacks depend on the surrogate dataset, so they are generated per SET.
+- Data-free (synthetic) attacks do not depend on the surrogate; configs are generated once per victim.
+
 ---
 
 ## 📂 Directory Structure
