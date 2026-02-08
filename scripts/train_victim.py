@@ -46,6 +46,7 @@ class VictimTrainRecipe:
     momentum: float
     weight_decay: float
     scheduler: str
+    label_smoothing: float = 0.0
 
 
 def _default_device(user_device: Optional[str]) -> str:
@@ -206,9 +207,10 @@ def _train_one_epoch(
     loader: DataLoader,
     optimizer: optim.Optimizer,
     device: str,
+    label_smoothing: float = 0.0,
 ) -> Tuple[float, float]:
     model.train()
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     total_loss = 0.0
     total_correct = 0
     total = 0
@@ -254,16 +256,17 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
             dataset=dataset,
             arch=arch,
             epochs=200,
-            batch_size=128,
+            batch_size=256,
             optimizer="sgd",
             lr=0.1,
             momentum=0.9,
-            weight_decay=5e-4,
+            weight_decay=1e-4,
             scheduler="cosine",
+            label_smoothing=0.1,
         )
 
     # Generic fallback.
-    c, _ = _infer_dataset_info(dataset)
+    c, _ = _infer_dataset_info(dataset, arch=arch)
     _ = c
     return VictimTrainRecipe(
         dataset=dataset,
@@ -275,6 +278,7 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
         momentum=0.9,
         weight_decay=5e-4,
         scheduler="multistep",
+        label_smoothing=0.0,
     )
 
 
@@ -358,6 +362,7 @@ def train() -> None:
     momentum = float(args.momentum) if args.momentum is not None else recipe.momentum
     weight_decay = float(args.weight_decay) if args.weight_decay is not None else recipe.weight_decay
     scheduler_name = str(args.scheduler) if args.scheduler is not None else recipe.scheduler
+    label_smoothing = recipe.label_smoothing
 
     device = _default_device(args.device)
     print(f"[INFO] Device: {device}")
@@ -439,7 +444,9 @@ def train() -> None:
     best_epoch = -1
     best_state = None
     for epoch in range(1, epochs + 1):
-        train_loss, train_acc = _train_one_epoch(model, train_loader, optimizer, device)
+        train_loss, train_acc = _train_one_epoch(
+            model, train_loader, optimizer, device, label_smoothing=label_smoothing
+        )
         test_loss, test_acc = _evaluate(model, test_loader, device)
 
         if scheduler is not None:
@@ -484,6 +491,7 @@ def train() -> None:
                     momentum=float(momentum),
                     weight_decay=float(weight_decay),
                     scheduler=scheduler_name,
+                    label_smoothing=label_smoothing,
                 )
             ),
         }
