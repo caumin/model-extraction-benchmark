@@ -11,6 +11,7 @@ ToTensor() scaling only.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import random
 import sys
@@ -71,15 +72,21 @@ def _backup_if_exists(path: Path) -> None:
     print(f"[INFO] Existing checkpoint moved to: {backup}")
 
 
-def _worker_init_fn(base_seed: int):
-    def _init(worker_id: int) -> None:
-        # Keep workers deterministic even with num_workers > 0.
-        seed = int(base_seed) + int(worker_id)
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+def _seed_dataloader_worker(worker_id: int, *, base_seed: int) -> None:
+    """Seed DataLoader workers deterministically (Windows-safe).
 
-    return _init
+    Must be top-level to be picklable under multiprocessing 'spawn' on Windows.
+    """
+
+    seed = int(base_seed) + int(worker_id)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def _worker_init_fn(base_seed: int):
+    # functools.partial of a top-level function is picklable on Windows.
+    return functools.partial(_seed_dataloader_worker, base_seed=int(base_seed))
 
 
 def _build_transforms(dataset_name: str, arch: str, train: bool) -> transforms.Compose:
