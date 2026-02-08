@@ -118,6 +118,16 @@ def generate_configs(
             size=32,
             num_classes=10,
         ),
+        Setup(
+            set_id="SET-B3",
+            victim_dataset="CIFAR10",
+            victim_arch="resnet18",
+            surrogate_name="ImageNet",
+            substitute_arch="resnet18",
+            channels=3,
+            size=32,
+            num_classes=10,
+        ),
     ]
 
     # Attack taxonomy used for a single-run-per-attack evaluation.
@@ -238,6 +248,19 @@ def generate_configs(
                             "delete_on_finish": True,
                         },
                     }
+
+                    # ImageNet surrogate (ImageFolder format): use a deterministic 100k subset.
+                    # Local path should be provided by the user later via `dataset.surrogate_root`
+                    # or env var `MEBENCH_IMAGENET_ROOT`.
+                    if setup.surrogate_name == "ImageNet":
+                        cfg["dataset"].update(
+                            {
+                                "surrogate_root": "<FILL_ME>",
+                                "surrogate_resize": [setup.size, setup.size],
+                                "surrogate_max_samples": 100_000,
+                                "surrogate_subset_seed": 42,
+                            }
+                        )
 
                     if attack.name == "knockoff_nets":
                         cfg["attack"]["offline_train_epochs"] = cfg["substitute"]["max_epochs"]

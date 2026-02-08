@@ -316,9 +316,11 @@ class KnockoffNets(AttackRunner):
             shuffle=False,
         ).dataset
 
-        if hasattr(self.pool_dataset, "classes"):
-            self.num_classes = len(self.pool_dataset.classes)
-            state.attack_state["policy_weights"] = torch.zeros(self.num_classes)
+        # IMPORTANT: keep num_classes aligned with the victim, not the surrogate pool.
+        # ImageNet/ImageFolder pools may have 1000 classes; we still steal a 10-class victim.
+        victim_num_classes = int(state.metadata.get("num_classes", self.num_classes))
+        self.num_classes = victim_num_classes
+        state.attack_state["policy_weights"] = torch.zeros(self.num_classes)
 
         self.class_to_indices = {i: [] for i in range(self.num_classes)}
         for idx in range(len(self.pool_dataset)):
@@ -384,8 +386,11 @@ class KnockoffNets(AttackRunner):
             if not indices:
                 continue
             
-            # Use ALL samples per class for centroid computation (Strict Protocol)
-            sampled = indices
+            # Avoid full-pass over huge pools (e.g., ImageNet). Use a fixed-size sample.
+            n = min(len(indices), int(self.samples_per_class))
+            if n <= 0:
+                continue
+            sampled = indices[:n]
 
             features = []
             for start in range(0, len(sampled), self.batch_size):

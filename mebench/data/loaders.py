@@ -1,6 +1,7 @@
 """Data loaders for seed, surrogate, and data-free modes."""
 
 from typing import Dict, Any, Tuple, Optional
+import os
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 import torchvision
@@ -156,6 +157,11 @@ class SurrogateDataset(Dataset):
         self,
         surrogate_name: str,
         train_split: bool = True,
+        *,
+        root: str = "./data",
+        resize: Optional[Tuple[int, int]] = None,
+        max_samples: int = 0,
+        subset_seed: int = 42,
     ):
         """Initialize surrogate dataset.
 
@@ -219,6 +225,37 @@ class SurrogateDataset(Dataset):
                 download=True,
                 transform=transform,
             )
+        elif surrogate_name in {"IMAGENET", "ImageNet", "imagenet", "ILSVRC", "ILSVRC2012"}:
+            # ImageNet/ILSVRC2012 is expected to be provided locally in ImageFolder format.
+            # Directory layout:
+            #   <root>/train/<class>/*
+            #   <root>/val/<class>/*
+            base = os.environ.get("MEBENCH_IMAGENET_ROOT", root)
+            split_dir = os.path.join(str(base), "train" if train_split else "val")
+            if not os.path.isdir(split_dir):
+                raise ValueError(
+                    "ImageNet surrogate requires a local ImageFolder directory. "
+                    "Set dataset.surrogate_root (or env MEBENCH_IMAGENET_ROOT) to a folder containing train/ and val/. "
+                    f"Missing: {split_dir}"
+                )
+
+            size = resize if resize is not None else (32, 32)
+            transform = transforms.Compose(
+                [
+                    transforms.Resize((int(size[0]), int(size[1]))),
+                    transforms.ToTensor(),
+                ]
+            )
+            full_dataset = torchvision.datasets.ImageFolder(root=split_dir, transform=transform)
+
+            max_n = int(max_samples)
+            if max_n > 0 and len(full_dataset) > max_n:
+                # Deterministic subsample (default: 100k) to cap pool size.
+                g = torch.Generator().manual_seed(int(subset_seed))
+                indices = torch.randperm(len(full_dataset), generator=g)[:max_n].tolist()
+                self.dataset = Subset(full_dataset, indices)
+            else:
+                self.dataset = full_dataset
         else:
             raise ValueError(f"Unknown surrogate dataset: {surrogate_name}")
 
@@ -297,9 +334,23 @@ def create_dataloader(
     data_mode = config.get("data_mode", "surrogate")
     
     if data_mode == "surrogate":
+        surrogate_root = str(config.get("surrogate_root") or "./data")
+        surrogate_resize = config.get("surrogate_resize")
+        resize: Optional[Tuple[int, int]]
+        if surrogate_resize is None:
+            resize = None
+        elif isinstance(surrogate_resize, (list, tuple)) and len(surrogate_resize) == 2:
+            resize = (int(surrogate_resize[0]), int(surrogate_resize[1]))
+        else:
+            resize = (int(surrogate_resize), int(surrogate_resize))
+
         dataset = SurrogateDataset(
             surrogate_name=config.get("surrogate_name", "SVHN"),
             train_split=config.get("train_split", True),
+            root=surrogate_root,
+            resize=resize,
+            max_samples=int(config.get("surrogate_max_samples", 0)),
+            subset_seed=int(config.get("surrogate_subset_seed", 42)),
         )
     elif data_mode == "seed":
         dataset = SeedDataset(
