@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Tuple, Optional
+import os
 import torch
 from torch.utils.data import Dataset
 import pickle
@@ -41,6 +42,10 @@ class QueryStorage(Dataset):
         self.label_chunks: list[torch.Tensor] = []
         self.chunk_sizes: list[int] = []
         self.count = 0
+
+        # Convenience tensors for tests/debugging (populated on load).
+        self.queries: Optional[torch.Tensor] = None
+        self.labels: Optional[torch.Tensor] = None
         
         # Cumulative indices for efficient random access
         self.cumulative_sizes: list[int] = [0]
@@ -68,14 +73,14 @@ class QueryStorage(Dataset):
 
     def save(self) -> None:
         """Save current storage to disk.
-        
-        Currently DISABLED to save disk space.
-        
-        Note: Currently saves all chunks to a single file. 
-        TODO: Implement incremental append or chunk-based saving for very large datasets.
+
+        Note: saves all chunks to a single file.
+        For very large budgets this can consume significant disk.
+        Set env `MEBENCH_QUERY_STORAGE_SAVE=0` to disable.
         """
-        # Save is disabled for now as it consumes too much disk space
-        return
+        raw = os.environ.get("MEBENCH_QUERY_STORAGE_SAVE", "1")
+        if str(raw).strip().lower() in {"0", "false", "no", "off"}:
+            return
 
         if self.count == 0:
             return
@@ -117,6 +122,9 @@ class QueryStorage(Dataset):
         # Load tensors
         queries = torch.load(queries_path, weights_only=True)
         labels = torch.load(labels_path, weights_only=True)
+
+        self.queries = queries
+        self.labels = labels
         
         # Reset buffers and load as a single chunk
         self.query_chunks = [queries]
@@ -133,7 +141,7 @@ class QueryStorage(Dataset):
         print(f"Loaded {self.count} queries from {self.cache_dir}")
 
     def get_dataloader(
-        self, batch_size: int = 128, shuffle: bool = True, num_workers: int = 0
+        self, batch_size: int = 128, shuffle: bool = True, num_workers: Optional[int] = None
     ) -> torch.utils.data.DataLoader:
         """Create DataLoader for stored queries.
 
@@ -149,8 +157,17 @@ class QueryStorage(Dataset):
             # Return empty loader if no data
             return torch.utils.data.DataLoader([])
             
+        if num_workers is None:
+            raw = os.environ.get("MEBENCH_NUM_WORKERS")
+            try:
+                resolved_workers = int(str(raw).strip()) if raw is not None else 0
+            except ValueError:
+                resolved_workers = 0
+        else:
+            resolved_workers = int(num_workers)
+
         return torch.utils.data.DataLoader(
-            self, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers
+            self, batch_size=batch_size, shuffle=shuffle, num_workers=resolved_workers
         )
 
     def cleanup(self) -> None:

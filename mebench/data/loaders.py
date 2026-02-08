@@ -8,6 +8,19 @@ import torchvision
 import torchvision.transforms as transforms
 
 
+def _get_default_num_workers(*, default: int = 0) -> int:
+    raw = os.environ.get("MEBENCH_NUM_WORKERS")
+    if raw is None:
+        return int(default)
+    raw = str(raw).strip()
+    if raw == "":
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
 class SeedDataset(Dataset):
     """In-domain seed dataset (default 100 images)."""
 
@@ -269,7 +282,7 @@ class SurrogateDataset(Dataset):
 def get_test_dataloader(
     name: str,
     batch_size: int = 128,
-    num_workers: int = 0,  # Default to 0 for Windows safety
+    num_workers: Optional[int] = None,
 ) -> DataLoader:
     """Get test dataloader for victim dataset."""
     if name == "CIFAR10":
@@ -316,11 +329,14 @@ def get_test_dataloader(
     else:
         raise ValueError(f"Unknown dataset: {name}")
 
+    resolved_workers = (
+        int(num_workers) if num_workers is not None else _get_default_num_workers(default=0)
+    )
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=resolved_workers,
     )
 
 
@@ -361,7 +377,10 @@ def create_dataloader(
     else:
         raise ValueError(f"Unknown data_mode: {data_mode}")
 
-    num_workers = config.get("num_workers", 0)  # Default to 0 for safety
+    if "num_workers" in config and config.get("num_workers") is not None:
+        num_workers = int(config.get("num_workers"))
+    else:
+        num_workers = _get_default_num_workers(default=0)
 
     return DataLoader(
         dataset,
