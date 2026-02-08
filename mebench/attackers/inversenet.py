@@ -15,6 +15,7 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
+from mebench.utils.dataloader import pool_loader_kwargs
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.models.inversion import InversionGenerator
@@ -498,7 +499,13 @@ class InverseNet(AttackRunner):
         # Load all candidate images into memory (batched)
         # This is much faster than single-item access inside the loop
         subset = torch.utils.data.Subset(self.pool_dataset, remaining)
-        loader = DataLoader(subset, batch_size=256, shuffle=False, num_workers=0)
+        device = state.metadata.get("device", "cpu")
+        loader = DataLoader(
+            subset,
+            batch_size=256,
+            shuffle=False,
+            **pool_loader_kwargs(device),
+        )
         
         candidates_matrix = []
         for x_batch, _ in loader:
@@ -512,7 +519,12 @@ class InverseNet(AttackRunner):
         
         # Load centers
         center_subset = torch.utils.data.Subset(self.pool_dataset, centers)
-        center_loader = DataLoader(center_subset, batch_size=256, shuffle=False, num_workers=0)
+        center_loader = DataLoader(
+            center_subset,
+            batch_size=256,
+            shuffle=False,
+            **pool_loader_kwargs(device),
+        )
         
         centers_matrix_list = []
         for x_batch, _ in center_loader:
@@ -522,7 +534,6 @@ class InverseNet(AttackRunner):
         centers_matrix = torch.cat(centers_matrix_list, dim=0)
         
         # Move to GPU if available for fast distance computation
-        device = state.metadata.get("device", "cpu")
         candidates_matrix = candidates_matrix.to(device)
         centers_matrix = centers_matrix.to(device)
         
@@ -597,7 +608,7 @@ class InverseNet(AttackRunner):
             subset, 
             batch_size=batch_size, 
             shuffle=False, 
-            num_workers=0
+            **pool_loader_kwargs(str(device))
         )
         
         current_idx_ptr = 0
@@ -611,7 +622,7 @@ class InverseNet(AttackRunner):
             batch_indices = candidates[current_idx_ptr : current_idx_ptr + batch_len]
             current_idx_ptr += batch_len
             
-            x_batch = x_batch.to(device)
+            x_batch = x_batch.to(device, non_blocking=str(device).startswith("cuda"))
             
             # DeepFool distance calculation
             distances = self._hcss_noise_distance_batch(

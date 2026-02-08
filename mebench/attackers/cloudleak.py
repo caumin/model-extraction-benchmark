@@ -15,6 +15,7 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
+from mebench.utils.dataloader import pool_loader_kwargs
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 
@@ -435,7 +436,13 @@ class CloudLeak(AttackRunner):
         if self._class_indices_cache or self.pool_dataset is None:
             return
 
-        loader = DataLoader(self.pool_dataset, batch_size=256, shuffle=False, num_workers=0)
+        device = self.state.metadata.get("device", "cpu")
+        loader = DataLoader(
+            self.pool_dataset,
+            batch_size=256,
+            shuffle=False,
+            **pool_loader_kwargs(device),
+        )
         ptr = 0
         for _, y_batch in loader:
             y_batch = y_batch.view(-1)
@@ -454,7 +461,12 @@ class CloudLeak(AttackRunner):
             return []
 
         subset = Subset(self.pool_dataset, candidate_indices)
-        loader = DataLoader(subset, batch_size=self.gen_batch_size, shuffle=False, num_workers=0)
+        loader = DataLoader(
+            subset,
+            batch_size=self.gen_batch_size,
+            shuffle=False,
+            **pool_loader_kwargs(device),
+        )
 
         scored: List[Tuple[float, int, torch.Tensor]] = []
         ptr = 0
@@ -477,13 +489,13 @@ class CloudLeak(AttackRunner):
             margin_m = torch.tensor(margins, device=device)
 
             s_imgs_adv = self.featurefool.generate_batch(
-                s_imgs.to(device),
-                t_imgs.to(device),
+                s_imgs.to(device, non_blocking=str(device).startswith("cuda")),
+                t_imgs.to(device, non_blocking=str(device).startswith("cuda")),
                 margin_m=margin_m,
             )
 
             with torch.no_grad():
-                logits = substitute(s_imgs_adv.to(device))
+                logits = substitute(s_imgs_adv.to(device, non_blocking=str(device).startswith("cuda")))
                 probs = F.softmax(logits, dim=1)
                 max_prob, _ = probs.max(dim=1)
                 scores = 1.0 - max_prob
@@ -526,7 +538,12 @@ class CloudLeak(AttackRunner):
             return float(self.margin_m)
 
         subset = Subset(self.pool_dataset, class_indices)
-        loader = DataLoader(subset, batch_size=self.batch_size, shuffle=False, num_workers=0)
+        loader = DataLoader(
+            subset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            **pool_loader_kwargs(device),
+        )
 
         sum_feats = None
         sum_norms = 0.0
@@ -534,7 +551,9 @@ class CloudLeak(AttackRunner):
 
         with torch.no_grad():
             for x_batch, _ in loader:
-                feats = self.featurefool._extract_features(x_batch.to(device))
+                feats = self.featurefool._extract_features(
+                    x_batch.to(device, non_blocking=str(device).startswith("cuda"))
+                )
                 if sum_feats is None:
                     sum_feats = feats.sum(dim=0)
                 else:

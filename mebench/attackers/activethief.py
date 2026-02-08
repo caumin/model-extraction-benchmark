@@ -17,6 +17,7 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.dataloader import pool_loader_kwargs
 
 
 class ActiveThief(AttackRunner):
@@ -56,6 +57,11 @@ class ActiveThief(AttackRunner):
         
         # Store oracle labels to override dataset labels during training
         self.observed_labels = {}
+
+        # Cache queried tensors to avoid repeated ImageFolder IO during training.
+        # Stored as list-of-batches to minimize Python per-sample overhead.
+        self.query_data_x: List[torch.Tensor] = []
+        self.query_data_y: List[torch.Tensor] = []
         
         # DeepFool parameters for DFAL
         self.dfal_max_iter = int(config.get("dfal_max_iter", 20))
@@ -75,6 +81,8 @@ class ActiveThief(AttackRunner):
     def _initialize_state(self, state: BenchmarkState) -> None:
         """Initialize attack-specific state."""
         state.attack_state["labeled_indices"] = []
+        state.attack_state.setdefault("query_data_x", [])
+        state.attack_state.setdefault("query_data_y", [])
         dataset_config = state.metadata.get("dataset_config", {})
         seed_size = dataset_config.get("seed_size")
         if seed_size is None and isinstance(dataset_config.get("dataset"), dict):
@@ -151,47 +159,16 @@ class ActiveThief(AttackRunner):
         
         sub_config = self.state.metadata.get("substitute_config", {})
         
-        # Create custom dataset that uses observed oracle labels
-        class LabeledDataset:
-            def __init__(self, pool_dataset, labeled_indices, observed_labels, num_classes, logger):
-                self.pool_dataset = pool_dataset
-                self.labeled_indices = labeled_indices
-                self.observed_labels = observed_labels
-                self.num_classes = num_classes
-                self.logger = logger
-            
-            def __len__(self):
-                return len(self.labeled_indices)
-            
-            def __getitem__(self, idx):
-                dataset_idx = self.labeled_indices[idx]
-                x, _ = self.pool_dataset[dataset_idx]  # Ignore original label
-                
-                # Use oracle labels when available, otherwise use a temporary valid label
-                # This handles the initial seed case before any oracle queries
-                if dataset_idx in self.observed_labels:
-                    y = self.observed_labels[dataset_idx]
-                    # Validate label is in correct range
-                    if y >= self.num_classes or y < 0:
-                        self.logger.error(
-                            "Oracle provided invalid label %s for dataset index %s",
-                            y,
-                            dataset_idx,
-                        )
-                        raise ValueError(f"Invalid oracle label {y} for {self.num_classes}-class model")
-                else:
-                    # Use dummy label (0) for initial seed - will be replaced after first oracle query
-                    y = 0
-                
-                return x, y
-        
-        labeled_dataset = LabeledDataset(
-            self.pool_dataset,
-            self.labeled_indices,
-            self.observed_labels,
-            self.num_classes,
-            self.logger,
-        )
+        # IO optimization: train on cached queried tensors (exact x used for oracle queries)
+        # instead of re-indexing ImageFolder each epoch.
+        query_x = state.attack_state.get("query_data_x", [])
+        query_y = state.attack_state.get("query_data_y", [])
+        if len(query_x) == 0:
+            return
+
+        x_all = torch.cat(query_x, dim=0)
+        y_all = torch.cat(query_y, dim=0)
+        labeled_dataset = torch.utils.data.TensorDataset(x_all, y_all)
         train_batch_size = int(
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
@@ -201,6 +178,7 @@ class ActiveThief(AttackRunner):
             batch_size=train_batch_size,
             shuffle=True,
             num_workers=0,
+            pin_memory=str(device).startswith("cuda"),
         )
         
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -292,9 +270,10 @@ class ActiveThief(AttackRunner):
         """Collect softmax probabilities for a loader."""
         all_probs = []
         self.substitute.eval()
+        non_blocking = str(device).startswith("cuda")
         with torch.no_grad():
             for x_batch, _ in loader:
-                x_batch = x_batch.to(device)
+                x_batch = x_batch.to(device, non_blocking=non_blocking)
                 logits = self.substitute(x_batch)
                 probs = F.softmax(logits, dim=1)
                 all_probs.append(probs.cpu())
@@ -397,8 +376,7 @@ class ActiveThief(AttackRunner):
             unlabeled_dataset, 
             batch_size=self.batch_size, 
             shuffle=False, 
-            num_workers=0,
-            pin_memory=pin_memory,
+            **pool_loader_kwargs(device),
         )
         
         all_distances = []
@@ -411,7 +389,7 @@ class ActiveThief(AttackRunner):
             leave=False,
         )
         for x_batch, _ in dfal_pbar:
-            x_batch = x_batch.to(device)
+            x_batch = x_batch.to(device, non_blocking=pin_memory)
             # Enable grad for DeepFool
             with torch.enable_grad():
                 distances = self._deepfool_distance_dfal(
@@ -551,8 +529,7 @@ class ActiveThief(AttackRunner):
             unlabeled_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=4,
-            pin_memory=True
+            **pool_loader_kwargs(device),
         )
         probs = self._collect_probs(unlabeled_loader, device)
 
@@ -565,7 +542,12 @@ class ActiveThief(AttackRunner):
             # Need to get probs for ALREADY LABELED data to act as centers
             if self.labeled_indices:
                 labeled_dataset = Subset(self.pool_dataset, self.labeled_indices)
-                labeled_loader = DataLoader(labeled_dataset, batch_size=self.batch_size, shuffle=False)
+                labeled_loader = DataLoader(
+                    labeled_dataset,
+                    batch_size=self.batch_size,
+                    shuffle=False,
+                    **pool_loader_kwargs(device),
+                )
                 labeled_probs = self._collect_probs(labeled_loader, device)
             else:
                 # No labeled data yet, pass empty tensor
@@ -622,7 +604,7 @@ class ActiveThief(AttackRunner):
                     selected_dataset,
                     batch_size=seed_k,
                     shuffle=False,
-                    num_workers=0,
+                    **pool_loader_kwargs(device),
                 )
                 x_batch, _ = next(iter(query_loader))
                 query_batch = QueryBatch(
@@ -695,6 +677,13 @@ class ActiveThief(AttackRunner):
 
         for idx, label in zip(indices, labels):
             self.observed_labels[int(idx)] = int(label.item())
+
+        # Cache queried tensors + labels for training (avoid re-reading pool data from disk).
+        # Store as batches to keep append overhead low.
+        x_cpu = query_batch.x.detach().cpu()
+        y_cpu = labels.detach().cpu().long()
+        state.attack_state.setdefault("query_data_x", []).append(x_cpu)
+        state.attack_state.setdefault("query_data_y", []).append(y_cpu)
         
         # ActiveThief state updates are handled in _select_query_batch (index management)
         # and _train_substitute (model update).

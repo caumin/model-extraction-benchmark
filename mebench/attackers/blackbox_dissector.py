@@ -18,6 +18,7 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader, get_test_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.dataloader import pool_loader_kwargs
 from mebench.eval.metrics import evaluate_substitute
 
 
@@ -750,8 +751,7 @@ class BlackboxDissector(AttackRunner):
             candidate_subset, 
             batch_size=self.selection_batch_size, 
             shuffle=False, 
-            num_workers=4,
-            pin_memory=True
+            **pool_loader_kwargs(device)
         )
         
         current_idx_ptr = 0
@@ -761,7 +761,7 @@ class BlackboxDissector(AttackRunner):
             batch_indices = transfer_indices[current_idx_ptr : current_idx_ptr + batch_size]
             current_idx_ptr += batch_size
             
-            imgs = imgs.to(device)
+            imgs = imgs.to(device, non_blocking=str(device).startswith("cuda"))
             labels = torch.tensor([victim_labels[idx] for idx in batch_indices], device=device)
             
             imgs_repeated = imgs.unsqueeze(1).repeat(1, self.n_variants, 1, 1, 1).view(-1, *imgs.shape[1:])
@@ -855,7 +855,7 @@ class BlackboxDissector(AttackRunner):
             subset,
             batch_size=min(self.selection_batch_size, len(unlabeled_indices)),
             shuffle=False,
-            num_workers=0,
+            **pool_loader_kwargs(device),
         )
 
         current_idx_ptr = 0
@@ -865,7 +865,7 @@ class BlackboxDissector(AttackRunner):
                 batch_indices = unlabeled_indices[current_idx_ptr : current_idx_ptr + batch_size]
                 current_idx_ptr += batch_size
 
-                x_batch = x_batch.to(device)
+                x_batch = x_batch.to(device, non_blocking=str(device).startswith("cuda"))
                 x_variants = random_erase_batch(
                     x_batch,
                     n=self.n_variants,
