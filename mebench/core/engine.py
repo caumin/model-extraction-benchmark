@@ -10,6 +10,8 @@ from mebench.core.state import BenchmarkState
 from mebench.core.validate import validate_config
 from mebench.oracles.oracle import Oracle
 from mebench.oracles.victim_loader import load_victim_from_config
+from mebench.data.loaders import get_test_dataloader
+from mebench.eval.metrics import compute_accuracy
 from mebench.attackers.runner import AttackRunner
 from mebench.attackers.activethief import ActiveThief
 from mebench.attackers.blackbox_dissector import BlackboxDissector
@@ -128,6 +130,24 @@ def run_experiment(
 
         # Load victim model from checkpoint or placeholder
         victim = load_victim_from_config(config["victim"], device)
+
+        # [ADDED] Verify victim accuracy on test set
+        dataset_name = config.get("dataset", {}).get("name", "CIFAR10")
+        victim_cfg = config.get("victim", {})
+        input_size = victim_cfg.get("input_size")
+        size = None
+        if isinstance(input_size, (list, tuple)) and len(input_size) == 2:
+            size = (int(input_size[0]), int(input_size[1]))
+        channels = victim_cfg.get("channels")
+        
+        test_loader = get_test_dataloader(
+            dataset_name,
+            batch_size=128,
+            input_size=size,
+            channels=int(channels) if channels is not None else None,
+        )
+        victim_acc = compute_accuracy(victim, test_loader, device)
+        print(f"[VERIFY] Victim Test Accuracy: {victim_acc*100:.2f}%")
 
         # Initialize oracle
         oracle = Oracle(victim, config["victim"], state)
