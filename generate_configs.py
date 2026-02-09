@@ -127,8 +127,7 @@ def generate_configs(
                 "strategy": "dfal_k_center", 
                 "batch_size": 150,
                 "substitute": {
-                    "batch_size": 150,
-                    "optimizer": {"name": "adam", "lr": 0.001, "weight_decay": 5e-4}
+                    "batch_size": 150
                 }
             },
         ),
@@ -141,8 +140,7 @@ def generate_configs(
                 "variant": "uncertainty",
                 "batch_size": 150,
                 "substitute": {
-                    "batch_size": 150,
-                    "optimizer": {"name": "adam", "lr": 0.001, "weight_decay": 5e-4}
+                    "batch_size": 150
                 }
             },
         ),
@@ -155,8 +153,7 @@ def generate_configs(
                 "variant": "dfal",
                 "batch_size": 150,
                 "substitute": {
-                    "batch_size": 150,
-                    "optimizer": {"name": "adam", "lr": 0.001, "weight_decay": 5e-4}
+                    "batch_size": 150
                 }
             },
         ),

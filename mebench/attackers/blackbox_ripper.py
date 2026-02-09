@@ -201,12 +201,17 @@ class BlackboxRipper(AttackRunner):
             dropout_prob=dropout_prob,
         ).to(device)
 
-        self.substitute_optimizer = torch.optim.SGD(
-            self.substitute.parameters(),
-            lr=self.substitute_lr,
-            momentum=self.momentum,
-            weight_decay=self.weight_decay,
-        )
+        # [UNIFIED] Use runner's build_optimizer to respect config (LR, optimizer type)
+        opt_config = sub_config.get("optimizer", {})
+        # Override with specific BlackboxRipper defaults if not present in config
+        if "lr" not in opt_config:
+            opt_config["lr"] = self.substitute_lr
+        if "momentum" not in opt_config:
+            opt_config["momentum"] = self.momentum
+        if "weight_decay" not in opt_config:
+            opt_config["weight_decay"] = self.weight_decay
+            
+        self.substitute_optimizer = self._build_optimizer(self.substitute.parameters(), opt_config)
         self.substitute_loss = nn.BCELoss()
 
         # Make visible for FINAL EVAL even if budget ends early.

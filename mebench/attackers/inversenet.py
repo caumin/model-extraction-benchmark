@@ -282,9 +282,14 @@ class InverseNet(AttackRunner):
                 num_classes=self.num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
             ).to(device)
-            self.substitute_optimizer = torch.optim.SGD(
-                self.substitute.parameters(), lr=self.substitute_lr, momentum=0.9
-            )
+            
+            # [UNIFIED] Use runner's build_optimizer
+            sub_config = state.metadata.get("substitute_config", {})
+            opt_config = sub_config.get("optimizer", {})
+            if "lr" not in opt_config:
+                opt_config["lr"] = self.substitute_lr
+                
+            self.substitute_optimizer = self._build_optimizer(self.substitute.parameters(), opt_config)
 
         device = state.metadata.get("device", "cpu")
         query_x = state.attack_state.get("query_data_x", [])
@@ -425,6 +430,12 @@ class InverseNet(AttackRunner):
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
             ).to(device)
+            # [UNIFIED] Use runner's build_optimizer to respect config (LR, optimizer type)
+            opt_config = sub_config.get("optimizer", {})
+            if "lr" not in opt_config:
+                opt_config["lr"] = self.substitute_lr
+            
+            self.substitute_optimizer = self._build_optimizer(self.substitute.parameters(), opt_config)
         epochs = max(1, int(self.substitute_epochs))
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:

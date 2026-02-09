@@ -250,12 +250,8 @@ class GAME(AttackRunner):
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
             ).to(device)
-            self.student_optimizer = optim.SGD(
-                self.student.parameters(),
-                lr=float(opt_params.get("lr", 0.1)), # Config-driven LR
-                momentum=float(opt_params.get("momentum", 0.9)),
-                weight_decay=float(opt_params.get("weight_decay", 5e-4))
-            )
+            # [UNIFIED] Config-driven optimizer construction
+            self.student_optimizer = self._build_optimizer(self.student.parameters(), opt_params)
 
         if self.proxy_data is None:
             proxy_config = self.config.get("attack", {}).get("proxy_dataset")
