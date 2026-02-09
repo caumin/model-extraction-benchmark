@@ -129,7 +129,9 @@ class DFME(AttackRunner):
                 x = torch.clamp(x_raw * 0.5 + 0.5, 0.0, 1.0)
                 v_out = self._recover_logits(ctx.query(x).y.to(device))
                 s_out = self.student(x)
-                loss_base = torch.norm(v_out - s_out, p=1, dim=1) # L1 Loss (Eq. 5)
+                # [FIX] Align with Official Code (approximate_gradients.py line 90)
+                # Use mean(dim=1) over classes for gradient estimation signal
+                loss_base = torch.norm(v_out - s_out, p=1, dim=1) / v_out.size(1) 
                 
                 # Estimating Gradient
                 d = pre_tanh.view(pre_tanh.size(0), -1).size(1)
@@ -141,7 +143,8 @@ class DFME(AttackRunner):
                     x_pert = torch.clamp(x_pert_raw * 0.5 + 0.5, 0.0, 1.0)
                     v_pert = self._recover_logits(ctx.query(x_pert).y.to(device))
                     s_pert = self.student(x_pert)
-                    loss_pert = torch.norm(v_pert - s_pert, p=1, dim=1)
+                    # [FIX] Use mean(dim=1) here as well
+                    loss_pert = torch.norm(v_pert - s_pert, p=1, dim=1) / v_pert.size(1)
                     grad_est += (loss_pert - loss_base).view(-1, 1, 1, 1) * u
                 
                 self.g_opt.zero_grad()
@@ -168,9 +171,9 @@ class DFME(AttackRunner):
                 if batch < 2:
                     self.student.eval()
 
-                # [FIX] Align with Paper Eq. 5 (Sum reduction instead of Mean)
-                # Official DFME uses L1 Sum to maintain gradient magnitude.
-                loss = F.l1_loss(self.student(x), v_out, reduction="sum")
+                # [FIX] Align with Official Code (TEMP_DFME/dfme/train.py line 34)
+                # Official implementation uses default reduction='mean' for student update.
+                loss = F.l1_loss(self.student(x), v_out)
                 loss.backward(); self.s_opt.step()
 
                 if student_was_training:
