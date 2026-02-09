@@ -407,6 +407,8 @@ def train() -> None:
         arch=args.arch,
         num_classes=num_classes,
         input_channels=input_channels,
+        width_mult=1,
+        dropout_prob=0.0,
     ).to(device)
 
     optimizer = _build_optimizer(
