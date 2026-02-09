@@ -123,22 +123,50 @@ def generate_configs(
             "activethief",
             kind="pool",
             label_capability="both",
-            extra={"strategy": "dfal_k_center"},
+            extra={
+                "strategy": "dfal_k_center", 
+                "batch_size": 150,
+                "substitute": {
+                    "batch_size": 150,
+                    "optimizer": {"name": "adam", "lr": 0.001, "weight_decay": 5e-4}
+                }
+            },
         ),
         AttackSpec(
             "activethief",
             kind="pool",
             label_capability="both",
-            extra={"strategy": "uncertainty", "variant": "uncertainty"},
+            extra={
+                "strategy": "uncertainty", 
+                "variant": "uncertainty",
+                "batch_size": 150,
+                "substitute": {
+                    "batch_size": 150,
+                    "optimizer": {"name": "adam", "lr": 0.001, "weight_decay": 5e-4}
+                }
+            },
         ),
         AttackSpec(
             "activethief",
             kind="pool",
             label_capability="both",
-            extra={"strategy": "dfal", "variant": "dfal"},
+            extra={
+                "strategy": "dfal", 
+                "variant": "dfal",
+                "batch_size": 150,
+                "substitute": {
+                    "batch_size": 150,
+                    "optimizer": {"name": "adam", "lr": 0.001, "weight_decay": 5e-4}
+                }
+            },
         ),
         AttackSpec("swiftthief", kind="pool", label_capability="both"),
 
+        # [UNIFIED] All data-free attacks standardized to:
+        # - SGD Student (LR via setup)
+        # - Adam Generator (MAZE changed from SGD)
+        # - MultiStepLR (Handled in code now, not config)
+        
         AttackSpec("dfme", kind="synthetic", label_capability="soft_only"),
         AttackSpec("maze", kind="synthetic", label_capability="soft_only"),
         AttackSpec("game", kind="synthetic", label_capability="soft_only"),
@@ -195,11 +223,50 @@ def generate_configs(
                     if "variant" in attack_extra:
                         attack_variant = str(attack_extra.pop("variant"))
 
+                    # [ADDED] Allow attacks to override substitute config (e.g. ActiveThief needs Adam)
+                    substitute_override = attack_extra.pop("substitute", {})
+
                     attack_name_for_filename = attack.name
                     if attack_variant:
                         attack_name_for_filename = f"{attack.name}_{attack_variant}"
 
                     run_name = f"{setup.set_id}_{attack_name_for_filename}_{suffix_mode}_{suffix_budget}_seed{seed}"
+                    
+                    # [LR Logic]
+                    # SET-A (MNIST/LeNet): 0.01
+                    # SET-B (CIFAR10/ResNet): 0.1
+                    # Default: 0.1 (Data-Free Standard) if undetermined
+                    if "SET-A" in setup.set_id:
+                        target_lr = 0.01
+                    elif "SET-B" in setup.set_id:
+                        target_lr = 0.1
+                    else:
+                        target_lr = 0.1
+
+                    # Default substitute config
+                    substitute_config = {
+                        "arch": setup.substitute_arch,
+                        "init_seed": 1234 + seed,
+                        "batch_size": substitute_batch_size,
+                        "trackA": {"batch_size": substitute_batch_size, "steps_coeff_c": 0.2},
+                        "optimizer": {
+                            "name": "sgd",
+                            "lr": target_lr,
+                            "momentum": 0.9,
+                            "weight_decay": 5e-4,
+                        },
+                        "max_epochs": 1000,
+                        "patience": 100,
+                    }
+                    
+                    # Merge override recursively (simple 1-level merge for optimizer)
+                    if substitute_override:
+                        for k, v in substitute_override.items():
+                            if k == "optimizer" and isinstance(v, dict) and "optimizer" in substitute_config:
+                                substitute_config["optimizer"].update(v)
+                            else:
+                                substitute_config[k] = v
+
                     cfg: Dict[str, Any] = {
                         "run": {"name": run_name, "seeds": [seed], "device": device},
                         "benchmark": {"protocol_version": protocol_version},
@@ -228,20 +295,7 @@ def generate_configs(
                             "max_budget": max_budget,
                             **attack_extra,
                         },
-                        "substitute": {
-                            "arch": setup.substitute_arch,
-                            "init_seed": 1234 + seed,
-                            "batch_size": substitute_batch_size,
-                            "trackA": {"batch_size": substitute_batch_size, "steps_coeff_c": 0.2},
-                            "optimizer": {
-                                "name": "sgd",
-                                "lr": 0.01,
-                                "momentum": 0.9,
-                                "weight_decay": 5e-4,
-                            },
-                            "max_epochs": 1000,
-                            "patience": 100,
-                        },
+                        "substitute": substitute_config,
                         "budget": {"max_budget": max_budget, "checkpoints": checkpoints},
                         "cache": {
                             "enabled": True,

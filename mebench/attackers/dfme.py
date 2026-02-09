@@ -55,6 +55,15 @@ class DFME(AttackRunner):
         ).to(device)
         opt_config = sub_config.get("optimizer", {})
         self.s_opt = self._build_optimizer(self.student.parameters(), opt_config)
+        
+        # [ADDED] LR Schedulers as per DFME paper
+        # Generator: MultiStepLR at 10%, 30%, 50% of budget
+        # Student: MultiStepLR at 10%, 30%, 50% of budget
+        # Since we run in a query loop, we'll step the scheduler based on query count.
+        # But PyTorch schedulers expect step() to be called per epoch or iteration.
+        # We will wrap them and call step() manually in run().
+        
+        # NOTE: Scheduler initialization is deferred to run() where we know max_budget.
 
     def _recover_logits(self, probs: torch.Tensor) -> torch.Tensor:
         """Mean Correction for Logit Recovery (Section 3.2).
@@ -66,8 +75,39 @@ class DFME(AttackRunner):
     def run(self, ctx: BenchmarkContext) -> None:
         device = self.state.metadata.get("device", "cpu")
         pbar = self._create_progress_bar(ctx.budget_remaining, "[DFME] Extracting")
+        
+        # Initialize schedulers
+        # Milestones: 0.1, 0.3, 0.5 of TOTAL budget.
+        # We need total budget.
+        max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
+        # We calculate iterations approximately.
+        # Queries per iteration = (1 + m) * n_g + n_s * 1
+        # Approx: (1+1)*1 + 5*1 = 7 queries per loop (if batch=1).
+        # Actually it's batch-based.
+        # We can't easily map queries to epochs for standard schedulers.
+        # But we can just check query count and decay LR manually or use LambdaLR.
+        
+        # DFME paper: "learning rate is decayed by 0.3 at 10%, 30% and 50% of the training process"
+        milestones = [int(max_budget * p) for p in [0.1, 0.3, 0.5]]
+        gamma = 0.3
+        
+        # We will manually decay LR
+        self.milestones = sorted(milestones)
+        self.current_milestone_idx = 0
 
         while ctx.budget_remaining > 0:
+            # Check for LR decay
+            current_queries = self.state.query_count
+            if self.current_milestone_idx < len(self.milestones):
+                if current_queries >= self.milestones[self.current_milestone_idx]:
+                    # Decay LR
+                    for param_group in self.g_opt.param_groups:
+                        param_group['lr'] *= gamma
+                    for param_group in self.s_opt.param_groups:
+                        param_group['lr'] *= gamma
+                    self.logger.info(f"[DFME] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})")
+                    self.current_milestone_idx += 1
+
             total_queries = 1 + self.m
             max_g_batch = min(self.batch_size, ctx.budget_remaining // total_queries)
             max_s_batch = min(self.batch_size, ctx.budget_remaining)

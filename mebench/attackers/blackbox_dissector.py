@@ -1076,7 +1076,30 @@ class BlackboxDissector(AttackRunner):
             return loss_sup + loss_kd
 
         def eval_fn(model_local: nn.Module, loader: DataLoader) -> float:
-            return self._compute_f1(model_local, loader, device, norm_mean, norm_std)
+            # [FIX] Unify validation metric to Validation Loss (CrossEntropy)
+            # Previously used F1 Score. Standardizing to Val Loss for fair comparison.
+            model_local.eval()
+            total_loss = 0.0
+            total_count = 0
+            loss_func = nn.CrossEntropyLoss()
+            
+            # Use normalization if provided
+            victim_config = state.metadata.get("victim_config", {})
+            normalization = victim_config.get("normalization")
+            if normalization is None:
+                normalization = {"mean": [0.0], "std": [1.0]}
+            norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
+            norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+
+            with torch.no_grad():
+                for x, y in loader:
+                    x, y = x.to(device), y.to(device)
+                    x_norm = (x - norm_mean) / norm_std
+                    outputs = model_local(x_norm)
+                    loss = loss_func(outputs, y.long())
+                    total_loss += loss.item() * x.size(0)
+                    total_count += x.size(0)
+            return total_loss / total_count if total_count > 0 else float('inf')
 
         train_config = dict(sub_config)
         train_config["max_epochs"] = int(sub_config.get("max_epochs", self.max_epochs))
@@ -1088,7 +1111,7 @@ class BlackboxDissector(AttackRunner):
             step_fn=step_fn,
             val_loader=val_loader,
             eval_fn=eval_fn,
-            early_stop_mode="max",
+            early_stop_mode="min", # Minimizing Validation Loss
             load_best=True,
         )
         result = trainer.train(request)

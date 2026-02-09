@@ -622,10 +622,29 @@ class CloudLeak(AttackRunner):
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
+
+        # [FIX] Implement 80/20 Validation Split to prevent overfitting on small query sets
+        total_size = len(dataset)
+        val_size = max(1, int(0.2 * total_size))
+        train_size = total_size - val_size
+        
+        train_subset, val_subset = torch.utils.data.random_split(
+            dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42) # Deterministic split
+        )
+
         train_loader = torch.utils.data.DataLoader(
-            dataset,
+            train_subset,
             batch_size=train_batch_size,
             shuffle=True,
+            num_workers=0,
+        )
+        
+        val_loader = torch.utils.data.DataLoader(
+            val_subset,
+            batch_size=train_batch_size,
+            shuffle=False,
             num_workers=0,
         )
 
@@ -639,11 +658,45 @@ class CloudLeak(AttackRunner):
             for param in substitute.parameters():
                 param.requires_grad = True
 
+        # [FIX] Unify validation metric to Validation Loss (CrossEntropy or KL-Div)
+        # Previously used F1 Score, but we now standardize across all attacks.
+        def eval_fn(model: nn.Module, loader: DataLoader) -> float:
+            model.eval()
+            total_loss = 0.0
+            total_count = 0
+            
+            # Determine loss function based on targets shape/type
+            # CloudLeak targets can be soft (KL) or hard (CE)
+            # We inspect the first batch to decide
+            first_y = next(iter(loader))[1]
+            if first_y.ndim == 2:
+                loss_func = nn.KLDivLoss(reduction="batchmean")
+            else:
+                loss_func = nn.CrossEntropyLoss()
+                
+            with torch.no_grad():
+                for x, y in loader:
+                    x, y = x.to(device), y.to(device)
+                    outputs = model(x)
+                    
+                    if first_y.ndim == 2: # Soft labels
+                        log_probs = F.log_softmax(outputs, dim=1)
+                        loss = loss_func(log_probs, y)
+                    else: # Hard labels
+                        loss = loss_func(outputs, y.long())
+                        
+                    total_loss += loss.item() * x.size(0)
+                    total_count += x.size(0)
+            return total_loss / total_count if total_count > 0 else float('inf')
+
         trainer = SubstituteTrainer(sub_config, device=device, logger=self.logger)
         request = TrainRequest(
             model=substitute,
             train_loader=train_loader,
+            val_loader=val_loader,
+            eval_fn=eval_fn,
             loss_fn=self._compute_training_loss,
+            early_stop_mode="min",     # Minimizing Validation Loss
             load_best=True,
         )
         trainer.train(request)

@@ -168,29 +168,74 @@ class ActiveThief(AttackRunner):
 
         x_all = torch.cat(query_x, dim=0)
         y_all = torch.cat(query_y, dim=0)
-        labeled_dataset = torch.utils.data.TensorDataset(x_all, y_all)
+        full_dataset = torch.utils.data.TensorDataset(x_all, y_all)
+        
+        # Split into train/val (80/20) as per ActiveThief paper
+        total_len = len(full_dataset)
+        val_len = int(0.2 * total_len)
+        train_len = total_len - val_len
+        
+        # Use fixed generator for reproducibility if needed, or rely on global seed
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_len, val_len]
+        )
+
         train_batch_size = int(
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
+        
+        # Create loaders
         labeled_loader = DataLoader(
-            labeled_dataset,
+            train_dataset,
             batch_size=train_batch_size,
             shuffle=True,
             num_workers=0,
             pin_memory=str(device).startswith("cuda"),
         )
         
+        val_loader = None
+        if val_len > 0:
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=train_batch_size,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=str(device).startswith("cuda"),
+            )
+        
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
             return F.cross_entropy(outputs, targets.long())
+
+        # Validation evaluation function
+        def eval_fn(model: nn.Module, loader: DataLoader) -> float:
+            model.eval()
+            total_loss = 0.0
+            total_count = 0
+            with torch.no_grad():
+                for x, y in loader:
+                    x, y = x.to(device), y.to(device)
+                    outputs = model(x)
+                    loss = F.cross_entropy(outputs, y.long())
+                    total_loss += loss.item() * x.size(0)
+                    total_count += x.size(0)
+            return total_loss / total_count if total_count > 0 else float('inf')
+
+        # Ensure optimizer config defaults to Adam if not specified (ActiveThief specific)
+        # But SubstituteTrainer pulls from sub_config. We can inject it if missing?
+        # Better to handle it in generate_configs.py or let it be.
+        # Here we just pass the val_loader.
 
         trainer = SubstituteTrainer(sub_config, device=device, logger=self.logger)
         request = TrainRequest(
             model=self.substitute,
             train_loader=labeled_loader,
+            val_loader=val_loader,
+            eval_fn=eval_fn,
             loss_fn=loss_fn,
             skip_on_error=True,
             load_best=True,
+            early_stop_mode="min", # minimizing validation loss
         )
         trainer.train(request)
 

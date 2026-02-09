@@ -72,10 +72,34 @@ class GAME(AttackRunner):
         total_budget = self.state.budget_remaining
         pbar = self._create_progress_bar(total_budget, "[GAME] Extracting")
         
+        # [UNIFIED] MultiStepLR Scheduler (10%, 30%, 50% of budget)
+        max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
+        milestones = [int(max_budget * p) for p in [0.1, 0.3, 0.5]]
+        gamma = 0.3
+        self.milestones = sorted(milestones)
+        self.current_milestone_idx = 0
+        
         last_eval_queries = 0
         eval_interval = total_budget // 10
 
         while ctx.budget_remaining > 0:
+            # Check for LR decay
+            current_queries = self.state.query_count
+            if self.current_milestone_idx < len(self.milestones):
+                if current_queries >= self.milestones[self.current_milestone_idx]:
+                    # Decay optimizers
+                    if self.generator_optimizer:
+                        for param_group in self.generator_optimizer.param_groups:
+                            param_group['lr'] *= gamma
+                    if self.discriminator_optimizer:
+                        for param_group in self.discriminator_optimizer.param_groups:
+                            param_group['lr'] *= gamma
+                    if self.student_optimizer:
+                        for param_group in self.student_optimizer.param_groups:
+                            param_group['lr'] *= gamma
+                    self.logger.info(f"[GAME] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})")
+                    self.current_milestone_idx += 1
+
             step_size = self._default_step_size(ctx)
             x_query, meta = self._select_query_batch(step_size, self.state)
             if x_query.size(0) == 0:
@@ -228,7 +252,7 @@ class GAME(AttackRunner):
             ).to(device)
             self.student_optimizer = optim.SGD(
                 self.student.parameters(),
-                lr=float(opt_params.get("lr", self.student_lr)),
+                lr=float(opt_params.get("lr", 0.1)), # Config-driven LR
                 momentum=float(opt_params.get("momentum", 0.9)),
                 weight_decay=float(opt_params.get("weight_decay", 5e-4))
             )

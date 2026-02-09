@@ -54,7 +54,11 @@ class MAZE(AttackRunner):
             output_channels=input_shape[0], 
             output_size=input_shape[1]
         ).to(device)
-        self.g_opt = optim.SGD(self.generator.parameters(), lr=1e-4, momentum=0.5)
+        
+        # [UNIFIED] Use Adam for Generator (Stability) instead of SGD (Paper)
+        # Paper uses SGD lr=1e-4, but Adam 2e-4 is standard for DCGAN.
+        # We stick to Adam for robustness in the benchmark.
+        self.g_opt = optim.Adam(self.generator.parameters(), lr=2e-4, betas=(0.5, 0.999))
         
         # Clone: honor substitute config if provided
         sub_config = state.metadata.get("substitute_config", {})
@@ -68,14 +72,41 @@ class MAZE(AttackRunner):
             width_mult=width_mult,
             dropout_prob=dropout_prob,
         ).to(device)
-        opt_config = sub_config.get("optimizer", {})
-        self.c_opt = self._build_optimizer(self.clone.parameters(), opt_config)
-
+        
+        # [UNIFIED] Standard Student Optimizer (SGD)
+        # Config-driven LR to support SET-A (0.01) vs SET-B (0.1)
+        # Default to 0.1 if not specified (Data-Free Standard)
+        lr = float(opt_config.get("lr", 0.1))
+        self.c_opt = optim.SGD(
+            self.clone.parameters(),
+            lr=lr,
+            momentum=float(opt_config.get("momentum", 0.9)),
+            weight_decay=float(opt_config.get("weight_decay", 5e-4))
+        )
+        
     def run(self, ctx: BenchmarkContext) -> None:
         device = self.state.metadata.get("device", "cpu")
         pbar = self._create_progress_bar(ctx.budget_remaining, "[MAZE] Extracting")
+        
+        # [UNIFIED] MultiStepLR Scheduler (10%, 30%, 50% of budget)
+        max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
+        milestones = [int(max_budget * p) for p in [0.1, 0.3, 0.5]]
+        gamma = 0.3 # Standard decay factor
+        self.milestones = sorted(milestones)
+        self.current_milestone_idx = 0
 
         while ctx.budget_remaining > 0:
+            # Check for LR decay
+            current_queries = self.state.query_count
+            if self.current_milestone_idx < len(self.milestones):
+                if current_queries >= self.milestones[self.current_milestone_idx]:
+                    for param_group in self.g_opt.param_groups:
+                        param_group['lr'] *= gamma
+                    for param_group in self.c_opt.param_groups:
+                        param_group['lr'] *= gamma
+                    self.logger.info(f"[MAZE] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})")
+                    self.current_milestone_idx += 1
+
             total_queries = 1 + self.grad_approx_m
             max_g_batch = min(self.batch_size, ctx.budget_remaining // total_queries)
             max_s_batch = min(self.batch_size, ctx.budget_remaining)

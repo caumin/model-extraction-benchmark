@@ -133,6 +133,7 @@ class RandomBaseline(AttackRunner):
         state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
 
     def _train_substitute(self, state: BenchmarkState) -> None:
+        """Train substitute model with 80/20 validation split and early stopping."""
         query_x = state.attack_state.get("query_data_x", [])
         query_y = state.attack_state.get("query_data_y", [])
         if len(query_x) == 0:
@@ -140,19 +141,35 @@ class RandomBaseline(AttackRunner):
 
         x_all = torch.cat(query_x, dim=0)
         y_all = torch.cat(query_y, dim=0)
-        if x_all.size(0) < 2:
-            return
+        
+        # Ensure we have enough data for split
+        if x_all.size(0) < 10:
+             # Too few samples, fallback to simple training without split
+             self._train_substitute_simple(state, x_all, y_all)
+             return
+
+        # [FIX] Implement 80/20 Validation Split
+        total_size = x_all.size(0)
+        val_size = max(1, int(0.2 * total_size))
+        train_size = total_size - val_size
+        
+        full_dataset = torch.utils.data.TensorDataset(x_all, y_all)
+        train_subset, val_subset = torch.utils.data.random_split(
+            full_dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)
+        )
 
         sub_config = state.metadata.get("substitute_config", {})
         device = state.metadata.get("device", "cpu")
-
+        
+        # Create fresh substitute
         num_classes = int(
             state.metadata.get("num_classes")
             or state.metadata.get("victim_config", {}).get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
         input_channels = int(state.metadata.get("input_shape", (3, 32, 32))[0])
-
         width_mult = int(sub_config.get("width_mult", 1))
         dropout_prob = float(sub_config.get("dropout_prob", 0.0))
         substitute = create_substitute(
@@ -168,16 +185,47 @@ class RandomBaseline(AttackRunner):
             or sub_config.get("trackA", {}).get("batch_size")
             or int(self.config.get("batch_size", 128))
         )
-        loader = DataLoader(
-            torch.utils.data.TensorDataset(x_all, y_all),
+        
+        train_loader = DataLoader(
+            train_subset,
             batch_size=train_batch_size,
             shuffle=True,
             num_workers=0,
+            pin_memory=str(device).startswith("cuda"),
+        )
+        val_loader = DataLoader(
+            val_subset,
+            batch_size=train_batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=str(device).startswith("cuda"),
         )
 
         output_mode = str(self.config.get("output_mode", "soft_prob"))
+        
+        # [FIX] Use Loss for Early Stopping (minimizing val loss)
+        def eval_fn(model: nn.Module, loader: DataLoader) -> float:
+            model.eval()
+            total_loss = 0.0
+            total_count = 0
+            loss_func = nn.KLDivLoss(reduction="batchmean") if output_mode == "soft_prob" else nn.CrossEntropyLoss()
+            
+            with torch.no_grad():
+                for x, y in loader:
+                    x, y = x.to(device), y.to(device)
+                    outputs = model(x)
+                    if output_mode == "soft_prob":
+                        y = y.clamp_min(1e-10)
+                        y = y / y.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                        log_probs = torch.log_softmax(outputs, dim=1)
+                        loss = loss_func(log_probs, y)
+                    else:
+                        loss = loss_func(outputs, y.long())
+                    total_loss += loss.item() * x.size(0)
+                    total_count += x.size(0)
+            return total_loss / total_count if total_count > 0 else float('inf')
 
-        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        def train_loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
             if output_mode == "soft_prob":
                 targets = targets.clamp_min(1e-10)
                 targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
@@ -185,19 +233,70 @@ class RandomBaseline(AttackRunner):
                 return nn.KLDivLoss(reduction="batchmean")(log_probs, targets)
             return nn.CrossEntropyLoss()(outputs, targets.long())
 
-        # Use Track-A style step budget by default (keeps runtime bounded).
+        # Use Track-A style step budget
+        # BUT for RandomBaseline using validation split, we might want epochs + patience instead of fixed steps?
+        # Contract says: Track A = fixed steps coefficient.
+        # Track B (Random) = Attacker's native loop. 
+        # RandomBaseline usually doesn't have a specific native loop, so we stick to Track A style logic 
+        # but with validation-based early stopping to be fair with ActiveThief.
+        
+        # We'll use max_epochs with patience, but bound max_steps too if configured.
         steps_coeff_c = float(sub_config.get("trackA", {}).get("steps_coeff_c", 0.2))
-        max_steps = int(math.ceil(steps_coeff_c * x_all.size(0)))
-        max_steps = max(1, max_steps)
+        max_steps = int(math.ceil(steps_coeff_c * x_all.size(0))) # This is per-checkpoint training cost
+        
+        # NOTE: If we strictly follow Track A cost, we shouldn't use early stopping.
+        # However, user requested "valid split to implement early stopping".
+        # So we prioritize user request (fair comparison with ActiveThief).
+        # We will relax max_steps to allow early stopping to work, or use it as an upper bound.
+        
+        trainer = SubstituteTrainer(dict(sub_config), device=device, logger=self.logger)
+        request = TrainRequest(
+            model=substitute,
+            train_loader=train_loader,
+            val_loader=val_loader,     # [ADDED]
+            eval_fn=eval_fn,           # [ADDED]
+            loss_fn=train_loss_fn,
+            max_steps=max_steps,       # Upper bound from contract
+            early_stop_mode="min",     # Minimize Val Loss
+            load_best=True,
+        )
+        trainer.train(request)
+
+        state.attack_state["substitute"] = substitute
+
+    def _train_substitute_simple(self, state, x_all, y_all):
+        """Fallback for very small datasets."""
+        sub_config = state.metadata.get("substitute_config", {})
+        device = state.metadata.get("device", "cpu")
+        num_classes = int(state.metadata.get("num_classes") or 10)
+        input_channels = int(state.metadata.get("input_shape", (3, 32, 32))[0])
+        
+        substitute = create_substitute(
+            arch=sub_config.get("arch", "resnet18"),
+            num_classes=num_classes,
+            input_channels=input_channels,
+        ).to(device)
+        
+        loader = DataLoader(
+            torch.utils.data.TensorDataset(x_all, y_all),
+            batch_size=32,
+            shuffle=True
+        )
+        
+        output_mode = str(self.config.get("output_mode", "soft_prob"))
+        def loss_fn(outputs, targets):
+             if output_mode == "soft_prob":
+                targets = targets.clamp_min(1e-10)
+                targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                return nn.KLDivLoss(reduction="batchmean")(torch.log_softmax(outputs, dim=1), targets)
+             return nn.CrossEntropyLoss()(outputs, targets.long())
 
         trainer = SubstituteTrainer(dict(sub_config), device=device, logger=self.logger)
         request = TrainRequest(
             model=substitute,
             train_loader=loader,
             loss_fn=loss_fn,
-            max_steps=max_steps,
-            load_best=True,
+            max_steps=100, # Minimal steps
         )
         trainer.train(request)
-
         state.attack_state["substitute"] = substitute
