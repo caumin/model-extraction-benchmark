@@ -101,6 +101,15 @@ class SubstituteTrainer:
         patience_counter = 0
         steps_ran = 0
         stopped_early = False
+        
+        # [FEATURE] Optional tqdm progress bar if requested by caller config
+        # We check self.config explicitly for 'use_tqdm'
+        use_tqdm = bool(self.config.get("use_tqdm", False))
+        
+        # Helper for progress bar description
+        def get_pbar_desc(val_metric: Optional[float]) -> str:
+            val_str = f"{val_metric:.4f}" if val_metric is not None else "N/A"
+            return f"[Trainer] Epoch {epochs_ran+1}/{self.max_epochs} | Val: {val_str}"
 
         def is_improved(value: float) -> bool:
             if best_value is None:
@@ -123,6 +132,11 @@ class SubstituteTrainer:
             max_steps = int(max_steps)
             if max_steps <= 0:
                 return TrainResult(best_value=None, epochs_ran=0, steps_ran=0, stopped_early=False)
+            
+            pbar = None
+            if use_tqdm:
+                from tqdm import tqdm
+                pbar = tqdm(total=max_steps, desc="[Trainer] Steps", leave=False)
 
             while steps_ran < max_steps:
                 for x_batch, y_batch in req.train_loader:
@@ -147,6 +161,10 @@ class SubstituteTrainer:
                             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(self.grad_clip))
                         optimizer.step()
                         steps_ran += 1
+                        
+                        if pbar:
+                            pbar.update(1)
+                            
                     except ValueError:
                         if req.skip_on_error:
                             continue
@@ -156,6 +174,9 @@ class SubstituteTrainer:
                         value = run_validation()
                         if value is None:
                             value = float(loss.item())
+                        
+                        if pbar:
+                            pbar.set_postfix({"val": f"{value:.4f}", "best": f"{best_value:.4f}" if best_value else "None"})
 
                         if is_improved(value):
                             best_value = value
@@ -168,9 +189,12 @@ class SubstituteTrainer:
                                 if patience_counter >= self.patience:
                                     stopped_early = True
                                     break
-
+                
                 if stopped_early:
                     break
+            
+            if pbar:
+                pbar.close()
 
             if req.load_best and best_state is not None:
                 model.load_state_dict(best_state)
@@ -183,6 +207,11 @@ class SubstituteTrainer:
             )
 
         epochs_ran = 0
+        pbar = None
+        if use_tqdm:
+            from tqdm import tqdm
+            pbar = tqdm(total=self.max_epochs, desc="[Trainer] Epochs", leave=False)
+            
         for epoch in range(self.max_epochs):
             epoch_loss = 0.0
             batch_count = 0
@@ -222,6 +251,10 @@ class SubstituteTrainer:
             if value is None:
                 value = epoch_loss / batch_count
 
+            if pbar:
+                pbar.update(1)
+                pbar.set_postfix({"val": f"{value:.4f}", "patience": f"{patience_counter}/{self.patience}"})
+
             if is_improved(value):
                 best_value = value
                 patience_counter = 0
@@ -233,6 +266,9 @@ class SubstituteTrainer:
                     if patience_counter >= self.patience:
                         stopped_early = True
                         break
+        
+        if pbar:
+            pbar.close()
 
         if req.load_best and best_state is not None:
             model.load_state_dict(best_state)

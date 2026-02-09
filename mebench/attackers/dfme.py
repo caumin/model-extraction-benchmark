@@ -74,6 +74,7 @@ class DFME(AttackRunner):
 
     def run(self, ctx: BenchmarkContext) -> None:
         device = self.state.metadata.get("device", "cpu")
+        # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         pbar = self._create_progress_bar(ctx.budget_remaining, "[DFME] Extracting")
         
         # Initialize schedulers

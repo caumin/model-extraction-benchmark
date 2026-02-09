@@ -226,7 +226,11 @@ class ActiveThief(AttackRunner):
         # Better to handle it in generate_configs.py or let it be.
         # Here we just pass the val_loader.
 
-        trainer = SubstituteTrainer(sub_config, device=device, logger=self.logger)
+        # [FEATURE] Enable TQDM for substitute training visualization
+        sub_config_with_tqdm = dict(sub_config)
+        sub_config_with_tqdm["use_tqdm"] = True
+        
+        trainer = SubstituteTrainer(sub_config_with_tqdm, device=device, logger=self.logger)
         request = TrainRequest(
             model=self.substitute,
             train_loader=labeled_loader,

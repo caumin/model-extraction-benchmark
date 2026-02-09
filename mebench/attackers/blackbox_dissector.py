@@ -1104,6 +1104,8 @@ class BlackboxDissector(AttackRunner):
         train_config = dict(sub_config)
         train_config["max_epochs"] = int(sub_config.get("max_epochs", self.max_epochs))
         train_config["patience"] = int(sub_config.get("patience", self.patience))
+        train_config["use_tqdm"] = True  # [FEATURE] Enable TQDM
+        
         trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
         request = TrainRequest(
             model=model,

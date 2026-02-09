@@ -249,7 +249,11 @@ class RandomBaseline(AttackRunner):
         # So we prioritize user request (fair comparison with ActiveThief).
         # We will relax max_steps to allow early stopping to work, or use it as an upper bound.
         
-        trainer = SubstituteTrainer(dict(sub_config), device=device, logger=self.logger)
+        # [FEATURE] Enable TQDM for substitute training visualization
+        sub_config_with_tqdm = dict(sub_config)
+        sub_config_with_tqdm["use_tqdm"] = True
+        
+        trainer = SubstituteTrainer(sub_config_with_tqdm, device=device, logger=self.logger)
         request = TrainRequest(
             model=substitute,
             train_loader=train_loader,

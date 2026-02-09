@@ -689,7 +689,11 @@ class CloudLeak(AttackRunner):
                     total_count += x.size(0)
             return total_loss / total_count if total_count > 0 else float('inf')
 
-        trainer = SubstituteTrainer(sub_config, device=device, logger=self.logger)
+        # [FEATURE] Enable TQDM for substitute training visualization
+        sub_config_with_tqdm = dict(sub_config)
+        sub_config_with_tqdm["use_tqdm"] = True
+
+        trainer = SubstituteTrainer(sub_config_with_tqdm, device=device, logger=self.logger)
         request = TrainRequest(
             model=substitute,
             train_loader=train_loader,

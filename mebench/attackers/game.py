@@ -70,6 +70,7 @@ class GAME(AttackRunner):
         self._query_fn = ctx.query
         device = self.state.metadata.get("device", "cpu")
         total_budget = self.state.budget_remaining
+        # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         pbar = self._create_progress_bar(total_budget, "[GAME] Extracting")
         
         # [UNIFIED] MultiStepLR Scheduler (10%, 30%, 50% of budget)

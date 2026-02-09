@@ -66,7 +66,9 @@ class DFMSHL(AttackRunner):
         self.victim = ctx.oracle.model
         device = self.state.metadata.get("device", "cpu")
         total_budget = self.state.budget_remaining
-        pbar = tqdm(total=total_budget, desc="[DFMSHL] Extracting")
+        # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
+        # Replaced manual tqdm with self._create_progress_bar for consistency
+        pbar = self._create_progress_bar(total_budget, "[DFMSHL] Extracting")
         
         # [UNIFIED] MultiStepLR Scheduler (10%, 30%, 50% of budget)
         max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
