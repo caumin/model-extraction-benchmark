@@ -337,11 +337,15 @@ def create_substitute(
     arch = str(arch).lower()
     if arch == "resnet18":
         _require_torchvision_3ch_input("resnet18", input_channels)
-        if int(width_mult) != 1:
-            raise ValueError("Torchvision resnet18 does not support width_mult; use width_mult=1")
-        if float(dropout_prob) != 0.0:
-            raise ValueError("Torchvision resnet18 does not support dropout_prob; use dropout_prob=0.0")
-        return models.resnet18(weights=None, num_classes=int(num_classes))
+        # [FIX] Use CIFAR-style ResNet (no maxpool, 3x3 stem) defined above 
+        # instead of ImageNet-style torchvision.models.resnet18.
+        # This is critical for 32x32 inputs to avoid aggressive downsampling.
+        return ResNet(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            width_mult=width_mult,
+            dropout_prob=dropout_prob
+        )
     elif arch == "alexnet":
         _require_torchvision_3ch_input("alexnet", input_channels)
         if int(width_mult) != 1:

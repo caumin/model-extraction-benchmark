@@ -168,7 +168,9 @@ class DFME(AttackRunner):
                 if batch < 2:
                     self.student.eval()
 
-                loss = F.l1_loss(self.student(x), v_out)
+                # [FIX] Align with Paper Eq. 5 (Sum reduction instead of Mean)
+                # Official DFME uses L1 Sum to maintain gradient magnitude.
+                loss = F.l1_loss(self.student(x), v_out, reduction="sum")
                 loss.backward(); self.s_opt.step()
 
                 if student_was_training:
