@@ -76,6 +76,7 @@ class MAZE(AttackRunner):
         # [UNIFIED] Standard Student Optimizer (SGD)
         # Config-driven LR to support SET-A (0.01) vs SET-B (0.1)
         # Default to 0.1 if not specified (Data-Free Standard)
+        opt_config = sub_config.get("optimizer", {})
         lr = float(opt_config.get("lr", 0.1))
         self.c_opt = optim.SGD(
             self.clone.parameters(),
