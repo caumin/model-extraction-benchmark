@@ -215,4 +215,77 @@ class SubstituteTrainer:
         epochs_ran = 0
         pbar = None
         if use_tqdm:
-            from tqdm import 
+            from tqdm import tqdm
+            pbar = tqdm(total=self.max_epochs, desc="[Trainer] Epochs", leave=False)
+            
+        for epoch in range(self.max_epochs):
+            # [OPTIMIZATION] Use tensor for loss accumulation to avoid syncs
+            epoch_loss_tensor = torch.tensor(0.0, device=self.device)
+            batch_count = 0
+
+            for x_batch, y_batch in req.train_loader:
+                try:
+                    x_batch = x_batch.to(self.device)
+                    y_batch = y_batch.to(self.device)
+                    if req.preprocess_fn is not None:
+                        x_batch = req.preprocess_fn(x_batch)
+
+                    if req.step_fn is None:
+                        outputs = model(x_batch)
+                        loss = req.loss_fn(outputs, y_batch)
+                    else:
+                        loss = req.step_fn(model, x_batch, y_batch)
+
+                    optimizer.zero_grad()
+                    loss.backward()
+                    if self.grad_clip is not None:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(self.grad_clip))
+                    optimizer.step()
+
+                    # [OPTIMIZATION] Accumulate as tensor to avoid .item() sync point per batch
+                    epoch_loss_tensor += loss.detach()
+                    batch_count += 1
+                    steps_ran += 1
+                except ValueError:
+                    if req.skip_on_error:
+                        continue
+                    raise
+
+            if batch_count == 0:
+                break
+
+            epochs_ran += 1
+            value = run_validation()
+            if value is None:
+                # [OPTIMIZATION] Only call .item() once at the end of epoch
+                value = (epoch_loss_tensor / batch_count).item()
+
+            if pbar:
+                pbar.update(1)
+                pbar.set_postfix({"val": f"{value:.4f}", "patience": f"{patience_counter}/{self.patience}"})
+
+            if is_improved(value):
+                best_value = value
+                patience_counter = 0
+                if req.load_best:
+                    # [OPTIMIZATION] Keep best state in GPU to avoid PCI-e overhead
+                    best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            else:
+                if self.patience is not None:
+                    patience_counter += 1
+                    if patience_counter >= self.patience:
+                        stopped_early = True
+                        break
+        
+        if pbar:
+            pbar.close()
+
+        if req.load_best and best_state is not None:
+            model.load_state_dict(best_state)
+
+        return TrainResult(
+            best_value=best_value,
+            epochs_ran=epochs_ran,
+            steps_ran=steps_ran,
+            stopped_early=stopped_early,
+        )
