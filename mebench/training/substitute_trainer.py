@@ -127,16 +127,28 @@ class SubstituteTrainer:
 
     def _setup_optimizer(self, model: nn.Module) -> optim.Optimizer:
         """Configure optimizer based on config."""
-        lr = float(self.config.get("lr", 0.01))
-        weight_decay = float(self.config.get("weight_decay", 5e-4))
-        momentum = float(self.config.get("momentum", 0.9))
-        opt_name = self.config.get("optimizer", "SGD")
+        opt_config = self.config.get("optimizer", "SGD")
+        
+        if isinstance(opt_config, dict):
+            opt_name = opt_config.get("name", "SGD")
+            lr = float(opt_config.get("lr", self.config.get("lr", 0.01)))
+            weight_decay = float(opt_config.get("weight_decay", self.config.get("weight_decay", 5e-4)))
+            momentum = float(opt_config.get("momentum", self.config.get("momentum", 0.9)))
+        else:
+            opt_name = opt_config
+            lr = float(self.config.get("lr", 0.01))
+            weight_decay = float(self.config.get("weight_decay", 5e-4))
+            momentum = float(self.config.get("momentum", 0.9))
 
-        if opt_name.lower() == "adam":
+        if str(opt_name).lower() == "adam":
+            betas = (0.9, 0.999)
+            if isinstance(opt_config, dict) and "betas" in opt_config:
+                betas = tuple(opt_config["betas"])
             return optim.Adam(
                 model.parameters(),
                 lr=lr,
-                weight_decay=weight_decay
+                weight_decay=weight_decay,
+                betas=betas
             )
         else:
             return optim.SGD(
