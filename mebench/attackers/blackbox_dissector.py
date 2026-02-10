@@ -425,7 +425,8 @@ class BlackboxDissector(AttackRunner):
         self.l2_reg = float(config.get("l2_reg", 5e-4))
         
         # Selection batch size (for GPU efficiency)
-        self.selection_batch_size = int(config.get("selection_batch_size", 64))
+        # [OPTIMIZATION] Increased to 512 for better 4090 utilization during Grad-CAM backprop
+        self.selection_batch_size = int(config.get("selection_batch_size", 512))
 
         # Algorithm 2 (outer loop) iterative max-budget sequence.
         self.iterative_budgets = config.get("iterative_budgets")

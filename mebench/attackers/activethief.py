@@ -254,6 +254,7 @@ class ActiveThief(AttackRunner):
         """
         # Compute entropy
         entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
+        # [OPTIMIZATION] topk on GPU is much faster
         _, indices = torch.topk(entropy, k)
         return indices.cpu().tolist()
 
@@ -325,7 +326,8 @@ class ActiveThief(AttackRunner):
                 x_batch = x_batch.to(device, non_blocking=non_blocking)
                 logits = self.substitute(x_batch)
                 probs = F.softmax(logits, dim=1)
-                all_probs.append(probs.cpu())
+                # [OPTIMIZATION] Keep on GPU to avoid Host-Device transfer bottleneck
+                all_probs.append(probs.detach())
         return torch.cat(all_probs, dim=0)
 
     def _deepfool_distance_dfal_chunk(

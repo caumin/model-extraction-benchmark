@@ -214,7 +214,8 @@ class SubstituteTrainer:
             pbar = tqdm(total=self.max_epochs, desc="[Trainer] Epochs", leave=False)
             
         for epoch in range(self.max_epochs):
-            epoch_loss = 0.0
+            # [OPTIMIZATION] Use tensor for loss accumulation to avoid syncs
+            epoch_loss_tensor = torch.tensor(0.0, device=self.device)
             batch_count = 0
 
             for x_batch, y_batch in req.train_loader:
@@ -236,7 +237,8 @@ class SubstituteTrainer:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(self.grad_clip))
                     optimizer.step()
 
-                    epoch_loss += float(loss.item())
+                    # [OPTIMIZATION] Accumulate as tensor to avoid .item() sync point per batch
+                    epoch_loss_tensor += loss.detach()
                     batch_count += 1
                     steps_ran += 1
                 except ValueError:
@@ -250,7 +252,8 @@ class SubstituteTrainer:
             epochs_ran += 1
             value = run_validation()
             if value is None:
-                value = epoch_loss / batch_count
+                # [OPTIMIZATION] Only call .item() once at the end of epoch
+                value = (epoch_loss_tensor / batch_count).item()
 
             if pbar:
                 pbar.update(1)
