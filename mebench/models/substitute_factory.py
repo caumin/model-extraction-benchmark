@@ -6,6 +6,8 @@ import torch.nn as nn
 from torchvision import models
 
 
+from mebench.models.activethief_cnn import ActiveThiefCNN
+
 def _require_torchvision_3ch_input(arch: str, input_channels: int) -> None:
     """Torchvision classification models assume 3-channel images.
 
@@ -359,6 +361,12 @@ def create_substitute(
         return LeNet(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
     elif arch == "lenet_mnist":
         return LeNet5MNIST(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
+    elif arch == "activethief_cnn":
+        return ActiveThiefCNN(
+            num_classes=num_classes, 
+            input_channels=input_channels, 
+            dropout_prob=dropout_prob
+        )
     else:
         raise ValueError(f"Unknown architecture: {arch}")
 
@@ -387,6 +395,10 @@ def get_model_info(arch: str) -> Dict[str, Any]:
         },
         "lenet_mnist": {
             "num_params": 61706,
+            "default_width": 1,
+        },
+        "activethief_cnn": {
+            "num_params": 0, # TBD
             "default_width": 1,
         },
     }
