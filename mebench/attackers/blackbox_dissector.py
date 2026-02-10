@@ -449,7 +449,18 @@ class BlackboxDissector(AttackRunner):
 
         pbar = tqdm(total=self.state.budget_remaining, desc="[BlackboxDissector] Extracting")
         while ctx.budget_remaining > 0:
-            step_size = self._default_step_size(ctx)
+            # [OPTIMIZATION] Set step_size to the delta until the next iteration milestone.
+            # This follows the official implementation which queries in round-sized chunks
+            # instead of small fixed batches, avoiding redundant heavy selection logic.
+            target_q = int(self.state.attack_state.get("iter_target_q", 0))
+            current_q = int(self.state.query_count)
+            step_size = max(0, target_q - current_q)
+            
+            if step_size == 0:
+                # If target is reached, use a small step to trigger the advance logic
+                step_size = 1
+            
+            step_size = min(step_size, ctx.budget_remaining)
             
             # [FEATURE] Detailed logging for selection phase
             pbar.set_description(f"[BlackboxDissector] Selecting (k={step_size})")
