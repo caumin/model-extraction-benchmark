@@ -182,7 +182,8 @@ class SubstituteTrainer:
                             best_value = value
                             patience_counter = 0
                             if req.load_best:
-                                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                                # [OPTIMIZATION] Keep best state in GPU to avoid PCI-e overhead
+                                best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
                         else:
                             if self.patience is not None:
                                 patience_counter += 1
@@ -259,7 +260,8 @@ class SubstituteTrainer:
                 best_value = value
                 patience_counter = 0
                 if req.load_best:
-                    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    # [OPTIMIZATION] Keep best state in GPU to avoid PCI-e overhead
+                    best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             else:
                 if self.patience is not None:
                     patience_counter += 1
