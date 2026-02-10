@@ -70,7 +70,7 @@ class ActiveThief(AttackRunner):
             seed_k = min(initial_seed_size, ctx.budget_remaining)
             if seed_k > 0:
                 self.logger.info(f"Querying initial seed of size {seed_k}")
-                self._query_batch(seed_k, self.state, strategy="random")
+                self._query_batch(seed_k, self.state, ctx=ctx, strategy="random")
         
         # 2. Active Loop
         step_size = int(self.config.get("step_size", self._default_step_size(ctx)))
