@@ -450,13 +450,24 @@ class BlackboxDissector(AttackRunner):
         pbar = tqdm(total=self.state.budget_remaining, desc="[BlackboxDissector] Extracting")
         while ctx.budget_remaining > 0:
             step_size = self._default_step_size(ctx)
+            
+            # [FEATURE] Detailed logging for selection phase
+            pbar.set_description(f"[BlackboxDissector] Selecting (k={step_size})")
             query_batch = self._select_query_batch(step_size, self.state)
+            
             if int(query_batch.x.size(0)) == 0:
                 if query_batch.meta.get("stage") == "noop":
+                    pbar.set_description("[BlackboxDissector] Advancing Iteration")
                     self._advance_iteration_if_needed(self.state)
                 continue
+            
+            pbar.set_description("[BlackboxDissector] Querying Oracle")
             oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+            
+            pbar.set_description("[BlackboxDissector] Updating State")
             self._handle_oracle_output(query_batch, oracle_output, self.state)
+            
+            pbar.set_description("[BlackboxDissector] Extracting")
             pbar.update(query_batch.x.size(0))
         pbar.close()
 
@@ -757,6 +768,15 @@ class BlackboxDissector(AttackRunner):
         
         current_idx_ptr = 0
         
+        # [FEATURE] Detailed sub-progress bar for CAM scoring
+        sel_pbar = tqdm(
+            total=len(transfer_indices), 
+            desc=" > [CAM Selection]", 
+            leave=False, 
+            unit="img",
+            disable=len(transfer_indices) < self.selection_batch_size
+        )
+        
         for imgs, _ in candidate_loader:
             batch_size = imgs.size(0)
             batch_indices = transfer_indices[current_idx_ptr : current_idx_ptr + batch_size]
@@ -795,7 +815,10 @@ class BlackboxDissector(AttackRunner):
             for i, idx in enumerate(batch_indices):
                 state.attack_state["best_variant_img"][idx] = best_imgs[i].cpu()
                 scored.append((idx, float(best_msps[i].item())))
-
+            
+            sel_pbar.update(batch_size)
+        
+        sel_pbar.close()
         scored.sort(key=lambda x: x[1], reverse=True)
         # BATCH PROCESSING END
         k_eff = min(k_eff, len(scored))
@@ -860,6 +883,15 @@ class BlackboxDissector(AttackRunner):
         )
 
         current_idx_ptr = 0
+        # [FEATURE] Detailed sub-progress bar for Pseudo-label generation
+        pseudo_pbar = tqdm(
+            total=len(unlabeled_indices),
+            desc=" > [Pseudo-Labeling]",
+            leave=False,
+            unit="img",
+            disable=len(unlabeled_indices) < self.selection_batch_size
+        )
+        
         with torch.no_grad():
             for x_batch, _ in loader:
                 batch_size = x_batch.size(0)
@@ -885,7 +917,10 @@ class BlackboxDissector(AttackRunner):
 
                 for i, idx in enumerate(batch_indices):
                     pseudo_labels[int(idx)] = soft_targets[i].detach().cpu()
-
+                
+                pseudo_pbar.update(batch_size)
+        
+        pseudo_pbar.close()
         state.attack_state["pseudo_labels"] = pseudo_labels
 
     def train_substitute(self, state: BenchmarkState) -> None:
