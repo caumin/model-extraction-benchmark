@@ -44,7 +44,11 @@ class DFME(AttackRunner):
         # Student: honor substitute config if provided
         sub_config = state.metadata.get("substitute_config", {})
         arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18-8x")
-        width_mult = int(sub_config.get("width_mult", 1))
+        # [FIX] Paper uses ResNet18-8x. If config requests "resnet18" without width, default to 8.
+        if arch == "resnet18" and "width_mult" not in sub_config:
+            width_mult = 8
+        else:
+            width_mult = int(sub_config.get("width_mult", 1))
         dropout_prob = float(sub_config.get("dropout_prob", 0.0))
         self.student = create_substitute(
             arch=arch,
@@ -128,7 +132,8 @@ class DFME(AttackRunner):
                 # Benchmark contract: oracle inputs are in [0, 1] (no mean/std normalization).
                 x = torch.clamp(x_raw * 0.5 + 0.5, 0.0, 1.0)
                 v_out = self._recover_logits(ctx.query(x).y.to(device))
-                s_out = self.student(x)
+                with torch.no_grad():
+                    s_out = self.student(x)
                 # [FIX] Align with Official Code (approximate_gradients.py line 90)
                 # Use mean(dim=1) over classes for gradient estimation signal
                 loss_base = torch.norm(v_out - s_out, p=1, dim=1) / v_out.size(1) 
@@ -142,7 +147,8 @@ class DFME(AttackRunner):
                     x_pert_raw = torch.tanh(pre_tanh + self.epsilon * u)
                     x_pert = torch.clamp(x_pert_raw * 0.5 + 0.5, 0.0, 1.0)
                     v_pert = self._recover_logits(ctx.query(x_pert).y.to(device))
-                    s_pert = self.student(x_pert)
+                    with torch.no_grad():
+                        s_pert = self.student(x_pert)
                     # [FIX] Use mean(dim=1) here as well
                     loss_pert = torch.norm(v_pert - s_pert, p=1, dim=1) / v_pert.size(1)
                     grad_est += (loss_pert - loss_base).view(-1, 1, 1, 1) * u
