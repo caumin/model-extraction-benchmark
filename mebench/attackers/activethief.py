@@ -35,6 +35,8 @@ class ActiveThief(AttackRunner):
         state.attack_state.setdefault("unqueried_indices", [])
         state.attack_state.setdefault("query_data_x", [])
         state.attack_state.setdefault("query_data_y", [])
+        state.attack_state.setdefault("val_query_data_x", [])
+        state.attack_state.setdefault("val_query_data_y", [])
         state.attack_state.setdefault("substitute", None)
 
     def _ensure_pool_dataset(self, state: BenchmarkState) -> None:
@@ -68,12 +70,36 @@ class ActiveThief(AttackRunner):
         
         # 1. Initial Seed (Random)
         initial_seed_size = int(self.config.get("initial_seed_size", 100))
+        validation_seed_ratio = float(self.config.get("validation_seed_ratio", 0.2))
         # If we haven't queried anything yet
         if len(self.state.attack_state["queried_indices"]) == 0:
             seed_k = min(initial_seed_size, ctx.budget_remaining)
             if seed_k > 0:
-                self.logger.info(f"Querying initial seed of size {seed_k}")
-                self._query_batch(seed_k, self.state, ctx=ctx, strategy="random")
+                val_seed_k = 0
+                if seed_k > 1 and validation_seed_ratio > 0.0:
+                    val_seed_k = int(round(seed_k * validation_seed_ratio))
+                    val_seed_k = max(1, min(seed_k - 1, val_seed_k))
+                train_seed_k = seed_k - val_seed_k
+
+                self.logger.info(
+                    f"Querying initial seed: train={train_seed_k}, val={val_seed_k}"
+                )
+                if val_seed_k > 0:
+                    self._query_batch(
+                        val_seed_k,
+                        self.state,
+                        ctx=ctx,
+                        strategy="random",
+                        dataset_role="validation",
+                    )
+                if train_seed_k > 0:
+                    self._query_batch(
+                        train_seed_k,
+                        self.state,
+                        ctx=ctx,
+                        strategy="random",
+                        dataset_role="train",
+                    )
         
         # 2. Active Loop
         step_size = int(self.config.get("step_size", self._default_step_size(ctx)))
@@ -109,7 +135,15 @@ class ActiveThief(AttackRunner):
         final_substitute = self._train_substitute(self.state)
         self.state.attack_state["substitute"] = final_substitute
 
-    def _query_batch(self, k: int, state: BenchmarkState, ctx: BenchmarkContext, strategy: str, substitute: nn.Module = None) -> int:
+    def _query_batch(
+        self,
+        k: int,
+        state: BenchmarkState,
+        ctx: BenchmarkContext,
+        strategy: str,
+        substitute: nn.Module = None,
+        dataset_role: str = "train",
+    ) -> int:
         indices = self._select_indices(k, state, strategy, substitute)
         
         if not indices:
@@ -120,10 +154,14 @@ class ActiveThief(AttackRunner):
         
         query_batch = QueryBatch(x=x_batch, meta={"strategy": strategy, "synthetic": False})
         oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
-        
+
         # Update state
-        state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
-        state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
+        if dataset_role == "validation":
+            state.attack_state["val_query_data_x"].append(query_batch.x.detach().cpu())
+            state.attack_state["val_query_data_y"].append(oracle_output.y.detach().cpu())
+        else:
+            state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
+            state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
         
         for idx in indices:
             if idx in state.attack_state["unqueried_indices"]:
@@ -207,32 +245,40 @@ class ActiveThief(AttackRunner):
         return selected_indices
 
     def _train_substitute(self, state: BenchmarkState) -> nn.Module:
-        """Train substitute model with 80/20 validation split."""
+        """Train substitute model with fixed validation when available."""
         query_x = state.attack_state.get("query_data_x", [])
         query_y = state.attack_state.get("query_data_y", [])
+        val_query_x = state.attack_state.get("val_query_data_x", [])
+        val_query_y = state.attack_state.get("val_query_data_y", [])
         
         if len(query_x) == 0:
              # Should not happen if initial seed is queried
              return None
 
-        x_all = torch.cat(query_x, dim=0)
-        y_all = torch.cat(query_y, dim=0)
+        x_train_all = torch.cat(query_x, dim=0)
+        y_train_all = torch.cat(query_y, dim=0)
         
         # Ensure sufficient data
-        if x_all.size(0) < 10:
-             return self._train_substitute_simple(state, x_all, y_all)
+        if x_train_all.size(0) < 10:
+             return self._train_substitute_simple(state, x_train_all, y_train_all)
 
-        # 80/20 Split
-        total_size = x_all.size(0)
-        val_size = max(1, int(0.2 * total_size))
-        train_size = total_size - val_size
-        
-        full_dataset = TensorDataset(x_all, y_all)
-        train_subset, val_subset = torch.utils.data.random_split(
-            full_dataset, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)
-        )
+        if len(val_query_x) > 0 and len(val_query_y) > 0:
+            x_val_all = torch.cat(val_query_x, dim=0)
+            y_val_all = torch.cat(val_query_y, dim=0)
+            train_dataset = TensorDataset(x_train_all, y_train_all)
+            val_dataset = TensorDataset(x_val_all, y_val_all)
+            train_size = x_train_all.size(0)
+        else:
+            total_size = x_train_all.size(0)
+            val_size = max(1, int(0.2 * total_size))
+            train_size = total_size - val_size
+
+            full_dataset = TensorDataset(x_train_all, y_train_all)
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                full_dataset,
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(42)
+            )
         
         # Create Substitute
         sub_config = state.metadata.get("substitute_config", {}) or self.config.get("substitute", {})
@@ -247,7 +293,7 @@ class ActiveThief(AttackRunner):
         ).to(self.device)
         
         train_loader = DataLoader(
-            train_subset,
+            train_dataset,
             batch_size=int(sub_config.get("batch_size", 128)),
             shuffle=True,
             **pool_loader_kwargs(
@@ -263,7 +309,7 @@ class ActiveThief(AttackRunner):
             ),
         )
         val_loader = DataLoader(
-            val_subset,
+            val_dataset,
             batch_size=int(sub_config.get("batch_size", 128)),
             shuffle=False,
             **pool_loader_kwargs(
