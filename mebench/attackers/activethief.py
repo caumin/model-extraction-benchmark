@@ -68,18 +68,42 @@ class ActiveThief(AttackRunner):
         self.victim = ctx.oracle.model
         self._ensure_pool_dataset(self.state)
         
-        # 1. Initial Seed (Random)
-        initial_seed_size = int(self.config.get("initial_seed_size", 100))
-        validation_seed_ratio = float(self.config.get("validation_seed_ratio", 0.2))
+        # 1. Initial Seed / Fixed Validation from budget
+        max_budget = int(self.state.metadata.get("max_budget", self.config.get("max_budget", 0)))
+        initial_seed_ratio = float(self.config.get("initial_seed_ratio", 0.1))
+        validation_budget_ratio = float(
+            self.config.get("validation_budget_ratio", self.config.get("validation_seed_ratio", 0.2))
+        )
+
+        if "initial_seed_size" in self.config:
+            initial_seed_target = int(self.config.get("initial_seed_size", 0))
+        elif max_budget > 0:
+            initial_seed_target = int(round(max_budget * initial_seed_ratio))
+        else:
+            initial_seed_target = 100
+
+        if "validation_seed_size" in self.config:
+            validation_seed_target = int(self.config.get("validation_seed_size", 0))
+        elif "validation_budget_size" in self.config:
+            validation_seed_target = int(self.config.get("validation_budget_size", 0))
+        elif max_budget > 0:
+            validation_seed_target = int(round(max_budget * validation_budget_ratio))
+        else:
+            validation_seed_target = max(0, int(round(initial_seed_target * 0.2)))
+
         # If we haven't queried anything yet
         if len(self.state.attack_state["queried_indices"]) == 0:
-            seed_k = min(initial_seed_size, ctx.budget_remaining)
-            if seed_k > 0:
-                val_seed_k = 0
-                if seed_k > 1 and validation_seed_ratio > 0.0:
-                    val_seed_k = int(round(seed_k * validation_seed_ratio))
-                    val_seed_k = max(1, min(seed_k - 1, val_seed_k))
-                train_seed_k = seed_k - val_seed_k
+            budget_now = int(ctx.budget_remaining)
+            train_seed_k = min(max(0, initial_seed_target), budget_now)
+            budget_left = budget_now - train_seed_k
+            val_seed_k = min(max(0, validation_seed_target), budget_left)
+
+            # Keep at least one train sample when budget allows it.
+            if train_seed_k == 0 and budget_now > 0 and val_seed_k > 0:
+                train_seed_k = 1
+                val_seed_k = max(0, val_seed_k - 1)
+
+            if train_seed_k > 0 or val_seed_k > 0:
 
                 self.logger.info(
                     f"Querying initial seed: train={train_seed_k}, val={val_seed_k}"

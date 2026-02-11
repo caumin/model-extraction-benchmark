@@ -37,7 +37,8 @@ attack:
   step_size: 2000
   strategy: uncertainty
   batch_size: 150
-  initial_seed_size: 2000
+  initial_seed_ratio: 0.1
+  validation_budget_ratio: 0.2
   num_workers: 8
   pool_num_workers: 8
   train_num_workers: 4
