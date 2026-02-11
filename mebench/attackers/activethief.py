@@ -14,6 +14,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.data.loaders import create_dataloader
+from mebench.utils.dataloader import pool_loader_kwargs
 
 
 class ActiveThief(AttackRunner):
@@ -24,8 +25,10 @@ class ActiveThief(AttackRunner):
         self.dataloader = None
         self.pool_dataset = None
         self._initialize_state(state)
-        
+
         self.device = str(config.get("run", {}).get("device", state.metadata.get("device", "cpu")))
+        self.pool_num_workers = max(0, int(config.get("pool_num_workers", config.get("num_workers", 4))))
+        self.train_num_workers = max(0, int(config.get("train_num_workers", config.get("num_workers", 0))))
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state.setdefault("queried_indices", [])
@@ -167,8 +170,7 @@ class ActiveThief(AttackRunner):
             pool_subset, 
             batch_size=256, 
             shuffle=False, 
-            num_workers=0,
-            pin_memory=True if "cuda" in self.device else False
+            **pool_loader_kwargs(self.device, {"num_workers": self.pool_num_workers}),
         )
         
         scores = []
@@ -248,34 +250,83 @@ class ActiveThief(AttackRunner):
             train_subset,
             batch_size=int(sub_config.get("batch_size", 128)),
             shuffle=True,
-            num_workers=0
+            **pool_loader_kwargs(
+                self.device,
+                {
+                    "num_workers": int(
+                        sub_config.get(
+                            "train_num_workers",
+                            sub_config.get("num_workers", self.train_num_workers),
+                        )
+                    )
+                },
+            ),
         )
         val_loader = DataLoader(
             val_subset,
             batch_size=int(sub_config.get("batch_size", 128)),
-            shuffle=False
+            shuffle=False,
+            **pool_loader_kwargs(
+                self.device,
+                {
+                    "num_workers": int(
+                        sub_config.get(
+                            "val_num_workers",
+                            sub_config.get("num_workers", self.train_num_workers),
+                        )
+                    )
+                },
+            ),
         )
         
         output_mode = str(self.config.get("output_mode", "soft_prob"))
+
+        def macro_f1_score(preds: torch.Tensor, targets: torch.Tensor, num_classes_local: int) -> float:
+            preds = preds.view(-1)
+            targets = targets.view(-1)
+            f1_sum = 0.0
+            for cls_idx in range(num_classes_local):
+                pred_pos = preds == cls_idx
+                true_pos = targets == cls_idx
+                tp = int((pred_pos & true_pos).sum().item())
+                fp = int((pred_pos & (~true_pos)).sum().item())
+                fn = int(((~pred_pos) & true_pos).sum().item())
+                denom = (2 * tp) + fp + fn
+                f1_sum += (2.0 * tp / denom) if denom > 0 else 0.0
+            return f1_sum / float(num_classes_local)
         
         def eval_fn(model, loader):
             model.eval()
-            total_loss = 0.0
-            count = 0
-            loss_func = nn.KLDivLoss(reduction="batchmean") if output_mode == "soft_prob" else nn.CrossEntropyLoss()
+            if output_mode == "soft_prob":
+                total_loss = 0.0
+                count = 0
+                loss_func = nn.KLDivLoss(reduction="batchmean")
+                with torch.no_grad():
+                    for x, y in loader:
+                        x, y = x.to(self.device), y.to(self.device)
+                        outputs = model(x)
+                        y = y.clamp_min(1e-10)
+                        y = y / y.sum(dim=1, keepdim=True)
+                        loss = loss_func(torch.log_softmax(outputs, dim=1), y)
+                        total_loss += loss.item() * x.size(0)
+                        count += x.size(0)
+                return total_loss / count if count > 0 else float("inf")
+
+            all_preds = []
+            all_targets = []
             with torch.no_grad():
                 for x, y in loader:
-                    x, y = x.to(self.device), y.to(self.device)
+                    x = x.to(self.device)
                     outputs = model(x)
-                    if output_mode == "soft_prob":
-                         y = y.clamp_min(1e-10)
-                         y = y / y.sum(dim=1, keepdim=True)
-                         loss = loss_func(torch.log_softmax(outputs, dim=1), y)
-                    else:
-                         loss = loss_func(outputs, y.long())
-                    total_loss += loss.item() * x.size(0)
-                    count += x.size(0)
-            return total_loss / count if count > 0 else float('inf')
+                    preds = torch.argmax(outputs, dim=1).cpu()
+                    all_preds.append(preds)
+                    all_targets.append(y.long().cpu())
+
+            if not all_preds:
+                return 0.0
+            preds_cat = torch.cat(all_preds, dim=0)
+            targets_cat = torch.cat(all_targets, dim=0)
+            return macro_f1_score(preds_cat, targets_cat, num_classes)
 
         def loss_fn(outputs, targets):
             if output_mode == "soft_prob":
@@ -284,12 +335,13 @@ class ActiveThief(AttackRunner):
                  return nn.KLDivLoss(reduction="batchmean")(torch.log_softmax(outputs, dim=1), targets)
             return nn.CrossEntropyLoss()(outputs, targets.long())
 
-        # Training Steps
-        # ActiveThief uses Max Epochs 1000
-        # But we use steps based on budget to keep runtime reasonable?
-        # No, ActiveThief trains until convergence (early stopping).
-        # We set a high max_steps.
-        max_steps = 100000 
+        batch_size = int(sub_config.get("batch_size", 128))
+        steps_per_epoch = max(1, int(math.ceil(train_size / batch_size)))
+        max_epochs = int(sub_config.get("max_epochs", 1000))
+        patience_epochs = int(sub_config.get("patience", 100))
+        max_steps = max_epochs * steps_per_epoch
+        validate_every = steps_per_epoch
+        patience_steps = patience_epochs * steps_per_epoch
         
         trainer = SubstituteTrainer(dict(sub_config), device=self.device)
         request = TrainRequest(
@@ -299,10 +351,10 @@ class ActiveThief(AttackRunner):
             eval_fn=eval_fn,
             loss_fn=loss_fn,
             max_steps=max_steps,
-            early_stop_mode="min",
+            early_stop_mode="min" if output_mode == "soft_prob" else "max",
             load_best=True,
-            patience=5000, # 50 checks * 100 steps
-            validate_every=100
+            patience=patience_steps,
+            validate_every=validate_every,
         )
         trainer.train(request)
         return substitute
@@ -323,7 +375,18 @@ class ActiveThief(AttackRunner):
         loader = DataLoader(
              TensorDataset(x_all, y_all),
              batch_size=32,
-             shuffle=True
+             shuffle=True,
+             **pool_loader_kwargs(
+                 self.device,
+                 {
+                     "num_workers": int(
+                         sub_config.get(
+                             "train_num_workers",
+                             sub_config.get("num_workers", self.train_num_workers),
+                         )
+                     )
+                 },
+             ),
         )
         
         output_mode = str(self.config.get("output_mode", "soft_prob"))
