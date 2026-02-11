@@ -47,6 +47,7 @@ class VictimTrainRecipe:
     weight_decay: float
     scheduler: str
     label_smoothing: float = 0.0
+    dropout_prob: float = 0.0
 
 
 def _default_device(user_device: Optional[str]) -> str:
@@ -265,6 +266,21 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
             label_smoothing=0.1,
         )
 
+    if dataset == "CIFAR10" and arch == "activethief_cnn":
+        return VictimTrainRecipe(
+            dataset=dataset,
+            arch=arch,
+            epochs=300,
+            batch_size=150,
+            optimizer="adam",
+            lr=1e-3,
+            momentum=0.9,
+            weight_decay=1e-3,
+            scheduler="multistep",
+            label_smoothing=0.0,
+            dropout_prob=0.2,
+        )
+
     # Generic fallback.
     c, _ = _infer_dataset_info(dataset, arch=arch)
     _ = c
@@ -279,6 +295,7 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
         weight_decay=5e-4,
         scheduler="multistep",
         label_smoothing=0.0,
+        dropout_prob=0.0,
     )
 
 
@@ -295,7 +312,7 @@ def train() -> None:
         "--arch",
         type=str,
         required=True,
-        choices=["lenet_mnist", "resnet18"],
+        choices=["lenet_mnist", "resnet18", "activethief_cnn"],
         help="Victim architecture (must match config victim.arch)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Training seed for victim checkpoint")
@@ -334,6 +351,12 @@ def train() -> None:
         choices=["none", "cosine", "multistep"],
         help="Override LR scheduler (default: recipe default)",
     )
+    parser.add_argument(
+        "--dropout-prob",
+        type=float,
+        default=None,
+        help="Override model dropout probability (default: recipe default)",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(
         "--out",
@@ -348,11 +371,11 @@ def train() -> None:
     )
     args = parser.parse_args()
 
-    # Benchmark defaults: MNIST uses LeNet-5, CIFAR10 uses torchvision ResNet18.
+    # Benchmark defaults: MNIST uses LeNet-5, CIFAR10 uses ResNet18 or ActiveThief CNN.
     if args.dataset == "MNIST" and args.arch != "lenet_mnist":
         raise ValueError("For MNIST victim training, use --arch lenet_mnist")
-    if args.dataset == "CIFAR10" and args.arch != "resnet18":
-        raise ValueError("For CIFAR10 victim training, use --arch resnet18")
+    if args.dataset == "CIFAR10" and args.arch not in {"resnet18", "activethief_cnn"}:
+        raise ValueError("For CIFAR10 victim training, use --arch resnet18 or --arch activethief_cnn")
 
     recipe = _default_recipe(args.dataset, args.arch)
     epochs = int(args.epochs) if args.epochs is not None else recipe.epochs
@@ -363,6 +386,7 @@ def train() -> None:
     weight_decay = float(args.weight_decay) if args.weight_decay is not None else recipe.weight_decay
     scheduler_name = str(args.scheduler) if args.scheduler is not None else recipe.scheduler
     label_smoothing = recipe.label_smoothing
+    dropout_prob = float(args.dropout_prob) if args.dropout_prob is not None else float(recipe.dropout_prob)
 
     device = _default_device(args.device)
     print(f"[INFO] Device: {device}")
@@ -408,7 +432,7 @@ def train() -> None:
         num_classes=num_classes,
         input_channels=input_channels,
         width_mult=1,
-        dropout_prob=0.0,
+        dropout_prob=dropout_prob,
     ).to(device)
 
     optimizer = _build_optimizer(
@@ -435,6 +459,7 @@ def train() -> None:
                 "momentum": float(momentum),
                 "weight_decay": float(weight_decay),
                 "scheduler": scheduler_name,
+                "dropout_prob": float(dropout_prob),
                 "num_workers": int(args.num_workers),
                 "out": str(out_path),
             },
@@ -494,6 +519,7 @@ def train() -> None:
                     weight_decay=float(weight_decay),
                     scheduler=scheduler_name,
                     label_smoothing=label_smoothing,
+                    dropout_prob=float(dropout_prob),
                 )
             ),
         }
