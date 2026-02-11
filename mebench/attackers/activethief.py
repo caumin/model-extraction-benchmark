@@ -126,7 +126,13 @@ class ActiveThief(AttackRunner):
                     )
         
         # 2. Active Loop
-        step_size = int(self.config.get("step_size", self._default_step_size(ctx)))
+        if "step_size" in self.config:
+            step_size = int(self.config.get("step_size"))
+        else:
+            default_iterations = int(self.config.get("iterations", self.config.get("rounds", 10)))
+            if default_iterations <= 0:
+                default_iterations = 10
+            step_size = max(1, int(math.ceil(int(ctx.budget_remaining) / float(default_iterations))))
         strategy = self.config.get("strategy", "uncertainty")
         
         pbar = self._create_progress_bar(ctx.budget_remaining, f"[{self.__class__.__name__}] Extracting")
