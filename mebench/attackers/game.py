@@ -38,10 +38,11 @@ class GAME(AttackRunner):
         self.acs_strategy = config.get("acs_strategy", "uncertainty")
         self.acs_probe_size = int(config.get("acs_probe_size", 0))
 
-        self.beta1 = float(config.get("beta1", 1.0)) # l_res
-        self.beta2 = float(config.get("beta2", 1.0)) # l_bou
-        self.beta3 = float(config.get("beta3", 0.0)) # l_adv
-        self.beta4 = float(config.get("beta4", 1.0)) # l_dif
+        # Loss weights (Eq.14). Defaults follow the reference implementation.
+        self.beta1 = float(config.get("beta1", 0.002))  # L_res
+        self.beta2 = float(config.get("beta2", 0.01))   # L_bou
+        self.beta3 = float(config.get("beta3", 10.0))   # L_adv
+        self.beta4 = float(config.get("beta4", 100.0))  # L_dif
 
         # TDL: Training Discriminator and Generator with proxy data.
         # Paper implies iterative training. default to 20 epochs/steps.
@@ -57,6 +58,8 @@ class GAME(AttackRunner):
         self.discriminator_optimizer: optim.Optimizer | None = None
         self.student_optimizer: optim.Optimizer | None = None
         self.proxy_data: torch.Tensor | None = None
+        self.proxy_loader = None
+        self._proxy_iter = None
         self.tdl_done = False
         self._ctx: Optional[BenchmarkContext] = None
         self._query_fn: Optional[Callable[..., OracleOutput]] = None
@@ -69,6 +72,13 @@ class GAME(AttackRunner):
         self._ctx = ctx
         self._query_fn = ctx.query
         device = self.state.metadata.get("device", "cpu")
+
+        # Target Distribution Learning (TDL) phase (Algorithm 1, Lines 2-3).
+        # Pre-train G/D on proxy dataset before consuming any victim queries.
+        self._init_models(self.state)
+        if not self.tdl_done and self.tdl_steps > 0:
+            self._tdl_phase(device)
+
         total_budget = self.state.budget_remaining
         # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         pbar = self._create_progress_bar(total_budget, "[GAME] Extracting")
@@ -179,8 +189,10 @@ class GAME(AttackRunner):
         self._update_victim_stats(state, victim_probs, meta.get("y_g"))
 
         state.attack_state["last_victim_probs"] = victim_probs.detach().cpu()
-        self._agu_phase(x_query, victim_probs, device, meta.get("z"), meta.get("y_g"))
+
+        # Paper Algorithm 1 ordering: distill student (GMD) before generator update (AGU).
         self._gmd_phase(x_query, victim_probs)
+        self._agu_phase(x_query, victim_probs, device, meta.get("z"), meta.get("y_g"))
 
         state.attack_state["step"] += 1
         state.attack_state["substitute"] = self.student
@@ -263,7 +275,7 @@ class GAME(AttackRunner):
             # [UNIFIED] Config-driven optimizer construction
             self.student_optimizer = self._build_optimizer(self.student.parameters(), opt_params)
 
-        if self.proxy_data is None:
+        if self.proxy_data is None or self.proxy_loader is None:
             proxy_config = self.config.get("attack", {}).get("proxy_dataset")
             if proxy_config is None:
                 proxy_config = self.config.get("proxy_dataset")
@@ -277,12 +289,27 @@ class GAME(AttackRunner):
                     pass
             
             if proxy_config:
-                self.proxy_data = load_pool_to_memory(
-                    proxy_config,
-                    device=device,
-                    desc="[GAME] Caching proxy data",
-                    max_samples=100_000,
-                )
+                proxy_config = dict(proxy_config)
+
+                input_shape = state.metadata.get("input_shape", (3, 32, 32))
+                proxy_config.setdefault("channels", int(input_shape[0]))
+                proxy_config.setdefault("input_size", [int(input_shape[1]), int(input_shape[2])])
+
+                if self.proxy_loader is None:
+                    self.proxy_loader = create_dataloader(
+                        proxy_config,
+                        batch_size=self.batch_size,
+                        shuffle=True,
+                    )
+                    self._proxy_iter = iter(self.proxy_loader)
+
+                if self.proxy_data is None:
+                    self.proxy_data = load_pool_to_memory(
+                        proxy_config,
+                        device=device,
+                        desc="[GAME] Caching proxy data",
+                        max_samples=100_000,
+                    )
 
     def _next_proxy_batch(self, device: str) -> torch.Tensor:
         if self.proxy_data is None or self.proxy_data.size(0) == 0:
@@ -291,6 +318,123 @@ class GAME(AttackRunner):
             
         indices = torch.randint(0, self.proxy_data.size(0), (self.batch_size,), device=self.proxy_data.device)
         return self.proxy_data[indices].to(device)
+
+    def _next_proxy_batch_with_labels(self, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.proxy_loader is None:
+            raise ValueError("GAME TDL requires a labeled proxy_dataset (proxy_loader is None)")
+
+        if self._proxy_iter is None:
+            self._proxy_iter = iter(self.proxy_loader)
+
+        try:
+            x_batch, y_batch = next(self._proxy_iter)
+        except StopIteration:
+            self._proxy_iter = iter(self.proxy_loader)
+            x_batch, y_batch = next(self._proxy_iter)
+
+        x_batch = x_batch.to(device)
+        y_batch = y_batch.to(device).long()
+        return x_batch, y_batch
+
+    def _tdl_phase(self, device: str) -> None:
+        """Target Distribution Learning (TDL): pre-train G/D on proxy data.
+
+        Paper: Algorithm 1 (Lines 2-3) with AC-GAN objectives (Eq.4-7).
+        """
+
+        if self.tdl_done:
+            return
+
+        if self.generator is None or self.discriminator is None:
+            raise RuntimeError("GAME TDL requires generator/discriminator initialized")
+        if self.generator_optimizer is None or self.discriminator_optimizer is None:
+            raise RuntimeError("GAME TDL requires generator/discriminator optimizers initialized")
+
+        if self.proxy_loader is None:
+            raise ValueError("GAME requires proxy_dataset for TDL pretraining")
+
+        self.logger.info(f"[GAME] Starting TDL phase for {self.tdl_steps} steps")
+
+        bce = nn.BCEWithLogitsLoss()
+
+        self.generator.train()
+        self.discriminator.train()
+
+        for _ in range(int(self.tdl_steps)):
+            real_x, real_y = self._next_proxy_batch_with_labels(device)
+            batch_size = int(real_x.size(0))
+            if batch_size <= 0:
+                continue
+
+            if int(real_y.min().item()) < 0 or int(real_y.max().item()) >= int(self.num_classes):
+                raise ValueError(
+                    "Proxy labels must be within [0, num_classes). "
+                    f"Got min={int(real_y.min().item())}, max={int(real_y.max().item())}, "
+                    f"num_classes={int(self.num_classes)}."
+                )
+
+            # -------------------------
+            # Train Discriminator: maximize L_C + L_S (Eq.7)
+            # -------------------------
+            z = torch.randn(batch_size, self.noise_dim, device=device)
+            y_g = torch.randint(0, self.num_classes, (batch_size,), device=device)
+            fake_x = self.generator(z, y_g) * 0.5 + 0.5
+
+            self.discriminator_optimizer.zero_grad()
+
+            d_real_out = self.discriminator(real_x)
+            if self.use_acgan:
+                real_validity, real_cls_logits = d_real_out
+            else:
+                real_validity = d_real_out
+                real_cls_logits = None
+
+            d_fake_out = self.discriminator(fake_x.detach())
+            if self.use_acgan:
+                fake_validity, fake_cls_logits = d_fake_out
+            else:
+                fake_validity = d_fake_out
+                fake_cls_logits = None
+
+            d_loss_source = bce(real_validity, torch.ones_like(real_validity)) + bce(
+                fake_validity, torch.zeros_like(fake_validity)
+            )
+
+            d_loss_class = torch.zeros((), device=device)
+            if self.use_acgan and real_cls_logits is not None and fake_cls_logits is not None:
+                d_loss_class = F.cross_entropy(real_cls_logits, real_y) + F.cross_entropy(
+                    fake_cls_logits, y_g
+                )
+
+            d_loss = d_loss_source + d_loss_class
+            d_loss.backward()
+            self.discriminator_optimizer.step()
+
+            # -------------------------
+            # Train Generator: maximize L_C - L_S (Eq.6)
+            # -------------------------
+            z = torch.randn(batch_size, self.noise_dim, device=device)
+            y_g = torch.randint(0, self.num_classes, (batch_size,), device=device)
+            fake_x = self.generator(z, y_g) * 0.5 + 0.5
+
+            self.generator_optimizer.zero_grad()
+            g_fake_out = self.discriminator(fake_x)
+            if self.use_acgan:
+                fake_validity, fake_cls_logits = g_fake_out
+            else:
+                fake_validity = g_fake_out
+                fake_cls_logits = None
+
+            g_loss_source = bce(fake_validity, torch.ones_like(fake_validity))
+            g_loss_class = torch.zeros((), device=device)
+            if self.use_acgan and fake_cls_logits is not None:
+                g_loss_class = F.cross_entropy(fake_cls_logits, y_g)
+
+            g_loss = g_loss_source + g_loss_class
+            g_loss.backward()
+            self.generator_optimizer.step()
+
+        self.tdl_done = True
 
     def _compute_class_distribution(self, state: BenchmarkState, device: str) -> torch.Tensor:
         """Compute class distribution from FRESH victim queries for ACS deviation.
