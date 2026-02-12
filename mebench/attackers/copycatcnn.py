@@ -15,6 +15,7 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.dataloader import pool_loader_kwargs
 
 
 class CopycatCNN(AttackRunner):
@@ -113,6 +114,8 @@ class CopycatCNN(AttackRunner):
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["query_data_x"] = []
         state.attack_state["query_data_y"] = []
+        state.attack_state["val_query_data_x"] = []
+        state.attack_state["val_query_data_y"] = []
         state.attack_state["substitute"] = None
 
     def _get_pool_dataset_config(self, state: BenchmarkState) -> dict:
@@ -136,8 +139,11 @@ class CopycatCNN(AttackRunner):
         ).dataset
 
     def _train_substitute(self, state: BenchmarkState) -> None:
+        self._ensure_fixed_validation_holdout(state)
         query_x = state.attack_state["query_data_x"]
         query_y = state.attack_state["query_data_y"]
+        val_query_x = state.attack_state.get("val_query_data_x", [])
+        val_query_y = state.attack_state.get("val_query_data_y", [])
         if len(query_x) == 0:
             return
 
@@ -251,15 +257,45 @@ class CopycatCNN(AttackRunner):
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
+        device = state.metadata.get("device", "cpu")
         loader = torch.utils.data.DataLoader(
             dataset,
             batch_size=train_batch_size,
             shuffle=True,
-            num_workers=0,
-            pin_memory=True,
+            **pool_loader_kwargs(
+                device,
+                {
+                    "num_workers": int(
+                        sub_config.get(
+                            "train_num_workers",
+                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
+                        )
+                    )
+                },
+            ),
         )
 
-        device = state.metadata.get("device", "cpu")
+        val_loader = None
+        if len(val_query_x) > 0 and len(val_query_y) > 0:
+            x_val = torch.cat(val_query_x, dim=0)
+            y_val = torch.cat(val_query_y, dim=0)
+            val_loader = torch.utils.data.DataLoader(
+                torch.utils.data.TensorDataset(x_val, y_val),
+                batch_size=train_batch_size,
+                shuffle=False,
+                **pool_loader_kwargs(
+                    device,
+                    {
+                        "num_workers": int(
+                            sub_config.get(
+                                "val_num_workers",
+                                sub_config.get("num_workers", self.config.get("num_workers", 0)),
+                            )
+                        )
+                    },
+                ),
+            )
+
         if self.substitute is None:
             width_mult = int(sub_config.get("width_mult", 1))
             dropout_prob = float(sub_config.get("dropout_prob", 0.0))
@@ -285,14 +321,37 @@ class CopycatCNN(AttackRunner):
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
             return F.cross_entropy(outputs, targets.long())
 
+        def eval_fn(model_local: nn.Module, loader_local: torch.utils.data.DataLoader) -> float:
+            model_local.eval()
+            total_loss = 0.0
+            total_count = 0
+            with torch.no_grad():
+                for x_val_b, y_val_b in loader_local:
+                    x_val_b = x_val_b.to(device)
+                    y_val_b = y_val_b.to(device)
+                    outputs = model_local(preprocess_fn(x_val_b))
+                    loss = F.cross_entropy(outputs, y_val_b.long())
+                    total_loss += float(loss.item()) * int(x_val_b.size(0))
+                    total_count += int(x_val_b.size(0))
+            return total_loss / max(1, total_count)
+
         train_config = dict(sub_config)
         train_config["max_epochs"] = int(sub_config.get("max_epochs", epochs))
+        train_config["patience"] = int(sub_config.get("patience", 20))
         trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
+        max_steps = int(train_config["max_epochs"]) * max(1, int(math.ceil(max(1, len(dataset)) / max(1, train_batch_size))))
+        validate_every = max(1, int(math.ceil(max(1, len(dataset)) / max(1, train_batch_size))))
         request = TrainRequest(
             model=self.substitute,
             train_loader=loader,
+            val_loader=val_loader,
+            eval_fn=eval_fn if val_loader is not None else None,
             loss_fn=loss_fn,
             preprocess_fn=preprocess_fn,
+            max_steps=max_steps,
+            validate_every=validate_every,
+            patience=int(train_config["patience"]) * validate_every,
+            early_stop_mode="min",
             load_best=True,
         )
         trainer.train(request)

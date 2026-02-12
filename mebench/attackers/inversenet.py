@@ -1,6 +1,7 @@
 """InverseNet attack implementation."""
 
 from typing import Dict, Any, List, Tuple, Optional
+import math
 import logging
 import numpy as np
 import torch
@@ -161,6 +162,8 @@ class InverseNet(AttackRunner):
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["query_data_x"] = []
         state.attack_state["query_data_y"] = []
+        state.attack_state["val_query_data_x"] = []
+        state.attack_state["val_query_data_y"] = []
         state.attack_state["inversion_x"] = []
         state.attack_state["inversion_y"] = []
         state.attack_state["phase"] = 1
@@ -231,7 +234,22 @@ class InverseNet(AttackRunner):
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
-        loader = DataLoader(dataset, batch_size=train_batch_size, shuffle=True, num_workers=0)
+        loader = DataLoader(
+            dataset,
+            batch_size=train_batch_size,
+            shuffle=True,
+            **pool_loader_kwargs(
+                state.metadata.get("device", "cpu"),
+                {
+                    "num_workers": int(
+                        sub_config.get(
+                            "inversion_num_workers",
+                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
+                        )
+                    )
+                },
+            ),
+        )
 
         device = state.metadata.get("device", "cpu")
         self.inversion_model.train()
@@ -275,6 +293,7 @@ class InverseNet(AttackRunner):
         Paper Phase 3 requires: synthetic sample -> (augment) -> victim re-query -> retrain substitute
         using the victim outputs. We keep the existing optimizer/LR/epochs configuration.
         """
+        sub_config = state.metadata.get("substitute_config", {})
         if self.substitute is None:
             device = state.metadata.get("device", "cpu")
             self.substitute = create_substitute(
@@ -284,7 +303,6 @@ class InverseNet(AttackRunner):
             ).to(device)
             
             # [UNIFIED] Use runner's build_optimizer
-            sub_config = state.metadata.get("substitute_config", {})
             opt_config = sub_config.get("optimizer", {})
             if "lr" not in opt_config:
                 opt_config["lr"] = self.substitute_lr
@@ -292,13 +310,8 @@ class InverseNet(AttackRunner):
             self.substitute_optimizer = self._build_optimizer(self.substitute.parameters(), opt_config)
 
         device = state.metadata.get("device", "cpu")
-        query_x = state.attack_state.get("query_data_x", [])
-        query_y = state.attack_state.get("query_data_y", [])
-        if len(query_x) == 0:
+        if x_batch.size(0) == 0:
             return
-
-        x_all = torch.cat(query_x, dim=0)
-        y_all = torch.cat(query_y, dim=0)
 
         class ReplayDataset(torch.utils.data.Dataset):
             def __init__(self, x: torch.Tensor, y: torch.Tensor):
@@ -312,10 +325,20 @@ class InverseNet(AttackRunner):
                 return self.x[idx], self.y[idx]
 
         loader = DataLoader(
-            ReplayDataset(x_all, y_all),
+            ReplayDataset(x_batch.detach().cpu(), y_batch.detach().cpu()),
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=0,
+            **pool_loader_kwargs(
+                state.metadata.get("device", "cpu"),
+                {
+                    "num_workers": int(
+                        sub_config.get(
+                            "train_num_workers",
+                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
+                        )
+                    )
+                },
+            ),
         )
 
         self.substitute.train()
@@ -395,8 +418,11 @@ class InverseNet(AttackRunner):
         return x_mix
 
     def _train_substitute_from_queries(self, state: BenchmarkState) -> None:
+        self._ensure_fixed_validation_holdout(state)
         query_x = state.attack_state["query_data_x"]
         query_y = state.attack_state["query_data_y"]
+        val_query_x = state.attack_state.get("val_query_data_x", [])
+        val_query_y = state.attack_state.get("val_query_data_y", [])
         if len(query_x) == 0:
             return
 
@@ -414,8 +440,63 @@ class InverseNet(AttackRunner):
             def __getitem__(self, idx):
                 return self.x[idx], self.y[idx]
 
+        sub_config = state.metadata.get("substitute_config", {})
         dataset = QueryDataset(x_all, y_all)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=0)
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
+
+        train_dataset = dataset
+        if len(val_query_x) > 0 and len(val_query_y) > 0:
+            x_val = torch.cat(val_query_x, dim=0)
+            y_val = torch.cat(val_query_y, dim=0)
+            val_dataset = QueryDataset(x_val, y_val)
+            train_size = len(train_dataset)
+        else:
+            total_size = len(dataset)
+            val_size = max(1, int(0.2 * total_size))
+            train_size = total_size - val_size
+            if train_size < 2:
+                return
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                dataset,
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(42),
+            )
+
+        loader = DataLoader(
+            train_dataset,
+            batch_size=train_batch_size,
+            shuffle=True,
+            **pool_loader_kwargs(
+                state.metadata.get("device", "cpu"),
+                {
+                    "num_workers": int(
+                        sub_config.get(
+                            "train_num_workers",
+                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
+                        )
+                    )
+                },
+            ),
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=train_batch_size,
+            shuffle=False,
+            **pool_loader_kwargs(
+                state.metadata.get("device", "cpu"),
+                {
+                    "num_workers": int(
+                        sub_config.get(
+                            "val_num_workers",
+                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
+                        )
+                    )
+                },
+            ),
+        )
 
         device = state.metadata.get("device", "cpu")
         sub_config = state.metadata.get("substitute_config", {})
@@ -444,13 +525,38 @@ class InverseNet(AttackRunner):
             log_probs = F.log_softmax(outputs, dim=1)
             return F.kl_div(log_probs, targets, reduction="batchmean")
 
+        def eval_fn(model_local: nn.Module, loader_local: DataLoader) -> float:
+            model_local.eval()
+            total_loss = 0.0
+            total_count = 0
+            with torch.no_grad():
+                for x_val_b, y_val_b in loader_local:
+                    x_val_b = x_val_b.to(device)
+                    y_val_b = y_val_b.to(device)
+                    outputs = model_local(x_val_b)
+                    if y_val_b.ndim == 1 or (y_val_b.ndim == 2 and y_val_b.size(1) == 1):
+                        loss = F.cross_entropy(outputs, y_val_b.long().view(-1))
+                    else:
+                        loss = F.kl_div(F.log_softmax(outputs, dim=1), y_val_b, reduction="batchmean")
+                    total_loss += float(loss.item()) * int(x_val_b.size(0))
+                    total_count += int(x_val_b.size(0))
+            return total_loss / max(1, total_count)
+
         train_config = dict(sub_config)
         train_config["max_epochs"] = int(sub_config.get("max_epochs", epochs))
+        train_config["patience"] = int(sub_config.get("patience", 20))
         trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
+        steps_per_epoch = max(1, int(math.ceil(train_size / max(1, train_batch_size))))
         request = TrainRequest(
             model=self.substitute,
             train_loader=loader,
+            val_loader=val_loader,
+            eval_fn=eval_fn,
             loss_fn=loss_fn,
+            max_steps=int(train_config["max_epochs"]) * steps_per_epoch,
+            validate_every=steps_per_epoch,
+            patience=int(train_config["patience"]) * steps_per_epoch,
+            early_stop_mode="min",
             load_best=True,
         )
         trainer.train(request)

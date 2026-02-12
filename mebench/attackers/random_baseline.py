@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.dataloader import pool_loader_kwargs
 from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
@@ -33,6 +34,8 @@ class RandomBaseline(AttackRunner):
         state.attack_state.setdefault("unqueried_indices", [])
         state.attack_state.setdefault("query_data_x", [])
         state.attack_state.setdefault("query_data_y", [])
+        state.attack_state.setdefault("val_query_data_x", [])
+        state.attack_state.setdefault("val_query_data_y", [])
         state.attack_state.setdefault("substitute", None)
 
     def _ensure_pool_dataset(self, state: BenchmarkState) -> None:
@@ -133,9 +136,12 @@ class RandomBaseline(AttackRunner):
         state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
 
     def _train_substitute(self, state: BenchmarkState) -> None:
-        """Train substitute model with 80/20 validation split and early stopping."""
+        """Train substitute model with fixed validation holdout when available."""
+        self._ensure_fixed_validation_holdout(state)
         query_x = state.attack_state.get("query_data_x", [])
         query_y = state.attack_state.get("query_data_y", [])
+        val_query_x = state.attack_state.get("val_query_data_x", [])
+        val_query_y = state.attack_state.get("val_query_data_y", [])
         if len(query_x) == 0:
             return
 
@@ -148,17 +154,23 @@ class RandomBaseline(AttackRunner):
              self._train_substitute_simple(state, x_all, y_all)
              return
 
-        # [FIX] Implement 80/20 Validation Split
-        total_size = x_all.size(0)
-        val_size = max(1, int(0.2 * total_size))
-        train_size = total_size - val_size
-        
-        full_dataset = torch.utils.data.TensorDataset(x_all, y_all)
-        train_subset, val_subset = torch.utils.data.random_split(
-            full_dataset, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)
-        )
+        if len(val_query_x) > 0 and len(val_query_y) > 0:
+            x_val = torch.cat(val_query_x, dim=0)
+            y_val = torch.cat(val_query_y, dim=0)
+            train_dataset = torch.utils.data.TensorDataset(x_all, y_all)
+            val_dataset = torch.utils.data.TensorDataset(x_val, y_val)
+            train_size = int(x_all.size(0))
+        else:
+            total_size = x_all.size(0)
+            val_size = max(1, int(0.2 * total_size))
+            train_size = total_size - val_size
+
+            full_dataset = torch.utils.data.TensorDataset(x_all, y_all)
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                full_dataset,
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(42),
+            )
 
         sub_config = state.metadata.get("substitute_config", {})
         device = state.metadata.get("device", "cpu")
@@ -185,20 +197,30 @@ class RandomBaseline(AttackRunner):
             or sub_config.get("trackA", {}).get("batch_size")
             or int(self.config.get("batch_size", 128))
         )
+        train_workers = int(
+            sub_config.get(
+                "train_num_workers",
+                sub_config.get("num_workers", self.config.get("num_workers", 0)),
+            )
+        )
+        val_workers = int(
+            sub_config.get(
+                "val_num_workers",
+                sub_config.get("num_workers", train_workers),
+            )
+        )
         
         train_loader = DataLoader(
-            train_subset,
+            train_dataset,
             batch_size=train_batch_size,
             shuffle=True,
-            num_workers=0,
-            pin_memory=str(device).startswith("cuda"),
+            **pool_loader_kwargs(device, {"num_workers": train_workers}),
         )
         val_loader = DataLoader(
-            val_subset,
+            val_dataset,
             batch_size=train_batch_size,
             shuffle=False,
-            num_workers=0,
-            pin_memory=str(device).startswith("cuda"),
+            **pool_loader_kwargs(device, {"num_workers": val_workers}),
         )
 
         output_mode = str(self.config.get("output_mode", "soft_prob"))
@@ -233,34 +255,21 @@ class RandomBaseline(AttackRunner):
                 return nn.KLDivLoss(reduction="batchmean")(log_probs, targets)
             return nn.CrossEntropyLoss()(outputs, targets.long())
 
-        # Use Track-A style step budget
-        # BUT for RandomBaseline using validation split, we might want epochs + patience instead of fixed steps?
-        # Contract says: Track A = fixed steps coefficient.
-        # Track B (Random) = Attacker's native loop. 
-        # RandomBaseline usually doesn't have a specific native loop, so we stick to Track A style logic 
-        # but with validation-based early stopping to be fair with ActiveThief.
-        
-        # We'll use max_epochs with patience, but bound max_steps too if configured.
-        steps_coeff_c = float(sub_config.get("trackA", {}).get("steps_coeff_c", 0.2))
-        max_steps = int(math.ceil(steps_coeff_c * x_all.size(0))) # This is per-checkpoint training cost
-        
-        # NOTE: If we strictly follow Track A cost, we shouldn't use early stopping.
-        # However, user requested "valid split to implement early stopping".
-        # So we prioritize user request (fair comparison with ActiveThief).
-        # We will relax max_steps to allow early stopping to work, or use it as an upper bound.
-        
-        # [FEATURE] Enable TQDM for substitute training visualization
-        sub_config_with_tqdm = dict(sub_config)
-        sub_config_with_tqdm["use_tqdm"] = True
-        
-        trainer = SubstituteTrainer(sub_config_with_tqdm, device=device, logger=self.logger)
+        batch_size = max(1, int(train_batch_size))
+        steps_per_epoch = max(1, int(math.ceil(train_size / batch_size)))
+        max_epochs = int(sub_config.get("max_epochs", 200))
+        patience_epochs = int(sub_config.get("patience", 20))
+
+        trainer = SubstituteTrainer(dict(sub_config), device=device)
         request = TrainRequest(
             model=substitute,
             train_loader=train_loader,
             val_loader=val_loader,     # [ADDED]
             eval_fn=eval_fn,           # [ADDED]
             loss_fn=train_loss_fn,
-            max_steps=max_steps,       # Upper bound from contract
+            max_steps=max_epochs * steps_per_epoch,
+            validate_every=steps_per_epoch,
+            patience=patience_epochs * steps_per_epoch,
             early_stop_mode="min",     # Minimize Val Loss
             load_best=True,
         )
@@ -284,7 +293,18 @@ class RandomBaseline(AttackRunner):
         loader = DataLoader(
             torch.utils.data.TensorDataset(x_all, y_all),
             batch_size=32,
-            shuffle=True
+            shuffle=True,
+            **pool_loader_kwargs(
+                device,
+                {
+                    "num_workers": int(
+                        sub_config.get(
+                            "train_num_workers",
+                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
+                        )
+                    )
+                },
+            ),
         )
         
         output_mode = str(self.config.get("output_mode", "soft_prob"))

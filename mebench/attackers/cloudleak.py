@@ -259,6 +259,8 @@ class CloudLeak(AttackRunner):
         state.attack_state.setdefault("pool_indices", [])
         state.attack_state.setdefault("query_data_x", [])
         state.attack_state.setdefault("query_data_y", [])
+        state.attack_state.setdefault("val_query_data_x", [])
+        state.attack_state.setdefault("val_query_data_y", [])
         state.attack_state.setdefault("synthetic_indices", [])
         state.attack_state.setdefault("substitute", None)
         state.attack_state.setdefault("round", 0)
@@ -587,8 +589,11 @@ class CloudLeak(AttackRunner):
         self.train_substitute(state)
 
     def train_substitute(self, state: BenchmarkState) -> None:
+        self._ensure_fixed_validation_holdout(state)
         query_data_x = state.attack_state.get("query_data_x", [])
         query_data_y = state.attack_state.get("query_data_y", [])
+        val_query_x = state.attack_state.get("val_query_data_x", [])
+        val_query_y = state.attack_state.get("val_query_data_y", [])
 
         if len(query_data_x) == 0:
             return
@@ -623,29 +628,48 @@ class CloudLeak(AttackRunner):
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
 
-        # [FIX] Implement 80/20 Validation Split to prevent overfitting on small query sets
-        total_size = len(dataset)
-        val_size = max(1, int(0.2 * total_size))
-        train_size = total_size - val_size
-        
-        train_subset, val_subset = torch.utils.data.random_split(
-            dataset, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42) # Deterministic split
+        if len(val_query_x) > 0 and len(val_query_y) > 0:
+            x_val = torch.cat(val_query_x, dim=0)
+            y_val = torch.cat(val_query_y, dim=0)
+            train_subset = dataset
+            val_subset = QueryListDataset([x_val], [y_val])
+            train_size = len(train_subset)
+        else:
+            total_size = len(dataset)
+            val_size = max(1, int(0.2 * total_size))
+            train_size = total_size - val_size
+
+            train_subset, val_subset = torch.utils.data.random_split(
+                dataset,
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(42),
+            )
+
+        train_workers = int(
+            sub_config.get(
+                "train_num_workers",
+                sub_config.get("num_workers", self.config.get("num_workers", 0)),
+            )
+        )
+        val_workers = int(
+            sub_config.get(
+                "val_num_workers",
+                sub_config.get("num_workers", train_workers),
+            )
         )
 
         train_loader = torch.utils.data.DataLoader(
             train_subset,
             batch_size=train_batch_size,
             shuffle=True,
-            num_workers=0,
+            **pool_loader_kwargs(state.metadata.get("device", "cpu"), {"num_workers": train_workers}),
         )
         
         val_loader = torch.utils.data.DataLoader(
             val_subset,
             batch_size=train_batch_size,
             shuffle=False,
-            num_workers=0,
+            **pool_loader_kwargs(state.metadata.get("device", "cpu"), {"num_workers": val_workers}),
         )
 
         device = state.metadata.get("device", "cpu")
@@ -689,17 +713,21 @@ class CloudLeak(AttackRunner):
                     total_count += x.size(0)
             return total_loss / total_count if total_count > 0 else float('inf')
 
-        # [FEATURE] Enable TQDM for substitute training visualization
-        sub_config_with_tqdm = dict(sub_config)
-        sub_config_with_tqdm["use_tqdm"] = True
+        batch_size = max(1, int(train_batch_size))
+        steps_per_epoch = max(1, int(math.ceil(train_size / batch_size)))
+        max_epochs = int(sub_config.get("max_epochs", self.max_epochs))
+        patience_epochs = int(sub_config.get("patience", self.patience))
 
-        trainer = SubstituteTrainer(sub_config_with_tqdm, device=device, logger=self.logger)
+        trainer = SubstituteTrainer(dict(sub_config), device=device)
         request = TrainRequest(
             model=substitute,
             train_loader=train_loader,
             val_loader=val_loader,
             eval_fn=eval_fn,
             loss_fn=self._compute_training_loss,
+            max_steps=max_epochs * steps_per_epoch,
+            validate_every=steps_per_epoch,
+            patience=patience_epochs * steps_per_epoch,
             early_stop_mode="min",     # Minimizing Validation Loss
             load_best=True,
         )

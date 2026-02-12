@@ -84,6 +84,11 @@ def generate_configs(
     synthetic_budget: int,
     include_both_hard: bool,
     clean: bool,
+    attack_num_workers: int,
+    pool_num_workers: int,
+    substitute_num_workers: int,
+    substitute_train_num_workers: Optional[int],
+    substitute_val_num_workers: Optional[int],
 ) -> int:
     setups = [
         Setup(
@@ -124,11 +129,8 @@ def generate_configs(
             kind="pool",
             label_capability="both",
             extra={
-                "strategy": "dfal_k_center", 
+                "strategy": "dfal_k_center",
                 "batch_size": 150,
-                "substitute": {
-                    "batch_size": 150
-                }
             },
         ),
         AttackSpec(
@@ -136,12 +138,9 @@ def generate_configs(
             kind="pool",
             label_capability="both",
             extra={
-                "strategy": "uncertainty", 
+                "strategy": "uncertainty",
                 "variant": "uncertainty",
                 "batch_size": 150,
-                "substitute": {
-                    "batch_size": 150
-                }
             },
         ),
         AttackSpec(
@@ -149,15 +148,33 @@ def generate_configs(
             kind="pool",
             label_capability="both",
             extra={
-                "strategy": "dfal", 
+                "strategy": "dfal",
                 "variant": "dfal",
                 "batch_size": 150,
-                "substitute": {
-                    "batch_size": 150
-                }
             },
         ),
-        AttackSpec("swiftthief", kind="pool", label_capability="both"),
+        AttackSpec(
+            "swiftthief",
+            kind="pool",
+            label_capability="both",
+            extra={
+                "lr": 0.06,
+                "kd_lr": 0.06,
+                "cl_epochs": 40,
+                "kd_epochs": 40,
+                "patience": 50,
+                "batch_size": 256,
+                "substitute": {
+                    "batch_size": 256,
+                    "optimizer": {
+                        "name": "sgd",
+                        "lr": 0.06,
+                        "momentum": 0.9,
+                        "weight_decay": 5e-4,
+                    },
+                },
+            },
+        ),
 
         # [UNIFIED] All data-free attacks standardized to:
         # - SGD Student (LR via setup)
@@ -177,8 +194,18 @@ def generate_configs(
     else:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    protocol_version = "1.2"
-    substitute_batch_size = 256
+    protocol_version = "1.3"
+    substitute_batch_size = 128
+
+    # Unified pool-based budget protocol
+    pool_initial_seed_ratio = 0.1
+    pool_validation_budget_ratio = 0.2
+    pool_iterations = 10
+
+    # Unified simple substitute supervised training defaults
+    unified_substitute_lr = 0.01
+    unified_substitute_max_epochs = 200
+    unified_substitute_patience = 20
 
     # Synthetic/data-free attacks do not depend on the surrogate dataset.
     # Generate them once per victim. Prefer an ImageNet-based SET when available
@@ -195,6 +222,17 @@ def generate_configs(
         curr_is_imagenet = str(s.surrogate_name).lower() == "imagenet"
         if curr_is_imagenet and not prev_is_imagenet:
             synthetic_canonical_by_victim[key] = s
+
+    resolved_sub_train_workers = (
+        int(substitute_train_num_workers)
+        if substitute_train_num_workers is not None
+        else int(substitute_num_workers)
+    )
+    resolved_sub_val_workers = (
+        int(substitute_val_num_workers)
+        if substitute_val_num_workers is not None
+        else int(substitute_num_workers)
+    )
 
     count = 0
     for setup in setups:
@@ -229,22 +267,16 @@ def generate_configs(
 
                     run_name = f"{setup.set_id}_{attack_name_for_filename}_{suffix_mode}_{suffix_budget}_seed{seed}"
                     
-                    # [LR Logic]
-                    # SET-A (MNIST/LeNet): 0.01
-                    # SET-B (CIFAR10/ResNet): 0.1
-                    # Default: 0.1 (Data-Free Standard) if undetermined
-                    if "SET-A" in setup.set_id:
-                        target_lr = 0.01
-                    elif "SET-B" in setup.set_id:
-                        target_lr = 0.1
-                    else:
-                        target_lr = 0.1
+                    target_lr = unified_substitute_lr
 
                     # Default substitute config
                     substitute_config = {
                         "arch": setup.substitute_arch,
                         "init_seed": 1234 + seed,
                         "batch_size": substitute_batch_size,
+                        "num_workers": int(substitute_num_workers),
+                        "train_num_workers": int(resolved_sub_train_workers),
+                        "val_num_workers": int(resolved_sub_val_workers),
                         "trackA": {"batch_size": substitute_batch_size, "steps_coeff_c": 0.2},
                         "optimizer": {
                             "name": "sgd",
@@ -252,8 +284,9 @@ def generate_configs(
                             "momentum": 0.9,
                             "weight_decay": 5e-4,
                         },
-                        "max_epochs": 1000,
-                        "patience": 100,
+                        "scheduler": {"name": "multistep", "milestones_ratio": [0.5, 0.75], "gamma": 0.1},
+                        "max_epochs": unified_substitute_max_epochs,
+                        "patience": unified_substitute_patience,
                     }
                     
                     # Merge override recursively (simple 1-level merge for optimizer)
@@ -282,6 +315,7 @@ def generate_configs(
                             "name": setup.victim_dataset,
                             "data_mode": data_mode,
                             "surrogate_name": setup.surrogate_name,
+                            "num_workers": int(pool_num_workers),
                             "train_split": True,
                             "channels": setup.channels,
                             "input_size": [setup.size, setup.size],
@@ -290,6 +324,8 @@ def generate_configs(
                             "name": attack.name,
                             "output_mode": output_mode,
                             "max_budget": max_budget,
+                            "num_workers": int(attack_num_workers),
+                            "pool_num_workers": int(pool_num_workers),
                             **attack_extra,
                         },
                         "substitute": substitute_config,
@@ -300,6 +336,11 @@ def generate_configs(
                             "delete_on_finish": True,
                         },
                     }
+
+                    if attack.kind == "pool":
+                        cfg["attack"].setdefault("initial_seed_ratio", pool_initial_seed_ratio)
+                        cfg["attack"].setdefault("validation_budget_ratio", pool_validation_budget_ratio)
+                        cfg["attack"].setdefault("iterations", pool_iterations)
 
                     def _maybe_add_imagenet_imagefolder_keys(d: Dict[str, Any]) -> None:
                         if str(d.get("data_mode")).lower() != "surrogate":
@@ -328,6 +369,7 @@ def generate_configs(
                             "name": setup.surrogate_name,
                             "data_mode": "surrogate",
                             "surrogate_name": setup.surrogate_name,
+                            "num_workers": int(pool_num_workers),
                             "train_split": True,
                             "channels": setup.channels,
                             "input_size": [setup.size, setup.size],
@@ -368,6 +410,36 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         action="store_true",
         help="Do not delete existing *.yaml in output dir before generation",
     )
+    parser.add_argument(
+        "--attack-num-workers",
+        type=int,
+        default=8,
+        help="Default attack-level DataLoader workers (attack.num_workers)",
+    )
+    parser.add_argument(
+        "--pool-num-workers",
+        type=int,
+        default=8,
+        help="Default workers for pool scanning/loaders (dataset/attack pool workers)",
+    )
+    parser.add_argument(
+        "--substitute-num-workers",
+        type=int,
+        default=4,
+        help="Default substitute DataLoader workers (substitute.num_workers)",
+    )
+    parser.add_argument(
+        "--substitute-train-num-workers",
+        type=int,
+        default=None,
+        help="Override substitute train loader workers (defaults to --substitute-num-workers)",
+    )
+    parser.add_argument(
+        "--substitute-val-num-workers",
+        type=int,
+        default=None,
+        help="Override substitute val loader workers (defaults to --substitute-num-workers)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     out_dir = Path(args.out)
@@ -379,6 +451,19 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         synthetic_budget=int(args.synthetic_budget),
         include_both_hard=bool(args.include_both_hard),
         clean=(not args.no_clean),
+        attack_num_workers=int(args.attack_num_workers),
+        pool_num_workers=int(args.pool_num_workers),
+        substitute_num_workers=int(args.substitute_num_workers),
+        substitute_train_num_workers=(
+            int(args.substitute_train_num_workers)
+            if args.substitute_train_num_workers is not None
+            else None
+        ),
+        substitute_val_num_workers=(
+            int(args.substitute_val_num_workers)
+            if args.substitute_val_num_workers is not None
+            else None
+        ),
     )
     print(f"Generated {count} configs in {out_dir}")
     return 0

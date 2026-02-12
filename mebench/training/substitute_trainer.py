@@ -16,6 +16,8 @@ class TrainRequest:
     model: nn.Module
     train_loader: DataLoader
     loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+    preprocess_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None
+    step_fn: Optional[Callable[[nn.Module, torch.Tensor, torch.Tensor], torch.Tensor]] = None
     val_loader: Optional[DataLoader] = None
     eval_fn: Optional[Callable[[nn.Module, DataLoader], float]] = None
     early_stop_mode: str = "max"  # "max" or "min"
@@ -36,7 +38,7 @@ class TrainResult:
 class SubstituteTrainer:
     """Trainer for substitute models in Track A."""
 
-    def __init__(self, config: Dict[str, Any], device: str = "cpu"):
+    def __init__(self, config: Dict[str, Any], device: str = "cpu", logger: Any = None):
         """Initialize trainer.
 
         Args:
@@ -45,6 +47,7 @@ class SubstituteTrainer:
         """
         self.config = config
         self.device = device
+        self.logger = logger
 
     def train(self, request: TrainRequest) -> TrainResult:
         """Execute training loop.
@@ -79,8 +82,13 @@ class SubstituteTrainer:
             y_batch = y_batch.to(self.device)
 
             optimizer.zero_grad()
-            outputs = model(x_batch)
-            loss = request.loss_fn(outputs, y_batch)
+
+            if request.step_fn is not None:
+                loss = request.step_fn(model, x_batch, y_batch)
+            else:
+                x_in = request.preprocess_fn(x_batch) if request.preprocess_fn is not None else x_batch
+                outputs = model(x_in)
+                loss = request.loss_fn(outputs, y_batch)
             loss.backward()
 
             if "grad_clip" in self.config:

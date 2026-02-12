@@ -17,6 +17,7 @@ This file:
 
 from typing import Dict, Any, List, Tuple, Optional
 import logging
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -380,7 +381,9 @@ class SwiftThief(AttackRunner):
         self.momentum = float(config.get("momentum", 0.9))
         self.weight_decay = float(config.get("weight_decay", 5e-4))
         self.cl_epochs = int(config.get("cl_epochs", 40))
+        self.final_cl_epochs = int(config.get("final_cl_epochs", 100))
         self.patience = int(config.get("patience", 50))
+        self.unlabeled_ssl_size = int(config.get("unlabeled_ssl_size", 50000))
 
         # KD defaults aligned to paper
         self.kd_epochs = int(config.get("kd_epochs", 40))
@@ -406,10 +409,13 @@ class SwiftThief(AttackRunner):
         st["unlabeled_indices"] = []  # filled after pool load
         st["query_data_x"] = []
         st["query_data_y"] = []
+        st["val_query_data_x"] = []
+        st["val_query_data_y"] = []
         st["class_counts"] = {}
         st["victim_outputs"] = {}
         st["substitute"] = None
         st["sampling_mode"] = "entropy"
+        st["last_train_labeled_count"] = 0
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
@@ -419,7 +425,7 @@ class SwiftThief(AttackRunner):
             self.state.metadata.get("max_budget")
             or self.config.get("max_budget", ctx.budget_remaining)
         )
-        round_size = max(1, total_budget // max(self.I, 1))
+        round_size = max(1, int(math.ceil(total_budget / max(self.I, 1))))
 
         pbar = tqdm(total=total_budget, desc="[SwiftThief] Extracting")
         while ctx.budget_remaining > 0:
@@ -434,6 +440,13 @@ class SwiftThief(AttackRunner):
             oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
             self._handle_oracle_output(query_batch, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
+
+        labeled_count = len(self.state.attack_state["labeled_indices"])
+        last_train = int(self.state.attack_state.get("last_train_labeled_count", 0))
+        if labeled_count > last_train:
+            self.train_substitute(self.state, cl_epochs_override=self.final_cl_epochs)
+            self.state.attack_state["last_train_labeled_count"] = labeled_count
+
         pbar.close()
 
     # -------------------------
@@ -760,9 +773,13 @@ class SwiftThief(AttackRunner):
 
         labeled_count = len(state.attack_state["labeled_indices"])
         total_budget = int(state.metadata.get("max_budget") or self.config.get("max_budget", 10000))
-        round_size = max(1, total_budget // max(self.I, 1))
-        if labeled_count % round_size == 0 and labeled_count > 0:
-            self.train_substitute(state)
+        round_size = max(1, int(math.ceil(total_budget / max(self.I, 1))))
+        last_train = int(state.attack_state.get("last_train_labeled_count", 0))
+        if labeled_count > 0 and (labeled_count - last_train) >= round_size:
+            is_final_round = labeled_count >= total_budget
+            cl_epochs = self.final_cl_epochs if is_final_round else self.cl_epochs
+            self.train_substitute(state, cl_epochs_override=cl_epochs)
+            state.attack_state["last_train_labeled_count"] = labeled_count
 
     # -------------------------
     # KD stage (hardcoded)
@@ -809,11 +826,14 @@ class SwiftThief(AttackRunner):
     # Train (CL + KD)
     # -------------------------
 
-    def train_substitute(self, state: BenchmarkState) -> None:
+    def train_substitute(self, state: BenchmarkState, cl_epochs_override: Optional[int] = None) -> None:
+        self._ensure_fixed_validation_holdout(state)
         self._ensure_pool_dataset(state)
 
         qx = state.attack_state["query_data_x"]
         qy = state.attack_state["query_data_y"]
+        vqx = state.attack_state.get("val_query_data_x", [])
+        vqy = state.attack_state.get("val_query_data_y", [])
         if len(qx) == 0:
             return
 
@@ -822,15 +842,22 @@ class SwiftThief(AttackRunner):
 
         dataset_q = QueryDataset(x_all, y_all)
 
-        total_size = len(dataset_q)
-        val_size = max(1, int(0.2 * total_size))
-        train_size = total_size - val_size
-        if train_size < 2:
-            return
+        if len(vqx) > 0 and len(vqy) > 0:
+            x_val = torch.cat(vqx, dim=0)
+            y_val = torch.cat(vqy, dim=0)
+            train_q = dataset_q
+            val_q = QueryDataset(x_val, y_val)
+            train_size = len(train_q)
+        else:
+            total_size = len(dataset_q)
+            val_size = max(1, int(0.2 * total_size))
+            train_size = total_size - val_size
+            if train_size < 2:
+                return
 
-        train_q, val_q = torch.utils.data.random_split(
-            dataset_q, [train_size, val_size], generator=torch.Generator().manual_seed(42)
-        )
+            train_q, val_q = torch.utils.data.random_split(
+                dataset_q, [train_size, val_size], generator=torch.Generator().manual_seed(42)
+            )
 
         # [OPTIMIZATION] Pre-build transforms and wrap datasets for multi-worker loading
         ssl_transform = self._build_ssl_transforms(state, self.use_pil_transforms)
@@ -877,8 +904,13 @@ class SwiftThief(AttackRunner):
         if len(unlabeled_indices) == 0:
             unlabeled_loader = None
         else:
-            # Use ALL unlabeled samples for training (Strict Protocol)
-            u_indices = unlabeled_indices
+            # SwiftThief paper uses a fixed-size random subset from U for SSL.
+            if len(unlabeled_indices) > self.unlabeled_ssl_size:
+                u_indices = np.random.choice(
+                    unlabeled_indices, self.unlabeled_ssl_size, replace=False
+                ).tolist()
+            else:
+                u_indices = unlabeled_indices
             if len(u_indices) == 0:
                 unlabeled_loader = None
             else:
@@ -973,7 +1005,8 @@ class SwiftThief(AttackRunner):
         unlabeled_iter = iter(unlabeled_loader) if unlabeled_loader is not None else None
 
         # ---------------- CL stage ----------------
-        cl_pbar = tqdm(range(self.cl_epochs), desc="[SwiftThief] Training (CL)", leave=False)
+        cl_epochs = int(cl_epochs_override) if cl_epochs_override is not None else self.cl_epochs
+        cl_pbar = tqdm(range(cl_epochs), desc="[SwiftThief] Training (CL)", leave=False)
         for epoch in cl_pbar:
             substitute.train()
             self.projection_head.train()

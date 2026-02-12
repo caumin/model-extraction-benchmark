@@ -3,6 +3,7 @@
 from typing import Dict, Any, List, Tuple, Optional
 import copy
 import logging
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -417,7 +418,9 @@ class BlackboxDissector(AttackRunner):
 
         # Training hyperparameters
         self.batch_size = int(config.get("batch_size", 128))
-        self.lr = float(config.get("lr", 0.1))
+        paper_lr = 0.02 * (self.batch_size / 128.0)
+        self.lr = float(config.get("lr", paper_lr))
+        self.momentum = float(config.get("momentum", 0.9))
         # [P0 FIX] Paper mandates 200 epochs for BlackBox Dissector
         self.max_epochs = int(config.get("max_epochs", 200))
         self.patience = int(config.get("patience", 100))
@@ -585,6 +588,8 @@ class BlackboxDissector(AttackRunner):
         state.attack_state["D_T_y"] = []  # list[tensor[B]] hard labels
         state.attack_state["D_E_x"] = []
         state.attack_state["D_E_y"] = []
+        state.attack_state["val_labeled_x"] = []
+        state.attack_state["val_labeled_y"] = []
 
         # Store best variant per sample for selection
         state.attack_state["best_variant_idx"] = {}  # idx -> variant index
@@ -989,10 +994,23 @@ class BlackboxDissector(AttackRunner):
                 shuffle=False,
             ).dataset
 
-        # Use 20% validation split from Labeled Data
-        total_size = len(labeled_dataset)
-        val_size = max(1, int(0.2 * total_size))
-        train_size = total_size - val_size
+        val_labeled_x = state.attack_state.get("val_labeled_x", [])
+        val_labeled_y = state.attack_state.get("val_labeled_y", [])
+
+        if len(val_labeled_x) == 0 or len(val_labeled_y) == 0:
+            _, val_target = self._resolve_seed_and_validation_targets(total_budget=state.budget_remaining)
+            if val_target > 0 and int(x_all.size(0)) > 2:
+                val_size = min(int(val_target), int(x_all.size(0)) - 2)
+                if val_size > 0:
+                    state.attack_state["val_labeled_x"] = [x_all[:val_size].detach().cpu()]
+                    state.attack_state["val_labeled_y"] = [y_all[:val_size].detach().cpu()]
+                    x_all = x_all[val_size:]
+                    y_all = y_all[val_size:]
+
+        val_labeled_x = state.attack_state.get("val_labeled_x", [])
+        val_labeled_y = state.attack_state.get("val_labeled_y", [])
+
+        train_size = int(x_all.size(0))
 
         device = state.metadata.get("device", "cpu")
         num_classes = int(
@@ -1003,29 +1021,58 @@ class BlackboxDissector(AttackRunner):
         if train_size < 2:
             return
 
-        train_subset, val_subset = torch.utils.data.random_split(
-            labeled_dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42),
-        )
+        train_subset = LabeledDataset(x_all, y_all)
+        if len(val_labeled_x) > 0 and len(val_labeled_y) > 0:
+            x_val = torch.cat(val_labeled_x, dim=0)
+            y_val = torch.cat(val_labeled_y, dim=0)
+            val_subset = LabeledDataset(x_val, y_val)
+        else:
+            total_size = int(train_subset.__len__())
+            val_size = max(1, int(0.2 * total_size))
+            train_size = total_size - val_size
+            if train_size < 2:
+                return
+            train_subset, val_subset = torch.utils.data.random_split(
+                train_subset,
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(42),
+            )
 
         sub_config = state.metadata.get("substitute_config", {})
         train_batch_size = int(
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
+        train_workers = int(
+            sub_config.get(
+                "train_num_workers",
+                sub_config.get("num_workers", self.config.get("num_workers", 0)),
+            )
+        )
+        val_workers = int(
+            sub_config.get(
+                "val_num_workers",
+                sub_config.get("num_workers", train_workers),
+            )
+        )
+        pseudo_workers = int(
+            sub_config.get(
+                "pseudo_num_workers",
+                sub_config.get("num_workers", train_workers),
+            )
+        )
         train_loader = torch.utils.data.DataLoader(
             train_subset,
             batch_size=train_batch_size,
             shuffle=True,
-            num_workers=0,
+            **pool_loader_kwargs(device, {"num_workers": train_workers}),
             drop_last=False,
         )
         val_loader = torch.utils.data.DataLoader(
             val_subset,
             batch_size=train_batch_size,
             shuffle=False,
-            num_workers=0,
+            **pool_loader_kwargs(device, {"num_workers": val_workers}),
         )
 
         # Teacher model = frozen copy of previous substitute (Eq. 7)
@@ -1072,7 +1119,7 @@ class BlackboxDissector(AttackRunner):
                 PseudoDataset(pseudo_indices, pseudo_labels, self.pool_dataset),
                 batch_size=train_batch_size,
                 shuffle=True,
-                num_workers=0,
+                **pool_loader_kwargs(device, {"num_workers": pseudo_workers}),
                 drop_last=False,
             )
             pseudo_iter = iter(pseudo_loader)
@@ -1149,26 +1196,37 @@ class BlackboxDissector(AttackRunner):
             return total_loss / total_count if total_count > 0 else float('inf')
 
         train_config = dict(sub_config)
+        optimizer_config = dict(train_config.get("optimizer", {}))
+        optimizer_config.setdefault("name", "sgd")
+        optimizer_config.setdefault("lr", self.lr)
+        optimizer_config.setdefault("momentum", self.momentum)
+        optimizer_config.setdefault("weight_decay", self.l2_reg)
+        train_config["optimizer"] = optimizer_config
         train_config["max_epochs"] = int(sub_config.get("max_epochs", self.max_epochs))
         train_config["patience"] = int(sub_config.get("patience", self.patience))
         train_config["use_tqdm"] = True  # [FEATURE] Enable TQDM
         
         trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
+        steps_per_epoch = max(1, int(math.ceil(train_size / max(1, train_batch_size))))
         request = TrainRequest(
             model=model,
             train_loader=train_loader,
+            loss_fn=lambda outputs, targets: F.cross_entropy(outputs, targets.long()),
             step_fn=step_fn,
             val_loader=val_loader,
             eval_fn=eval_fn,
             early_stop_mode="min", # Minimizing Validation Loss
             load_best=True,
+            max_steps=int(train_config["max_epochs"]) * steps_per_epoch,
+            validate_every=steps_per_epoch,
+            patience=int(train_config["patience"]) * steps_per_epoch,
         )
         result = trainer.train(request)
 
         # Store in state
         state.attack_state["substitute"] = model
         if result.best_value is not None:
-            self.logger.info("Dissector substitute trained. Best Val F1: %.4f", result.best_value)
+            self.logger.info("Dissector substitute trained. Best Val Loss: %.4f", result.best_value)
         else:
             self.logger.info("Dissector substitute trained.")
         # Round Evaluation
