@@ -232,12 +232,18 @@ class CloudLeak(AttackRunner):
             if step_size <= 0:
                 break
 
+            pbar.set_postfix_str("selecting")
+            pbar.refresh()
             query_batch = self._select_query_batch(step_size, self.state)
             if query_batch.x.size(0) == 0:
                 self.logger.warning("CloudLeak query selection returned empty batch. Stopping attack.")
                 break
 
+            pbar.set_postfix_str("querying")
+            pbar.refresh()
             oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+            pbar.set_postfix_str("training")
+            pbar.refresh()
             self.observe(query_batch, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
         pbar.close()
@@ -472,38 +478,48 @@ class CloudLeak(AttackRunner):
 
         scored: List[Tuple[float, int, torch.Tensor]] = []
         ptr = 0
+        score_pbar = tqdm(
+            total=len(candidate_indices),
+            desc="[CloudLeak] Scoring Candidates",
+            leave=False,
+        )
 
         substitute.eval()
-        for s_imgs, s_labels in loader:
-            batch_len = s_imgs.size(0)
-            curr_indices = candidate_indices[ptr : ptr + batch_len]
-            ptr += batch_len
+        try:
+            for s_imgs, s_labels in loader:
+                batch_len = s_imgs.size(0)
+                curr_indices = candidate_indices[ptr : ptr + batch_len]
+                ptr += batch_len
 
-            t_imgs_list = []
-            for k_idx, s_idx in enumerate(curr_indices):
-                source_label = int(s_labels[k_idx].item())
-                target_idx = self._select_target_index(source_label, s_idx)
-                t_img, _ = self.pool_dataset[target_idx]
-                t_imgs_list.append(t_img)
+                t_imgs_list = []
+                for k_idx, s_idx in enumerate(curr_indices):
+                    source_label = int(s_labels[k_idx].item())
+                    target_idx = self._select_target_index(source_label, s_idx)
+                    t_img, _ = self.pool_dataset[target_idx]
+                    t_imgs_list.append(t_img)
 
-            t_imgs = torch.stack(t_imgs_list)
-            margins = [self._compute_margin_m(int(s_labels[i].item()), device) for i in range(batch_len)]
-            margin_m = torch.tensor(margins, device=device)
+                t_imgs = torch.stack(t_imgs_list)
+                margins = [self._compute_margin_m(int(s_labels[i].item()), device) for i in range(batch_len)]
+                margin_m = torch.tensor(margins, device=device)
 
-            s_imgs_adv = self.featurefool.generate_batch(
-                s_imgs.to(device, non_blocking=str(device).startswith("cuda")),
-                t_imgs.to(device, non_blocking=str(device).startswith("cuda")),
-                margin_m=margin_m,
-            )
+                s_imgs_adv = self.featurefool.generate_batch(
+                    s_imgs.to(device, non_blocking=str(device).startswith("cuda")),
+                    t_imgs.to(device, non_blocking=str(device).startswith("cuda")),
+                    margin_m=margin_m,
+                )
 
-            with torch.no_grad():
-                logits = substitute(s_imgs_adv.to(device, non_blocking=str(device).startswith("cuda")))
-                probs = F.softmax(logits, dim=1)
-                max_prob, _ = probs.max(dim=1)
-                scores = 1.0 - max_prob
+                with torch.no_grad():
+                    logits = substitute(s_imgs_adv.to(device, non_blocking=str(device).startswith("cuda")))
+                    probs = F.softmax(logits, dim=1)
+                    max_prob, _ = probs.max(dim=1)
+                    scores = 1.0 - max_prob
 
-            for j in range(s_imgs_adv.size(0)):
-                scored.append((float(scores[j].item()), int(curr_indices[j]), s_imgs_adv[j].detach().cpu()))
+                for j in range(s_imgs_adv.size(0)):
+                    scored.append((float(scores[j].item()), int(curr_indices[j]), s_imgs_adv[j].detach().cpu()))
+
+                score_pbar.update(batch_len)
+        finally:
+            score_pbar.close()
 
         return scored
 
