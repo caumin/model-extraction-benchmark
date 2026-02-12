@@ -44,6 +44,18 @@ class _PseudoLabelDataset(Dataset):
         return x, y
 
 
+class _LabeledTensorDataset(Dataset):
+    def __init__(self, x: torch.Tensor, y: torch.Tensor) -> None:
+        self.x = x
+        self.y = y
+
+    def __len__(self) -> int:
+        return int(self.x.size(0))
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.x[idx], self.y[idx]
+
+
 def generate_gradcam_heatmap(
     model: nn.Module,
     x: torch.Tensor,
@@ -989,19 +1001,6 @@ class BlackboxDissector(AttackRunner):
         x_all = torch.cat(x_labeled, dim=0)
         y_all = torch.cat(y_labeled, dim=0)
 
-        class LabeledDataset(torch.utils.data.Dataset):
-            def __init__(self, x: torch.Tensor, y: torch.Tensor):
-                self.x = x
-                self.y = y
-
-            def __len__(self) -> int:
-                return int(self.x.size(0))
-
-            def __getitem__(self, idx: int):
-                return self.x[idx], self.y[idx]
-
-        labeled_dataset = LabeledDataset(x_all, y_all)
-
         if self.pool_dataset is None:
             # Should be initialized in selection, but safe check
             dataset_config = state.metadata.get("dataset_config", {})
@@ -1042,11 +1041,11 @@ class BlackboxDissector(AttackRunner):
         if train_size < 2:
             return
 
-        train_subset = LabeledDataset(x_all, y_all)
+        train_subset = _LabeledTensorDataset(x_all, y_all)
         if len(val_labeled_x) > 0 and len(val_labeled_y) > 0:
             x_val = torch.cat(val_labeled_x, dim=0)
             y_val = torch.cat(val_labeled_y, dim=0)
-            val_subset = LabeledDataset(x_val, y_val)
+            val_subset = _LabeledTensorDataset(x_val, y_val)
         else:
             total_size = int(train_subset.__len__())
             val_size = max(1, int(0.2 * total_size))

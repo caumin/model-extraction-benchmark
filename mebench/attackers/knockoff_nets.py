@@ -489,19 +489,8 @@ class KnockoffNets(AttackRunner):
         x_all = torch.cat(query_x, dim=0)
         y_all = torch.cat(query_y, dim=0)
 
-        class QueryDataset(torch.utils.data.Dataset):
-            def __init__(self, x: torch.Tensor, y: torch.Tensor) -> None:
-                self.x = x
-                self.y = y
-
-            def __len__(self) -> int:
-                return self.x.shape[0]
-
-            def __getitem__(self, idx: int):
-                return self.x[idx], self.y[idx]
-
         sub_config = state.metadata.get("substitute_config", {})
-        dataset = QueryDataset(x_all, y_all)
+        dataset = torch.utils.data.TensorDataset(x_all, y_all)
         train_batch_size = int(
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
@@ -512,7 +501,7 @@ class KnockoffNets(AttackRunner):
         if len(val_query_x) > 0 and len(val_query_y) > 0:
             x_val = torch.cat(val_query_x, dim=0)
             y_val = torch.cat(val_query_y, dim=0)
-            val_dataset = QueryDataset(x_val, y_val)
+            val_dataset = torch.utils.data.TensorDataset(x_val, y_val)
             train_size = len(train_dataset)
         else:
             total_size = len(dataset)

@@ -167,6 +167,27 @@ class FeatureFool:
             hook_handle.remove()
 
 
+class _QueryListDataset(torch.utils.data.Dataset):
+    def __init__(self, x_batches: List[torch.Tensor], y_batches: List[torch.Tensor]) -> None:
+        self.x_batches = x_batches
+        self.y_batches = y_batches
+        self._cum_sizes: List[int] = []
+        total = 0
+        for xb in self.x_batches:
+            total += int(xb.size(0))
+            self._cum_sizes.append(total)
+        self._total = total
+
+    def __len__(self) -> int:
+        return self._total
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_idx = bisect.bisect_right(self._cum_sizes, idx)
+        prev = 0 if batch_idx == 0 else self._cum_sizes[batch_idx - 1]
+        offset = idx - prev
+        return self.x_batches[batch_idx][offset], self.y_batches[batch_idx][offset]
+
+
 class CloudLeak(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState) -> None:
         super().__init__(config, state)
@@ -614,27 +635,7 @@ class CloudLeak(AttackRunner):
         if len(query_data_x) == 0:
             return
 
-        class QueryListDataset(torch.utils.data.Dataset):
-            def __init__(self, x_batches: List[torch.Tensor], y_batches: List[torch.Tensor]) -> None:
-                self.x_batches = x_batches
-                self.y_batches = y_batches
-                self._cum_sizes: List[int] = []
-                total = 0
-                for xb in self.x_batches:
-                    total += int(xb.size(0))
-                    self._cum_sizes.append(total)
-                self._total = total
-
-            def __len__(self) -> int:
-                return self._total
-
-            def __getitem__(self, idx: int):
-                batch_idx = bisect.bisect_right(self._cum_sizes, idx)
-                prev = 0 if batch_idx == 0 else self._cum_sizes[batch_idx - 1]
-                offset = idx - prev
-                return self.x_batches[batch_idx][offset], self.y_batches[batch_idx][offset]
-
-        dataset = QueryListDataset(query_data_x, query_data_y)
+        dataset = _QueryListDataset(query_data_x, query_data_y)
         if len(dataset) < 2:
             return
 
@@ -648,7 +649,7 @@ class CloudLeak(AttackRunner):
             x_val = torch.cat(val_query_x, dim=0)
             y_val = torch.cat(val_query_y, dim=0)
             train_subset = dataset
-            val_subset = QueryListDataset([x_val], [y_val])
+            val_subset = _QueryListDataset([x_val], [y_val])
             train_size = len(train_subset)
         else:
             total_size = len(dataset)

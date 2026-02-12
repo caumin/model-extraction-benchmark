@@ -18,6 +18,66 @@ from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.utils.dataloader import pool_loader_kwargs
 
 
+class _OfflineAugmentedTensorDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        aug_list: list[object],
+        multiplier: int,
+    ) -> None:
+        self.x = x
+        self.y = y
+        self.aug_list = aug_list
+        self.multiplier = max(1, int(multiplier))
+
+    def __len__(self) -> int:
+        return int(self.x.size(0)) * int(self.multiplier)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        base_len = int(self.x.size(0))
+        base_idx = int(idx % base_len)
+        aug_idx = int((idx // base_len) % self.multiplier)
+        x = self.x[base_idx]
+        if self.aug_list:
+            aug = self.aug_list[aug_idx % len(self.aug_list)]
+            x = aug(x)
+        return x, self.y[base_idx]
+
+
+class _CopycatGaussianNoise:
+    def __init__(self, sigma_max: float = 0.08) -> None:
+        self.sigma_max = float(sigma_max)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        sigma = float(np.random.uniform(0.0, self.sigma_max))
+        out = x + torch.randn_like(x) * sigma
+        return self._clamp(out)
+
+    @staticmethod
+    def _clamp(x: torch.Tensor) -> torch.Tensor:
+        if float(x.min().item()) < 0.0:
+            return x.clamp(-1.0, 1.0)
+        return x.clamp(0.0, 1.0)
+
+
+class _CopycatAddConstant:
+    def __init__(self, vmin: float = -20.0 / 255.0, vmax: float = 40.0 / 255.0) -> None:
+        self.vmin = float(vmin)
+        self.vmax = float(vmax)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        val = float(np.random.uniform(self.vmin, self.vmax))
+        out = x + val
+        return self._clamp(out)
+
+    @staticmethod
+    def _clamp(x: torch.Tensor) -> torch.Tensor:
+        if float(x.min().item()) < 0.0:
+            return x.clamp(-1.0, 1.0)
+        return x.clamp(0.0, 1.0)
+
+
 class CopycatCNN(AttackRunner):
     """CopycatCNN attack using non-problem domain data."""
 
@@ -171,21 +231,6 @@ class CopycatCNN(AttackRunner):
         x_train = x_all[indices]
         y_train = y_all[indices]
 
-        def _clamp_inplace(x: torch.Tensor) -> torch.Tensor:
-            # Keep range consistent with common dataset conventions.
-            if x.min().item() < 0.0:
-                return x.clamp(-1.0, 1.0)
-            return x.clamp(0.0, 1.0)
-
-        def _gaussian_noise(x: torch.Tensor, sigma_max: float = 0.08) -> torch.Tensor:
-            # sigma_max follows imgaug settings (~0.08 * 255). We treat x as [0,1] or [-1,1].
-            sigma = float(np.random.uniform(0.0, sigma_max))
-            return _clamp_inplace(x + torch.randn_like(x) * sigma)
-
-        def _add_constant(x: torch.Tensor, vmin: float = -20.0 / 255.0, vmax: float = 40.0 / 255.0) -> torch.Tensor:
-            val = float(np.random.uniform(vmin, vmax))
-            return _clamp_inplace(x + val)
-
         # 22 offline augmentation methods (approximated with torchvision ops on tensors).
         # Reference: https://github.com/jeiks/Stealing_DL_Models (Copycat_CNN/Scripts/image-augmentation.py)
         augs: list[callable] = [
@@ -209,16 +254,16 @@ class CopycatCNN(AttackRunner):
             ),
 
             # 10-15: Noise / Sharpen / Crop (+ flip variants approximated)
-            transforms.Lambda(lambda x: _gaussian_noise(x, sigma_max=0.08)),
+            _CopycatGaussianNoise(sigma_max=0.08),
             transforms.Compose([transforms.RandomAdjustSharpness(sharpness_factor=2.0, p=1.0)]),
             transforms.RandomResizedCrop(size=x_train.shape[-1], scale=(0.85, 1.0)),
-            transforms.Compose([transforms.Lambda(lambda x: _gaussian_noise(x, sigma_max=0.08)), transforms.RandomHorizontalFlip(p=0.9)]),
+            transforms.Compose([_CopycatGaussianNoise(sigma_max=0.08), transforms.RandomHorizontalFlip(p=0.9)]),
             transforms.Compose([transforms.RandomAdjustSharpness(sharpness_factor=2.0, p=1.0), transforms.RandomHorizontalFlip(p=0.9)]),
             transforms.Compose([transforms.RandomResizedCrop(size=x_train.shape[-1], scale=(0.85, 1.0)), transforms.RandomHorizontalFlip(p=0.9)]),
 
             # 16-18: Blur / Add / Contrast
             transforms.GaussianBlur(kernel_size=3, sigma=(1.0, 1.5)),
-            transforms.Lambda(lambda x: _add_constant(x)),
+            _CopycatAddConstant(),
             transforms.ColorJitter(contrast=(1.0, 1.5)),
 
             # 19-22: Piecewise affine (approximated via perspective)
@@ -231,27 +276,7 @@ class CopycatCNN(AttackRunner):
             ]),
         ]
 
-        class OfflineAugmentedTensorDataset(torch.utils.data.Dataset):
-            def __init__(self, x: torch.Tensor, y: torch.Tensor, aug_list: list[callable], multiplier: int):
-                self.x = x
-                self.y = y
-                self.aug_list = aug_list
-                self.multiplier = max(1, int(multiplier))
-
-            def __len__(self) -> int:
-                return self.x.size(0) * self.multiplier
-
-            def __getitem__(self, idx: int):
-                base_len = self.x.size(0)
-                base_idx = idx % base_len
-                aug_idx = (idx // base_len) % self.multiplier
-                x = self.x[base_idx]
-                if self.aug_list:
-                    aug = self.aug_list[aug_idx % len(self.aug_list)]
-                    x = aug(x)
-                return x, self.y[base_idx]
-
-        dataset = OfflineAugmentedTensorDataset(x_train, y_train, augs, self.augmentation_multiplier)
+        dataset = _OfflineAugmentedTensorDataset(x_train, y_train, augs, self.augmentation_multiplier)
         sub_config = state.metadata.get("substitute_config", {})
         train_batch_size = int(
             sub_config.get("batch_size")
