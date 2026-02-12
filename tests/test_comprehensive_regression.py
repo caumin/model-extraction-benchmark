@@ -77,6 +77,15 @@ class TestAttackInterface:
                 "policy_lr": 0.01,
                 "coarse_clusters": 10
             })
+        elif attack_name == "cloudleak":
+            # Keep CloudLeak query selection lightweight for unit tests.
+            # The paper-faithful FeatureFool optimization can be expensive.
+            config.update({
+                "use_pretrained": False,
+                "lbfgs_iters": 1,
+                "gen_batch_size": 8,
+                "candidate_ratio": 1.0,
+            })
         
         # Create mock state
         state = BenchmarkState()

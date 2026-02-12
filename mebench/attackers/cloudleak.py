@@ -131,9 +131,13 @@ class FeatureFool:
                 _ = self.model(x_target_dev)
                 phi_t = activations.pop(0).detach().view(B, -1)
 
-            delta = torch.zeros_like(x_source_dev, requires_grad=True)
+            # Eq.(9) requires x'_s in [0,1]^n with a box-constrained optimizer (L-BFGS-B).
+            # PyTorch LBFGS is unconstrained; instead use a reparameterization:
+            # x_adv = sigmoid(w) which guarantees x_adv in (0,1) without clamp.
+            x_init = x_source_dev.detach().clamp(1e-6, 1.0 - 1e-6)
+            w = torch.log(x_init / (1.0 - x_init)).clone().detach().requires_grad_(True)
             optimizer = torch.optim.LBFGS(
-                [delta],
+                [w],
                 lr=1.0,
                 max_iter=self.max_iters,
                 history_size=10,
@@ -144,7 +148,7 @@ class FeatureFool:
 
             def closure() -> torch.Tensor:
                 optimizer.zero_grad()
-                x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
+                x_adv = torch.sigmoid(w)
 
                 activations.clear()
                 _ = self.model(x_adv)
@@ -153,7 +157,7 @@ class FeatureFool:
                 dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1).view(B, 1)
                 dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1).view(B, 1)
                 triplet = torch.clamp(dist_t - dist_s + margin_m, min=0.0)
-                visual_loss = torch.sum(delta ** 2, dim=(1, 2, 3)).view(B, 1)
+                visual_loss = torch.sum((x_adv - x_source_dev) ** 2, dim=(1, 2, 3)).view(B, 1)
                 loss = torch.mean(visual_loss + self.lambda_adv * triplet)
                 loss.backward()
                 return loss
@@ -161,7 +165,7 @@ class FeatureFool:
             optimizer.step(closure)
 
             with torch.no_grad():
-                x_adv = torch.clamp(x_source_dev + delta, 0.0, 1.0)
+                x_adv = torch.sigmoid(w)
             return x_adv.detach().cpu()
         finally:
             hook_handle.remove()
@@ -188,11 +192,64 @@ class _QueryListDataset(torch.utils.data.Dataset):
         return self.x_batches[batch_idx][offset], self.y_batches[batch_idx][offset]
 
 
+class CloudLeakVGGDeepID(nn.Module):
+    """VGG19-based substitute with a DeepID layer (CloudLeak Section III.C).
+
+    The paper removes FC6 and adds a DeepID layer. For benchmark integration we
+    implement a VGG19 feature extractor + AdaptiveAvgPool2d(7,7) and a DeepID
+    projection (dim=480 by default), followed by a linear classifier.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_classes: int,
+        input_channels: int,
+        deepid_dim: int = 480,
+        weights: str = "IMAGENET1K_V1",
+    ) -> None:
+        super().__init__()
+
+        try:
+            from torchvision.models import vgg19, VGG19_Weights
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(f"torchvision is required for CloudLeakVGGDeepID: {exc}")
+
+        if weights == "IMAGENET1K_V1":
+            base = vgg19(weights=VGG19_Weights.IMAGENET1K_V1)
+        else:
+            base = vgg19(weights=None)
+
+        # VGG expects 3 channels. If grayscale, we repeat via a 1x1 conv.
+        self.pre = None
+        if int(input_channels) == 1:
+            self.pre = nn.Conv2d(1, 3, kernel_size=1, bias=False)
+
+        self.features = base.features
+        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        feat_dim = 512 * 7 * 7
+
+        # DeepID layer (paper: dim=480)
+        self.deepid = nn.Linear(feat_dim, int(deepid_dim))
+        self.classifier = nn.Linear(int(deepid_dim), int(num_classes))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.pre is not None:
+            x = self.pre(x)
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.deepid(x)
+        x = F.relu(x, inplace=True)
+        return self.classifier(x)
+
+
 class CloudLeak(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState) -> None:
         super().__init__(config, state)
 
-        self.lbfgs_iters = int(config.get("lbfgs_iters", 10))
+        # Paper uses box-constrained L-BFGS (Section IV.A.3). Use enough iters to converge.
+        self.lbfgs_iters = int(config.get("lbfgs_iters", 50))
         self.lbfgs_factr = float(config.get("lbfgs_factr", 1e7))
         self.lbfgs_pgtol = float(config.get("lbfgs_pgtol", 1e-5))
 
@@ -213,8 +270,10 @@ class CloudLeak(AttackRunner):
         self.max_epochs = int(config.get("max_epochs", 200))
         self.patience = int(config.get("patience", 20))
 
-        self.use_pretrained = bool(config.get("use_pretrained", False))
-        self.pretrained_arch = str(config.get("pretrained_arch", "resnet18"))
+        # Paper Section III.C uses VGG19 modified with a DeepID layer.
+        self.use_pretrained = bool(config.get("use_pretrained", True))
+        self.pretrained_arch = str(config.get("pretrained_arch", "vgg19_deepid"))
+        self.deepid_dim = int(config.get("deepid_dim", 480))
         self.feature_layer = config.get("feature_layer")
 
         self.pool_dataset = None
@@ -360,34 +419,56 @@ class CloudLeak(AttackRunner):
         if input_channels not in (1, 3):
             return None
 
-        if self.pretrained_arch != "resnet18":
-            return None
+        if self.pretrained_arch == "resnet18":
+            try:
+                from torchvision.models import resnet18, ResNet18_Weights
+            except Exception as exc:
+                self.logger.warning("torchvision unavailable for pretrained CloudLeak: %s", exc)
+                return None
 
-        try:
-            from torchvision.models import resnet18, ResNet18_Weights
-        except Exception as exc:
-            self.logger.warning("torchvision unavailable for pretrained CloudLeak: %s", exc)
-            return None
+            base = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+            base.fc = nn.Linear(base.fc.in_features, num_classes)
 
-        base = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        base.fc = nn.Linear(base.fc.in_features, num_classes)
+            pre_layers: List[nn.Module] = []
+            if input_channels == 1:
+                pre_layers.append(nn.Conv2d(1, 3, kernel_size=1, bias=False))
 
-        pre_layers: List[nn.Module] = []
-        if input_channels == 1:
-            pre_layers.append(nn.Conv2d(1, 3, kernel_size=1, bias=False))
+            if input_size != (224, 224):
+                pre_layers.append(
+                    nn.Upsample(size=(224, 224), mode="bilinear", align_corners=False)
+                )
 
-        if input_size != (224, 224):
-            pre_layers.append(nn.Upsample(size=(224, 224), mode="bilinear", align_corners=False))
+            if pre_layers:
+                model = nn.Sequential(*pre_layers, base)
+            else:
+                model = base
 
-        if pre_layers:
-            model = nn.Sequential(*pre_layers, base)
-        else:
-            model = base
+            return model.to(device)
 
-        return model.to(device)
+        if self.pretrained_arch == "vgg19_deepid":
+            # DeepID substitute defined in CloudLeak Section III.C.
+            model = CloudLeakVGGDeepID(
+                num_classes=num_classes,
+                input_channels=input_channels,
+                deepid_dim=self.deepid_dim,
+            ).to(device)
+
+            # VGG19 weights are trained at 224x224; resize inputs accordingly.
+            pre_layers: List[nn.Module] = []
+            if input_size != (224, 224):
+                pre_layers.append(
+                    nn.Upsample(size=(224, 224), mode="bilinear", align_corners=False)
+                )
+            if pre_layers:
+                return nn.Sequential(*pre_layers, model).to(device)
+            return model
+
+        return None
 
     def _ensure_featurefool(self, substitute: nn.Module, device: str) -> None:
         if self.featurefool is None:
+            if self.feature_layer is None and self.pretrained_arch == "vgg19_deepid":
+                self.feature_layer = "deepid"
             self.featurefool = FeatureFool(
                 substitute,
                 margin_m=self.margin_m,
