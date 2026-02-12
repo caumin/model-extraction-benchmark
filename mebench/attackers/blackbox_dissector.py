@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 from sklearn.metrics import f1_score
 from tqdm import tqdm
 
@@ -21,6 +21,27 @@ from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.utils.dataloader import pool_loader_kwargs
 from mebench.eval.metrics import evaluate_substitute
+
+
+class _PseudoLabelDataset(Dataset):
+    def __init__(
+        self,
+        indices: List[int],
+        labels: Dict[int, torch.Tensor],
+        pool: Dataset,
+    ) -> None:
+        self.indices = indices
+        self.labels = labels
+        self.pool = pool
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        real_idx = self.indices[idx]
+        x, _ = self.pool[real_idx]
+        y = self.labels[real_idx]
+        return x, y
 
 
 def generate_gradcam_heatmap(
@@ -1095,28 +1116,8 @@ class BlackboxDissector(AttackRunner):
         if len(pseudo_labels) > 0:
             pseudo_indices = list(pseudo_labels.keys())
 
-            class PseudoDataset(torch.utils.data.Dataset):
-                def __init__(
-                    self,
-                    indices: List[int],
-                    labels: dict[int, torch.Tensor],
-                    pool: torch.utils.data.Dataset,
-                ):
-                    self.indices = indices
-                    self.labels = labels
-                    self.pool = pool
-
-                def __len__(self) -> int:
-                    return len(self.indices)
-
-                def __getitem__(self, idx: int):
-                    real_idx = self.indices[idx]
-                    x, _ = self.pool[real_idx]
-                    y = self.labels[real_idx]
-                    return x, y
-
             pseudo_loader = torch.utils.data.DataLoader(
-                PseudoDataset(pseudo_indices, pseudo_labels, self.pool_dataset),
+                _PseudoLabelDataset(pseudo_indices, pseudo_labels, self.pool_dataset),
                 batch_size=train_batch_size,
                 shuffle=True,
                 **pool_loader_kwargs(device, {"num_workers": pseudo_workers}),
