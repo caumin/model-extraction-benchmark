@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import math
 
 from mebench.core.context import BenchmarkContext
@@ -141,7 +141,14 @@ class AttackRunner(ABC):
         state.attack_state["query_data_x"] = [x_all[val_size:].detach().cpu()]
         state.attack_state["query_data_y"] = [y_all[val_size:].detach().cpu()]
 
-    def _evaluate_current_substitute(self, substitute: nn.Module, device: str) -> None:
+    def _evaluate_current_substitute(
+        self,
+        substitute: nn.Module,
+        device: str,
+        *,
+        track: str = "track_b",
+        query_count: Optional[int] = None,
+    ) -> None:
         """Perform periodic evaluation on substitute model."""
         if substitute is None or self.victim is None:
             return
@@ -168,8 +175,8 @@ class AttackRunner(ABC):
             device=device,
             output_mode=self.config.get("output_mode", "soft_prob")
         )
-        
-        current_queries = self.state.query_count
+
+        current_queries = self.state.query_count if query_count is None else int(query_count)
         # Handle cases where query_count is 0 but we have labeled data (e.g. initial seed)
         if current_queries == 0:
             current_queries = len(self.state.attack_state.get('labeled_indices', []))
@@ -187,17 +194,16 @@ class AttackRunner(ABC):
         if self.ctx:
             # Log history (time-series)
             self.ctx.logger.log_history(step=current_queries, metrics=metrics)
-            
+
             # Log checkpoint (metrics.csv)
-            # Use 'track_b' as default since we are running the attacker's native loop
             seed = self.state.metadata.get("seed", 0)
             self.ctx.logger.log_checkpoint(
                 seed=seed,
                 checkpoint=current_queries,
-                track="track_b",
+                track=track,
                 metrics=metrics,
             )
-            
+
             # Force save to ensure persistence even if crashed later
             self.ctx.logger.save_metrics_csv()
 

@@ -19,6 +19,54 @@ from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
 
 
+def _clamp_to_unit_range(x: torch.Tensor) -> torch.Tensor:
+    """Clamp a batch of images into the benchmark [0, 1] contract.
+
+    The upstream Ripper generators are mostly bounded to [-1, 1] (e.g. SNGAN's tanh), while
+    some checkpoints/models may already emit [0, 1].
+    """
+
+    if not torch.isfinite(x).all():
+        return torch.zeros_like(x)
+
+    x_min = float(x.min().item())
+
+    # Heuristic matching the paper-era upstream behavior:
+    # if data appears to be tanh-like, shift to [0,1], then clamp.
+    if x_min < 0.0:
+        x = (x + 1.0) / 2.0
+
+    return torch.clamp(x, 0.0, 1.0)
+
+
+def _match_input_shape(x: torch.Tensor, input_shape: tuple[int, int, int]) -> torch.Tensor:
+    """Resize/cropping helper to match victim/substitute expected input shape."""
+
+    if len(input_shape) != 3:
+        raise ValueError(f"Unsupported input_shape for Ripper matching: {input_shape}")
+
+    expected_c, expected_h, expected_w = input_shape
+
+    # Channel-first adjustment
+    if x.size(1) != expected_c:
+        if x.size(1) > expected_c:
+            x = x[:, :expected_c, :, :]
+        else:
+            repeat = (expected_c + x.size(1) - 1) // x.size(1)
+            x = x.repeat(1, repeat, 1, 1)[:, :expected_c, :, :]
+
+    if x.size(2) == expected_h and x.size(3) == expected_w:
+        return x
+
+    return torch.nn.functional.interpolate(
+        x,
+        size=(expected_h, expected_w),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+
+
 class BlackboxRipper(AttackRunner):
     """Upstream-faithful Black-Box Ripper (NeurIPS 2020).
 

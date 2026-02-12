@@ -102,12 +102,12 @@ class GAME(AttackRunner):
                     self.current_milestone_idx += 1
 
             step_size = self._default_step_size(ctx)
-            x_query, meta = self._select_query_batch(step_size, self.state)
-            if x_query.size(0) == 0:
+            query_batch = self._select_query_batch(step_size, self.state)
+            if query_batch.x.size(0) == 0:
                 break
-            oracle_output = ctx.query(x_query, meta=meta)
-            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
-            pbar.update(x_query.size(0))
+            oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+            self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, self.state)
+            pbar.update(query_batch.x.size(0))
             
             # Periodic evaluation
             queries_done = total_budget - ctx.budget_remaining
@@ -119,7 +119,7 @@ class GAME(AttackRunner):
         self._ctx = None
         self._query_fn = None
 
-    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         self._init_models(state)
         device = state.metadata.get("device", "cpu")
         self._pending_query_k = k
@@ -133,7 +133,8 @@ class GAME(AttackRunner):
             k = min(k, self._ctx.budget_remaining)
             if k <= 0:
                 input_shape = state.metadata.get("input_shape", (3, 32, 32))
-                return torch.empty((0, *input_shape), device=device), {"acs_probs": class_probs.cpu()}
+                x_empty = torch.empty((0, *input_shape), device=device)
+                return QueryBatch(x=x_empty, meta={"acs_probs": class_probs.cpu()})
 
         z = torch.randn(k, self.noise_dim, device=device)
         y_g = torch.multinomial(class_probs, k, replacement=True)
@@ -149,7 +150,15 @@ class GAME(AttackRunner):
             "y_g": y_g.cpu(),
             "acs_probs": class_probs.cpu(),
         }
-        return x_query, meta
+        return QueryBatch(x=x_query, meta=meta)
+
+    def observe(
+        self,
+        query_batch: QueryBatch,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, state)
 
     def _handle_oracle_output(
         self,
@@ -241,7 +250,7 @@ class GAME(AttackRunner):
             sub_config = state.metadata.get("substitute_config", {})
             opt_params = sub_config.get("optimizer", {})
             
-            arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18-8x")
+            arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18")
             width_mult = int(sub_config.get("width_mult", 1))
             dropout_prob = float(sub_config.get("dropout_prob", 0.0))
             self.student = create_substitute(
@@ -401,6 +410,16 @@ class GAME(AttackRunner):
         if z is None or y_g is None:
             return
 
+        victim_config = self.state.metadata.get("victim_config", {})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
+        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
+        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+
+        def _norm(img: torch.Tensor) -> torch.Tensor:
+            return (img - norm_mean) / norm_std
+
         for _ in range(self.agu_steps):
             # 1. Train Discriminator
             real_x = self._next_proxy_batch(device)
@@ -428,25 +447,40 @@ class GAME(AttackRunner):
             self.generator_optimizer.zero_grad()
             fake_validity, fake_label = self.discriminator(fake_x)
             
-            # Loss G: Fool D + Class Control + Victim Agreement (Boundary)
+            # GAN/ACGAN generator terms
             g_loss_adv = F.binary_cross_entropy_with_logits(fake_validity, torch.ones_like(fake_validity))
-            g_loss_cls = 0.0
+            g_loss_cls = torch.zeros((), device=device)
             if self.use_acgan:
                 g_loss_cls = F.cross_entropy(fake_label, y_g.to(device))
-            
-            # Boundary Loss (Eq 8): Minimize entropy of victim predictions on generated samples
-            # "Samples near decision boundary" -> High entropy
-            # But usually we want samples where victim is UNCERTAIN (near boundary).
-            # So we should MAXIMIZE entropy (minimize negative entropy).
-            # Using self.beta2 * (victim_entropy)
-            victim_entropy = -(victim_probs * torch.log(victim_probs + 1e-10)).sum(dim=1).mean()
-            # If beta2 > 0, we minimize entropy (make victim confident? No, that's evasion).
-            # For extraction, we want informative samples (near boundary) -> Maximize Entropy.
-            # So loss term should be -Entropy.
-            # Let's assume standard Active Learning heuristic: Maximize Entropy.
-            g_loss_bou = -victim_entropy
-            
-            g_loss = self.beta3 * g_loss_adv + g_loss_cls + self.beta2 * g_loss_bou
+
+            # Paper-aligned GAME objectives on generated samples.
+            student_logits = self.student(_norm(fake_x))
+            student_probs = F.softmax(student_logits, dim=1)
+
+            # L_res: increase responsivity (negative ReLU activation sum).
+            l_res = -torch.relu(student_logits).sum(dim=1).mean()
+
+            # L_bou: move samples toward decision boundary (top1-top2 margin).
+            top2_vals = torch.topk(student_probs, k=2, dim=1).values
+            l_bou = (top2_vals[:, 0] - top2_vals[:, 1]).mean()
+
+            # L_adv (paper): -CE(N_S(x), argmax N_S(x)).
+            l_adv = -F.cross_entropy(student_logits, student_logits.argmax(dim=1))
+
+            # L_dif (paper): -KL(N_S(x), N_V(x)).
+            # PyTorch KLDiv computes KL(target || input). To compute KL(S||V):
+            # KL(S||V) = KLDiv(log(V), S).
+            l_dif = -F.kl_div(
+                torch.log(victim_probs + 1e-10),
+                student_probs,
+                reduction="batchmean",
+            )
+            g_loss = (
+                self.beta1 * l_res
+                + self.beta2 * l_bou
+                + self.beta3 * l_adv
+                + self.beta4 * l_dif
+            )
             g_loss.backward()
             self.generator_optimizer.step()
 
@@ -469,8 +503,8 @@ class GAME(AttackRunner):
         student_logits = self.student(student_in)
         student_probs = F.softmax(student_logits, dim=1)
         
-        # L_res: Response Loss (Distillation)
-        # Minimize KL(S || V)
+        # L_res: distillation loss.
+        # Use KL(teacher || student): KLDiv(log(student), teacher)
         loss_res = F.kl_div(torch.log(student_probs + 1e-10), victim_probs, reduction="batchmean")
         
         # L_dif: Diff Loss (make S different from V?)

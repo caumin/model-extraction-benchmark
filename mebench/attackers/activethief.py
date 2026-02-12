@@ -237,7 +237,6 @@ class ActiveThief(AttackRunner):
             val_loader=val_loader,
             eval_fn=eval_fn,
             loss_fn=loss_fn,
-            skip_on_error=True,
             load_best=True,
             early_stop_mode="min", # minimizing validation loss
         )

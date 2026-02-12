@@ -1,6 +1,10 @@
 import torch
 
-from mebench.attackers.blackbox_ripper import BlackboxRipper
+from mebench.attackers.blackbox_ripper import (
+    BlackboxRipper,
+    _clamp_to_unit_range,
+    _match_input_shape,
+)
 from mebench.core.state import BenchmarkState
 
 
@@ -85,3 +89,17 @@ def test_blackbox_ripper_objective_eq2() -> None:
     probs[0, 1] = 1.0
     obj = attack._objective_mse_sum(probs, target_onehot)
     assert abs(float(obj.item()) - 2.0) < 1e-6
+
+
+def test_clamp_and_shape_helpers() -> None:
+    x = torch.tensor([[[[-1.0, -0.2], [0.0, 0.5]]]])
+    y = _clamp_to_unit_range(x)
+    assert y.min() >= 0.0 and y.max() <= 1.0
+    assert torch.allclose(y[0], torch.tensor([[[0.0, 0.4], [0.5, 0.75]]]))
+
+    img = torch.randn(2, 3, 32, 16)
+    out = _match_input_shape(img, (3, 64, 64))
+    assert tuple(out.shape) == (2, 3, 64, 64)
+    img3 = torch.randn(2, 1, 32, 32)
+    out3 = _match_input_shape(img3, (3, 32, 32))
+    assert tuple(out3.shape) == (2, 3, 32, 32)

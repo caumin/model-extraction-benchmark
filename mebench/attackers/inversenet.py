@@ -67,13 +67,13 @@ class InverseNet(AttackRunner):
         
         while ctx.budget_remaining > 0:
             step_size = self._default_step_size(ctx)
-            x_query, meta = self._select_query_batch(step_size, self.state)
-            oracle_output = ctx.query(x_query, meta=meta)
-            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
-            pbar.update(x_query.size(0))
+            query_batch = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+            self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, self.state)
+            pbar.update(query_batch.x.size(0))
         pbar.close()
 
-    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         if self.pool_dataset is None:
             self._load_pool(state)
 
@@ -104,7 +104,7 @@ class InverseNet(AttackRunner):
 
             x = self._augment_inversion(x, y_sample)
             meta = {"phase": phase, "synthetic": True, "augmented": True}
-            return x, meta
+            return QueryBatch(x=x, meta=meta)
 
         if len(self.pool_dataset) == 0:
             raise ValueError(
@@ -113,15 +113,24 @@ class InverseNet(AttackRunner):
             )
 
         indices = self._select_phase_indices(k, state, phase)
+
+        used = set(state.attack_state.get("used_pool_indices", []))
+        for idx in indices:
+            used.add(int(idx))
+        state.attack_state["used_pool_indices"] = sorted(used)
+
         x_list = [self.pool_dataset[idx][0] for idx in indices]
-        if len(x_list) < k:
-            raise ValueError(
-                f"Query pool exhausted for {self.__class__.__name__}. "
-                f"Requested {k}, found {len(x_list)}."
-            )
+        if len(x_list) == 0:
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            x_empty = torch.empty((0, *input_shape))
+            return QueryBatch(x=x_empty, meta={"indices": [], "phase": phase, "status": "exhausted"})
+
         x = torch.stack(x_list)
         meta = {"indices": indices, "phase": phase}
-        return x, meta
+        return QueryBatch(x=x, meta=meta)
+
+    def observe(self, query_batch: QueryBatch, oracle_output: OracleOutput, state: BenchmarkState) -> None:
+        self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, state)
 
     def _handle_oracle_output(
         self,
@@ -170,6 +179,8 @@ class InverseNet(AttackRunner):
         state.attack_state["substitute"] = None
         state.attack_state["coreset_centers"] = []
         state.attack_state["inversion_trained"] = False
+        state.attack_state["used_pool_indices"] = []
+        state.attack_state["phase1_pending"] = []
 
     def _get_dataset_config(self, state: BenchmarkState) -> dict:
         dataset_config = self.config.get("attack", {}).get("dataset")
@@ -547,15 +558,20 @@ class InverseNet(AttackRunner):
         if len(self.pool_dataset) == 0:
             return []
 
+        used = set(state.attack_state.get("used_pool_indices", []))
+        all_indices = list(range(len(self.pool_dataset)))
+        unused = [i for i in all_indices if i not in used]
+        if not unused:
+            return []
+
         # Phase 2 (HCSS): Remove coreset overlap as per paper
         if phase == 2:
-            all_indices = np.arange(len(self.pool_dataset))
             coreset_centers = state.attack_state.get("coreset_centers", [])
-            
+
             if len(coreset_centers) > 0:
-                available = np.setdiff1d(all_indices, np.array(coreset_centers)).tolist()
+                available = [i for i in unused if i not in set(coreset_centers)]
             else:
-                available = all_indices.tolist()
+                available = unused
                 
             # Use ENTIRE available pool (Strict Protocol)
             candidates = available
@@ -568,7 +584,7 @@ class InverseNet(AttackRunner):
             return self._hcss_select(k, candidates, substitute)
 
         # Phase 1 (Coreset) or others: Select from full pool (Strict Protocol)
-        candidates = list(range(len(self.pool_dataset)))
+        candidates = unused
 
         if phase == 1:
             return self._coreset_select(k, candidates, state)
@@ -576,10 +592,20 @@ class InverseNet(AttackRunner):
         return candidates[: min(k, len(candidates))]
 
     def _coreset_select(self, k: int, candidates: List[int], state: BenchmarkState) -> List[int]:
-        centers = state.attack_state.get("coreset_centers", [])
+        pending = list(state.attack_state.get("phase1_pending", []))
+        if pending:
+            take = min(int(k), len(pending))
+            out = pending[:take]
+            state.attack_state["phase1_pending"] = pending[take:]
+            return out
+
+        centers = list(state.attack_state.get("coreset_centers", []))
         if len(centers) == 0:
             seed_count = min(self.coreset_seed, len(candidates))
             centers = np.random.choice(candidates, seed_count, replace=False).tolist()
+            state.attack_state["coreset_centers"] = centers
+            state.attack_state["phase1_pending"] = list(centers)
+            return self._coreset_select(k, candidates, state)
 
         remaining = [idx for idx in candidates if idx not in centers]
         if len(remaining) == 0:

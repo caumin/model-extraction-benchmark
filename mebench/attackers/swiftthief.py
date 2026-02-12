@@ -763,16 +763,17 @@ class SwiftThief(AttackRunner):
         y = oracle_output.y
 
         state.attack_state["query_data_x"].append(x.detach().cpu())
-        state.attack_state["query_data_y"].append(y.detach().cpu())
 
         indices = query_batch.meta.get("indices", [])
         if oracle_output.kind == "soft_prob":
+            y_for_training = y.detach().cpu()
             for i, idx in enumerate(indices):
                 if int(idx) >= 0:
                     state.attack_state["victim_outputs"][int(idx)] = y[i].detach().cpu()
             labels = [int(t.argmax().item()) for t in y]
         else:
             num_classes = int(state.metadata.get("num_classes") or 10)
+            y_for_training = F.one_hot(y.long(), num_classes=num_classes).float().detach().cpu()
             for i, idx in enumerate(indices):
                 if int(idx) >= 0:
                     lab = int(y[i].item()) if y[i].ndim == 0 else int(y[i].argmax().item())
@@ -780,6 +781,8 @@ class SwiftThief(AttackRunner):
                     one_hot[lab] = 1.0
                     state.attack_state["victim_outputs"][int(idx)] = one_hot
             labels = [int(t.item()) if t.ndim == 0 else int(t.argmax().item()) for t in y]
+
+        state.attack_state["query_data_y"].append(y_for_training)
 
         for lab in labels:
             state.attack_state["class_counts"][lab] = state.attack_state["class_counts"].get(lab, 0) + 1
@@ -998,7 +1001,7 @@ class SwiftThief(AttackRunner):
         denom = 1.0 - torch.pow(beta_t, cnt.clamp_min(1.0))
         costs = (1.0 - beta_t) / denom.clamp_min(1e-12)
 
-        criterion = SimSiamLoss('simplified').to(device)
+        criterion = SimSiamLoss('original').to(device)
         soft_criterion = SoftSupSimSiamLossV17(device, num_classes).to(device)
         cost_sensitive_criterion = SimSiamLoss_cost_sensitive(costs).to(device)
 

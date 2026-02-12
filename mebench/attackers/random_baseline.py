@@ -37,6 +37,7 @@ class RandomBaseline(AttackRunner):
         state.attack_state.setdefault("val_query_data_x", [])
         state.attack_state.setdefault("val_query_data_y", [])
         state.attack_state.setdefault("substitute", None)
+        state.attack_state.setdefault("track_a_checkpoints", [])
 
     def _ensure_pool_dataset(self, state: BenchmarkState) -> None:
         if self.pool_dataset is None:
@@ -62,10 +63,16 @@ class RandomBaseline(AttackRunner):
         device = self.state.metadata.get("device", "cpu")
 
         total_budget = ctx.budget_remaining
+        checkpoints = sorted(int(c) for c in ctx.checkpoints)
+        seen_checkpoints = set(int(c) for c in self.state.attack_state.get("track_a_checkpoints", []))
+
         indices, pool_exhausted = self._sample_indices(total_budget, self.state)
         step_size = int(self.config.get("batch_size", self._default_step_size(ctx)))
 
-        pbar = self._create_progress_bar(total_budget, f"[{self.__class__.__name__}] Extracting")
+        pbar = self._create_progress_bar(
+            total_budget, f"[{self.__class__.__name__}] Extracting"
+        )
+        previous_queries = int(self.state.query_count)
         offset = 0
         while offset < total_budget:
             k = min(step_size, total_budget - offset)
@@ -82,10 +89,181 @@ class RandomBaseline(AttackRunner):
             self._handle_oracle_output(query_batch, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
             offset += k
+
+            current_queries = int(self.state.query_count)
+            self._maybe_train_and_log_track_a(
+                current_queries=current_queries,
+                previous_queries=previous_queries,
+                checkpoints=checkpoints,
+                seen_checkpoints=seen_checkpoints,
+                device=str(device),
+            )
+            previous_queries = current_queries
         pbar.close()
-        # Train once on the collected labeled set.
-        self._train_substitute(self.state)
-        # Final evaluation is handled by the engine.
+
+        # If no checkpoints were configured, keep the previous behavior.
+        if not checkpoints:
+            self._train_substitute(self.state)
+
+        # Final evaluation is handled by the engine. Keep latest substitute available.
+        
+    def _maybe_train_and_log_track_a(
+        self,
+        current_queries: int,
+        previous_queries: int,
+        checkpoints: list,
+        seen_checkpoints: set,
+        device: str,
+    ) -> None:
+        if not checkpoints:
+            return
+        if self.ctx is None or self.victim is None:
+            return
+
+        query_x = self.state.attack_state.get("query_data_x", [])
+        query_y = self.state.attack_state.get("query_data_y", [])
+        if len(query_x) == 0 or len(query_y) == 0:
+            return
+
+        all_x = torch.cat(query_x, dim=0)
+        all_y = torch.cat(query_y, dim=0)
+        total_received = int(all_x.size(0))
+
+        for checkpoint in checkpoints:
+            if (
+                checkpoint <= previous_queries
+                or checkpoint > current_queries
+                or checkpoint in seen_checkpoints
+                or checkpoint <= 0
+                or checkpoint > total_received
+            ):
+                continue
+
+            x_subset = all_x[: int(checkpoint)]
+            y_subset = all_y[: int(checkpoint)]
+            substitute = self._train_track_a(
+                x_all=x_subset,
+                y_all=y_subset,
+                checkpoint_budget=int(checkpoint),
+                device=str(device),
+            )
+
+            if substitute is None:
+                continue
+
+            seen_checkpoints.add(checkpoint)
+            self.state.attack_state["track_a_checkpoints"] = sorted(seen_checkpoints)
+            self.state.attack_state["substitute"] = substitute
+
+            self._evaluate_current_substitute(
+                substitute,
+                device=str(device),
+                track="track_a",
+                query_count=checkpoint,
+            )
+
+    def _track_a_num_steps(self, checkpoint_budget: int) -> int:
+        sub_config = self.state.metadata.get("substitute_config", {})
+        steps_coeff = float(sub_config.get("trackA", {}).get("steps_coeff_c", 0.2))
+        return max(1, int(math.ceil(steps_coeff * max(0, checkpoint_budget))))
+
+    def _track_a_batch_size(self) -> int:
+        sub_config = self.state.metadata.get("substitute_config", {})
+        return max(
+            1,
+            int(
+                sub_config.get("batch_size")
+                or sub_config.get("trackA", {}).get("batch_size")
+                or int(self.config.get("batch_size", 128))
+            ),
+        )
+
+    def _track_a_num_workers(self, kind: str = "train") -> int:
+        sub_config = self.state.metadata.get("substitute_config", {})
+        default_workers = int(
+            sub_config.get(
+                "train_num_workers",
+                sub_config.get("num_workers", self.config.get("num_workers", 0)),
+            )
+        )
+        if kind == "val":
+            return int(sub_config.get("val_num_workers", default_workers))
+        return default_workers
+
+    def _track_a_num_classes(self) -> int:
+        return int(
+            self.state.metadata.get("num_classes")
+            or self.state.metadata.get("victim_config", {}).get("num_classes")
+            or self.state.metadata.get("dataset_config", {}).get("num_classes", 10)
+        )
+
+    def _track_a_input_channels(self) -> int:
+        return int(self.state.metadata.get("input_shape", (3, 32, 32))[0])
+
+    def _train_track_a(
+        self,
+        x_all: torch.Tensor,
+        y_all: torch.Tensor,
+        checkpoint_budget: int,
+        device: str,
+    ):
+        if x_all.size(0) == 0 or y_all.size(0) == 0:
+            return None
+
+        sub_config = self.state.metadata.get("substitute_config", {})
+        init_seed = int(sub_config.get("init_seed", 42))
+        torch.manual_seed(init_seed)
+
+        substitute = create_substitute(
+            arch=sub_config.get("arch", "resnet18"),
+            num_classes=self._track_a_num_classes(),
+            input_channels=self._track_a_input_channels(),
+            width_mult=int(sub_config.get("width_mult", 1)),
+            dropout_prob=float(sub_config.get("dropout_prob", 0.0)),
+        ).to(device)
+
+        train_dataset = torch.utils.data.TensorDataset(x_all, y_all)
+        train_batch_size = self._track_a_batch_size()
+        num_steps = self._track_a_num_steps(checkpoint_budget)
+
+        output_mode = str(self.config.get("output_mode", "soft_prob"))
+
+        def train_loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if output_mode == "soft_prob":
+                targets = targets.clamp_min(1e-10)
+                targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                return nn.KLDivLoss(reduction="batchmean")(torch.log_softmax(outputs, dim=1), targets)
+            return nn.CrossEntropyLoss()(outputs, targets.long())
+
+        trainer_config = dict(sub_config)
+        trainer_config.setdefault("grad_clip", 1.0)
+
+        train_generator = torch.Generator().manual_seed(init_seed + checkpoint_budget)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=train_batch_size,
+            shuffle=True,
+            generator=train_generator,
+            **pool_loader_kwargs(
+                device,
+                {
+                    "num_workers": self._track_a_num_workers("train"),
+                },
+            ),
+        )
+
+        trainer = SubstituteTrainer(trainer_config, device=device)
+        request = TrainRequest(
+            model=substitute,
+            train_loader=train_loader,
+            loss_fn=train_loss_fn,
+            max_steps=num_steps,
+            load_best=False,
+        )
+        trainer.train(request)
+
+        return substitute
+
 
     def _sample_indices(self, k: int, state: BenchmarkState) -> tuple[list[int], bool]:
         self._ensure_pool_dataset(state)

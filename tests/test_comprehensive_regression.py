@@ -161,9 +161,8 @@ class TestAttackInterface:
             )
             
             oracle_output = OracleOutput(
-                logits=torch.randn(32, 10),
-                y=torch.randint(0, 10, (32,)),
-                kind="soft_prob"
+                kind="soft_prob",
+                y=torch.rand(32, 10),
             )
             
             state = attack_instance.state

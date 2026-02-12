@@ -22,11 +22,11 @@ def test_game_basic_flow() -> None:
     state.metadata = {"device": "cpu", "input_shape": (3, 32, 32)}
 
     attack = GAME(config, state)
-    x_query, meta = attack._select_query_batch(2, state)
-    assert "y_g" in meta
-    assert meta["y_g"].shape[0] == 2
+    query_batch = attack._select_query_batch(2, state)
+    assert "y_g" in query_batch.meta
+    assert query_batch.meta["y_g"].shape[0] == 2
     probs = torch.softmax(torch.randn(2, 10), dim=1)
     oracle_output = OracleOutput(kind="soft_prob", y=probs)
-    attack._handle_oracle_output(x_query, meta, oracle_output, state)
+    attack._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, state)
 
     assert state.attack_state["substitute"] is not None
