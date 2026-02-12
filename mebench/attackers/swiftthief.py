@@ -131,52 +131,43 @@ class SoftSupSimSiamLossV17(nn.Module):
         self.num_classes = num_classes
 
     def forward(self, p, z, targets):
-        """Paper-faithful soft-supervised contrastive loss (SwiftThief Eq.2-3).
+        """Soft-supervised contrastive loss as in the official SwiftThief repo.
 
-        Given view-level tensors:
-        - z: projection outputs for 2q views
-        - p: predictor outputs for 2q views
-        - targets: victim soft labels for 2q views (each query sample duplicated)
-
-        Eq.(2): - sum_{i} sum_{j} eta_ij ( z_i^T z'_j + z_j^T z'_i )
-        where z'_j corresponds to predictor output p_j.
-        Eq.(3): eta_ij = 1[i!=j] (1 + H(y_i)/logK)(1 + H(y_j)/logK) cos(y_i, y_j)
+        Reference: https://github.com/ku-air/SwiftThief
+        File: contrastive_learning/simsiam/criterion.py (SoftSupSimSiamLossV17)
         """
         if p.numel() == 0 or z.numel() == 0:
             return torch.zeros((), device=self.device)
 
-        # Normalize and stop-gradient on z as in SimSiam.
-        z = z.detach()
+        z = z.detach()  # stop gradient
+
         p = F.normalize(p, dim=1)
         z = F.normalize(z, dim=1)
 
-        # Ensure targets are valid probability vectors.
-        targets = targets.to(self.device).float()
-        targets = targets.clamp_min(1e-12)
+        dot_product = -torch.mm(p, z.T)
+
+        targets = targets.to(self.device).float().clamp_min(1e-12)
         targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
 
-        # Entropy term: H(y) / logK
         entr = -(targets * targets.log()).sum(dim=1)
-        log_k = torch.log(torch.tensor(float(self.num_classes), device=self.device))
-        norm_entr = entr / log_k
-        a = 1.0 + norm_entr
+        entr[torch.isnan(entr)] = 0.0
+        norm_entr = entr / torch.log(torch.tensor(float(self.num_classes), device=self.device))
+        reversed_norm_entr = 1.0 - norm_entr
+        mask_similar_class1 = torch.outer(reversed_norm_entr, reversed_norm_entr)
 
-        # cos angle between soft labels
-        targets_norm = F.normalize(targets, dim=1)
-        cos_y = targets_norm @ targets_norm.T
+        mask_similar_class2 = F.cosine_similarity(
+            targets.T.repeat(len(targets), 1, 1),
+            targets.unsqueeze(2),
+        ).to(self.device)
 
-        # eta_ij with zero diagonal
-        eta = (a.unsqueeze(1) * a.unsqueeze(0)) * cos_y
-        eta.fill_diagonal_(0.0)
+        mask_anchor_out = (1 - torch.eye(dot_product.shape[0], device=self.device))
+        mask_combined = mask_similar_class1 * mask_similar_class2 * mask_anchor_out
 
-        # Similarity matrix for sym term (z_i^T p_j + z_j^T p_i)
-        sim = z @ p.T
-        sym = sim + sim.T
-
-        # Use mean over off-diagonal pairs to keep scale stable across batch sizes.
-        n = int(sym.shape[0])
-        denom = float(max(1, n * (n - 1)))
-        return -((eta * sym).sum() / denom)
+        dot_product_selected = dot_product * mask_combined
+        selected = dot_product_selected[dot_product_selected.nonzero(as_tuple=True)]
+        if selected.numel() == 0:
+            return torch.zeros((), device=self.device)
+        return selected.mean()
 
 
 class CL_FGSM(nn.Module):
@@ -480,22 +471,25 @@ class SwiftThief(AttackRunner):
     # -------------------------
 
     def _ensure_pool_dataset(self, state: BenchmarkState) -> None:
-        if self.pool_dataset is not None:
-            return
+        if self.pool_dataset is None:
+            dataset_config = state.metadata.get("dataset_config", {})
+            if "data_mode" not in dataset_config:
+                dataset_config = {"data_mode": "seed", **dataset_config}
+            if "name" not in dataset_config:
+                dataset_config = {"name": "CIFAR10", **dataset_config}
 
-        dataset_config = state.metadata.get("dataset_config", {})
-        if "data_mode" not in dataset_config:
-            dataset_config = {"data_mode": "seed", **dataset_config}
-        if "name" not in dataset_config:
-            dataset_config = {"name": "CIFAR10", **dataset_config}
+            self.pool_dataset = create_dataloader(dataset_config, batch_size=1, shuffle=False).dataset
 
-        self.pool_dataset = create_dataloader(dataset_config, batch_size=1, shuffle=False).dataset
-
+        # Always ensure indices are populated, even if pool_dataset was injected by tests.
         N = len(self.pool_dataset)
-        if not state.attack_state["unlabeled_indices"]:
+        unlabeled = state.attack_state.get("unlabeled_indices") or []
+        if len(unlabeled) == 0:
             state.attack_state["unlabeled_indices"] = list(range(N))
         else:
-            state.attack_state["unlabeled_indices"] = [i for i in state.attack_state["unlabeled_indices"] if 0 <= i < N]
+            state.attack_state["unlabeled_indices"] = [i for i in unlabeled if 0 <= int(i) < N]
+
+    def observe(self, query_batch: QueryBatch, oracle_output: OracleOutput, state: BenchmarkState) -> None:
+        self._handle_oracle_output(query_batch, oracle_output, state)
 
     def _ensure_normalizers(self, state: BenchmarkState, device: torch.device) -> None:
         if self.normalize is not None and getattr(self.normalize, "mean", None) is not None:
@@ -573,15 +567,12 @@ class SwiftThief(AttackRunner):
         unlabeled = state.attack_state["unlabeled_indices"]
 
         if len(unlabeled) == 0:
-            raise ValueError(
-                f"Query pool exhausted for {self.__class__.__name__}. "
-                f"Cannot select {k} more queries."
-            )
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            x_empty = torch.empty((0, *input_shape))
+            return QueryBatch(x=x_empty, meta={"indices": [], "sampling_mode": "exhausted"})
+
         if k > len(unlabeled):
-            raise ValueError(
-                f"Requested step_size={k} exceeds remaining pool size={len(unlabeled)} "
-                f"for {self.__class__.__name__}."
-            )
+            k = int(len(unlabeled))
 
         total_budget = int(state.metadata.get("max_budget") or self.config.get("max_budget", 10000))
         initial_seed_size = int(self.initial_seed_ratio * total_budget)
@@ -990,18 +981,18 @@ class SwiftThief(AttackRunner):
 
         self._ensure_normalizers(state, device)
 
-        # costs (effective number) from histogram (paper Eq.4)
-        # c_y = (1 - beta) / (1 - beta^{N_y}), larger for rarer classes.
+        # costs (effective number) from histogram (official repo swiftthief.py)
+        # costs = (1 - beta) / (1 - beta^(cnt + 1.0)), then normalized.
         cnt = torch.zeros(num_classes, device=device)
         for c in range(num_classes):
             cnt[c] = float(state.attack_state["class_counts"].get(c, 0))
         beta = float(self.effective_beta)
         beta_t = torch.tensor(beta, device=device)
-        # Avoid division by zero when cnt==0 by clamping exponent.
-        denom = 1.0 - torch.pow(beta_t, cnt.clamp_min(1.0))
+        denom = 1.0 - torch.pow(beta_t, cnt + 1.0)
         costs = (1.0 - beta_t) / denom.clamp_min(1e-12)
+        costs = costs / costs.sum().clamp_min(1e-12)
 
-        criterion = SimSiamLoss('original').to(device)
+        criterion = SimSiamLoss('simplified').to(device)
         soft_criterion = SoftSupSimSiamLossV17(device, num_classes).to(device)
         cost_sensitive_criterion = SimSiamLoss_cost_sensitive(costs).to(device)
 
@@ -1069,7 +1060,7 @@ class SwiftThief(AttackRunner):
 
                 x1, x2 = self.normalize_pair(x1_raw, x2_raw)
 
-                # Minority class regularization (paper Eq.4): FGSM inner-maximization in pixel space.
+                # Minority class regularization (official repo): CL_FGSM generates adversarial view.
                 # Determine sample class indices for cost-sensitive weights.
                 if y.ndim > 1 and y.shape[1] > 1:
                     targets_probs = y.clamp_min(1e-8)
@@ -1079,38 +1070,22 @@ class SwiftThief(AttackRunner):
                     targets_probs = None
                     y_idx = y.long()
 
-                # Compute adversarial perturbation on the first view only (x1_raw).
-                x1_raw_adv = x1_raw.detach().clone().requires_grad_(True)
-                x1_adv_n, x2_n = self.normalize_pair(x1_raw_adv, x2_raw)
-                outs_advgen = fgsm_model(im_aug1=x1_adv_n, im_aug2=x2_n)
-                adv_loss = cost_sensitive_criterion(
-                    outs_advgen["z1"], outs_advgen["z2"], outs_advgen["p1"], outs_advgen["p2"], y_idx
-                )
-                optimizer_cl.zero_grad(set_to_none=True)
-                adv_loss.backward()
-                with torch.no_grad():
-                    grad = x1_raw_adv.grad
-                    if grad is None:
-                        x1_raw_adv = x1_raw
-                    else:
-                        x1_raw_adv = (x1_raw_adv + self.fgsm_epsilon * grad.sign()).clamp(0.0, 1.0)
-                x1_raw_adv = x1_raw_adv.detach()
+                reg_adversary = CL_FGSM(fgsm_model, float(self.fgsm_epsilon), str(device)).to(device)
+                adv_x1 = reg_adversary(x1, x2)
 
                 outs_l = fgsm_model(im_aug1=x1, im_aug2=x2)
 
-                if targets_probs is not None:
-                    # SwiftThief Eq.(2)-(3)
-                    loss2 = soft_criterion(
-                        p=torch.cat([outs_l["p1"], outs_l["p2"]], dim=0),
-                        z=torch.cat([outs_l["z1"], outs_l["z2"]], dim=0),
-                        targets=torch.cat([targets_probs, targets_probs], dim=0),
-                    )
-                else:
-                    # Hard-label mode: soft contrastive loss is undefined in the paper.
-                    loss2 = torch.zeros((), device=device)
+                if targets_probs is None:
+                    # Treat hard labels as one-hot distributions.
+                    targets_probs = F.one_hot(y_idx, num_classes=num_classes).float()
 
-                x1_adv, x2_again = self.normalize_pair(x1_raw_adv, x2_raw)
-                outs_adv = fgsm_model(im_aug1=x1_adv, im_aug2=x2_again)
+                loss2 = soft_criterion(
+                    p=torch.cat([outs_l["p1"], outs_l["p2"]], dim=0),
+                    z=torch.cat([outs_l["z1"], outs_l["z2"]], dim=0),
+                    targets=torch.cat([targets_probs, targets_probs], dim=0),
+                )
+
+                outs_adv = fgsm_model(im_aug1=adv_x1, im_aug2=x2)
                 loss3 = cost_sensitive_criterion(
                     outs_adv["z1"], outs_adv["z2"], outs_adv["p1"], outs_adv["p2"], y_idx
                 )
