@@ -210,8 +210,8 @@ class CloudLeak(AttackRunner):
         self.lr = float(config.get("lr", 0.01))
         self.momentum = float(config.get("momentum", 0.9))
         self.weight_decay = float(config.get("weight_decay", 5e-4))
-        self.max_epochs = int(config.get("max_epochs", 1000))
-        self.patience = int(config.get("patience", 100))
+        self.max_epochs = int(config.get("max_epochs", 200))
+        self.patience = int(config.get("patience", 20))
 
         self.use_pretrained = bool(config.get("use_pretrained", False))
         self.pretrained_arch = str(config.get("pretrained_arch", "resnet18"))

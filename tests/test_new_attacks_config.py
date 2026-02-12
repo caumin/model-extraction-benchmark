@@ -36,6 +36,7 @@ def test_copycatcnn_requires_hard_top1():
         "victim": {"output_mode": "hard_top1", "temperature": 1.0},
         "dataset": {"data_mode": "surrogate", "seed_size": 10000, "seed_name": "CIFAR10"},
         "attack": {"name": "copycatcnn", "output_mode": "hard_top1"},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
     }
     validate_config(ok)
@@ -54,6 +55,7 @@ def test_inversenet_requires_hard_top1():
         "victim": {"output_mode": "hard_top1", "temperature": 1.0},
         "dataset": {"data_mode": "surrogate", "seed_size": 10000, "seed_name": "CIFAR10"},
         "attack": {"name": "inversenet", "output_mode": "hard_top1"},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
     }
     validate_config(ok)
@@ -90,6 +92,7 @@ def test_knockoff_nets_requires_soft_prob():
         "victim": {"output_mode": "soft_prob", "temperature": 1.0},
         "dataset": {"data_mode": "surrogate", "seed_size": 10000, "seed_name": "CIFAR10"},
         "attack": {"name": "knockoff_nets", "output_mode": "soft_prob"},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
     }
     validate_config(ok)
@@ -108,6 +111,7 @@ def test_dissector_requires_hard_top1():
         "victim": {"output_mode": "hard_top1", "temperature": 1.0},
         "dataset": {"data_mode": "surrogate", "seed_size": 10000, "seed_name": "CIFAR10"},
         "attack": {"name": "blackbox_dissector", "output_mode": "hard_top1"},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
     }
     validate_config(config)  # Should not raise
@@ -120,6 +124,7 @@ def test_dissector_rejects_soft_prob():
         "victim": {"output_mode": "soft_prob", "temperature": 1.0},
         "dataset": {"data_mode": "surrogate", "seed_size": 10000, "seed_name": "CIFAR10"},
         "attack": {"name": "blackbox_dissector", "output_mode": "soft_prob"},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
     }
     with pytest.raises(ValueError, match="blackbox_dissector requires hard_top1"):
@@ -133,6 +138,7 @@ def test_cloudleak_requires_soft_prob():
         "victim": {"output_mode": "soft_prob", "temperature": 1.0},
         "dataset": {"data_mode": "seed", "seed_size": 1000, "seed_name": "MNIST"},
         "attack": {"name": "cloudleak", "output_mode": "soft_prob"},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
     }
     validate_config(config)  # Should not raise
@@ -145,6 +151,7 @@ def test_cloudleak_rejects_hard_top1():
         "victim": {"output_mode": "hard_top1", "temperature": 1.0},
         "dataset": {"data_mode": "seed", "seed_size": 1000, "seed_name": "MNIST"},
         "attack": {"name": "cloudleak", "output_mode": "hard_top1"},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
     }
     with pytest.raises(ValueError, match="cloudleak requires soft_prob"):

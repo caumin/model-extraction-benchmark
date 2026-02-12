@@ -9,6 +9,9 @@ from mebench.attackers.activethief import ActiveThief
 from mebench.core.state import BenchmarkState
 
 
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
 class IndexedDataset(Dataset):
     """Dataset backed by a list of tensors."""
 
@@ -140,7 +143,7 @@ def test_select_k_center_no_labeled_fallback() -> None:
 def test_select_dfal_prefers_smallest_perturbation() -> None:
     attack = _make_attack()
     state = BenchmarkState()
-    state.metadata = {"device": "cpu"}
+    state.metadata = {"device": DEVICE}
 
     close = torch.tensor([[[0.1, 0.1]]])
     far = torch.tensor([[[1.0, 1.0]]])

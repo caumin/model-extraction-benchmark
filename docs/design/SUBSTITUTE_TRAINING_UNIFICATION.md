@@ -30,6 +30,10 @@
 3. **Config-Driven**: 모든 학습 파라미터는 `substitute` 섹션에서 제공
 4. **Track Compatibility**: Track A와 Track B 모두 동일한 Trainer 사용 가능
 
+추가로, 공정 비교를 위해 early stopping 기준(metric/mode)도 표준화한다.
+- Metric: validation loss
+- Mode: min
+
 ---
 
 ## 5) 제안 구조
@@ -94,6 +98,9 @@ substitute:
 ```
 
 Track A는 기존 `trackA.steps_coeff_c`를 유지하되, 학습 루프 자체는 동일 엔진 사용.
+
+단, Track A는 `S(B)` 고정 step을 끝까지 수행하는 것이 목적이므로
+early stopping / best checkpoint selection은 사용하지 않는다.
 
 ---
 

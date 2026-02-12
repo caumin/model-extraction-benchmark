@@ -1,484 +1,752 @@
-from __future__ import annotations
+"""ActiveThief attack implementation with DFAL support using vectorized DeepFool."""
 
-import logging
+from typing import Dict, Any, List, Tuple, Optional
 import math
-import numpy as np
+import logging
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset, TensorDataset
+import torch.nn.functional as F
+import numpy as np
+from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
 
 from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
-from mebench.core.state import BenchmarkState
 from mebench.core.types import QueryBatch, OracleOutput
+from mebench.core.state import BenchmarkState
+from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
-from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import pool_loader_kwargs
 
 
 class ActiveThief(AttackRunner):
-    """ActiveThief attack (Pal et al., 2020)."""
+    """ActiveThief with uncertainty, k-center, and DFAL sampling strategies.
+    
+    Ref: "ActiveThief: Model Extraction Using Active Learning and Unannotated Public Data" (AAAI 2020)
+    
+    Algorithm loop:
+    1. Initialize: Select random initial seed S0 from thief dataset
+    2. Query: Send S_i to victim f to get labels D_i
+    3. Train: Train substitute model f~ from scratch on all collected data ∪D_t
+    4. Evaluate: Predict on remaining pool (unlabeled thief data)
+    5. Select: Use active learning strategy to select next queries S_{i+1}
+    6. Repeat: Continue until budget exhausted
+    """
 
-    def __init__(self, config: dict, state: BenchmarkState) -> None:
+    def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
-        self.dataloader = None
+
+        # Basic parameters
+        self.batch_size = int(config.get("batch_size", 256))
+        self.num_classes = int(
+            self.state.metadata.get("num_classes")
+            or self.config.get("num_classes")
+            or self.state.metadata.get("dataset_config", {}).get("num_classes", 10)
+        )
+        
+        # Active learning strategy
+        self.strategy = config.get("strategy", "uncertainty")
+        initial_seed_size = config.get("initial_seed_size")
+        self.initial_seed_size = (
+            int(initial_seed_size) if initial_seed_size is not None else None
+        )
+        step_size = config.get("step_size")
+        self.step_size = int(step_size) if step_size is not None else None
+        self.rounds = int(config.get("rounds", 10))
+        
+        # Store oracle labels to override dataset labels during training
+        self.observed_labels = {}
+
+        # Cache queried tensors to avoid repeated ImageFolder IO during training.
+        # Stored as list-of-batches to minimize Python per-sample overhead.
+        self.query_data_x: List[torch.Tensor] = []
+        self.query_data_y: List[torch.Tensor] = []
+        
+        # DeepFool parameters for DFAL
+        self.dfal_max_iter = int(config.get("dfal_max_iter", 20))
+        dfal_rho = config.get("dfal_rho")
+        self.dfal_rho = int(dfal_rho) if dfal_rho is not None else None
+        
+        # Datasets and model
         self.pool_dataset = None
+        self.labeled_indices = []
+        self.unlabeled_indices = []
+        self.initial_seed_indices = []
+        self.substitute = None
+        self.substitute_optimizer = None
+
         self._initialize_state(state)
 
-        self.device = str(config.get("run", {}).get("device", state.metadata.get("device", "cpu")))
-        self.pool_num_workers = max(0, int(config.get("pool_num_workers", config.get("num_workers", 4))))
-        self.train_num_workers = max(0, int(config.get("train_num_workers", config.get("num_workers", 0))))
-
     def _initialize_state(self, state: BenchmarkState) -> None:
-        state.attack_state.setdefault("queried_indices", [])
-        state.attack_state.setdefault("unqueried_indices", [])
+        """Initialize attack-specific state."""
+        state.attack_state["labeled_indices"] = []
         state.attack_state.setdefault("query_data_x", [])
         state.attack_state.setdefault("query_data_y", [])
-        state.attack_state.setdefault("val_query_data_x", [])
-        state.attack_state.setdefault("val_query_data_y", [])
-        state.attack_state.setdefault("substitute", None)
+        dataset_config = state.metadata.get("dataset_config", {})
+        seed_size = dataset_config.get("seed_size")
+        if seed_size is None and isinstance(dataset_config.get("dataset"), dict):
+            seed_size = dataset_config["dataset"].get("seed_size")
+        default_pool_size = int(seed_size) if seed_size is not None else 10000
+        state.attack_state["unlabeled_indices"] = list(range(default_pool_size))
+        state.attack_state["round"] = 0
+        state.attack_state["initialized"] = False
+        state.attack_state["initial_seed_indices"] = []
+        state.attack_state["initial_seed_queried"] = False
 
-    def _ensure_pool_dataset(self, state: BenchmarkState) -> None:
-        if self.pool_dataset is None:
-            self.dataloader = create_dataloader(
-                state.metadata.get("dataset_config", {}),
-                batch_size=1,
-                shuffle=False,
+    def _setup_datasets(self, state: BenchmarkState) -> None:
+        """Setup pool dataset and initial seed selection."""
+        if state.attack_state.get("initialized"):
+            return
+
+        if self.initial_seed_size is None:
+            total_budget = int(
+                state.metadata.get("max_budget")
+                or self.config.get("max_budget", 0)
+                or 0
             )
-            self.pool_dataset = self.dataloader.dataset
-
-        if not state.attack_state["unqueried_indices"] and self.pool_dataset is not None:
-            dataset_config = state.metadata.get("dataset_config", {})
-            seed_size = dataset_config.get("seed_size") # Used as max pool size cap if set
-             
-            # Usually pool is the whole surrogate dataset
-            # But we respect seed_size if it implies total budget or pool cap?
-            # Actually ActiveThief usually uses the whole pool.
-            # We'll use the whole dataset length.
-            pool_size = len(self.pool_dataset)
-            
-            # If explicit max_samples is set in config
-            if "surrogate_max_samples" in dataset_config:
-                 pool_size = min(pool_size, int(dataset_config["surrogate_max_samples"]))
-            
-            state.attack_state["unqueried_indices"] = list(range(pool_size))
-
-    def run(self, ctx: BenchmarkContext) -> None:
-        self.victim = ctx.oracle.model
-        self._ensure_pool_dataset(self.state)
-        
-        # 1. Initial Seed / Fixed Validation from budget
-        max_budget = int(self.state.metadata.get("max_budget", self.config.get("max_budget", 0)))
-        initial_seed_ratio = float(self.config.get("initial_seed_ratio", 0.1))
-        validation_budget_ratio = float(
-            self.config.get("validation_budget_ratio", self.config.get("validation_seed_ratio", 0.2))
-        )
-
-        if "initial_seed_size" in self.config:
-            initial_seed_target = int(self.config.get("initial_seed_size", 0))
-        elif max_budget > 0:
-            initial_seed_target = int(round(max_budget * initial_seed_ratio))
-        else:
-            initial_seed_target = 100
-
-        if "validation_seed_size" in self.config:
-            validation_seed_target = int(self.config.get("validation_seed_size", 0))
-        elif "validation_budget_size" in self.config:
-            validation_seed_target = int(self.config.get("validation_budget_size", 0))
-        elif max_budget > 0:
-            validation_seed_target = int(round(max_budget * validation_budget_ratio))
-        else:
-            validation_seed_target = max(0, int(round(initial_seed_target * 0.2)))
-
-        # If we haven't queried anything yet
-        if len(self.state.attack_state["queried_indices"]) == 0:
-            budget_now = int(ctx.budget_remaining)
-            train_seed_k = min(max(0, initial_seed_target), budget_now)
-            budget_left = budget_now - train_seed_k
-            val_seed_k = min(max(0, validation_seed_target), budget_left)
-
-            # Keep at least one train sample when budget allows it.
-            if train_seed_k == 0 and budget_now > 0 and val_seed_k > 0:
-                train_seed_k = 1
-                val_seed_k = max(0, val_seed_k - 1)
-
-            if train_seed_k > 0 or val_seed_k > 0:
-
-                self.logger.info(
-                    f"Querying initial seed: train={train_seed_k}, val={val_seed_k}"
+            rounds = max(1, int(self.rounds))
+            if total_budget > 0:
+                self.initial_seed_size = max(
+                    1, int(math.ceil(total_budget / rounds))
                 )
-                if val_seed_k > 0:
-                    self._query_batch(
-                        val_seed_k,
-                        self.state,
-                        ctx=ctx,
-                        strategy="random",
-                        dataset_role="validation",
-                    )
-                if train_seed_k > 0:
-                    self._query_batch(
-                        train_seed_k,
-                        self.state,
-                        ctx=ctx,
-                        strategy="random",
-                        dataset_role="train",
-                    )
-        
-        # 2. Active Loop
-        if "step_size" in self.config:
-            step_size = int(self.config.get("step_size"))
-        else:
-            default_iterations = int(self.config.get("iterations", self.config.get("rounds", 10)))
-            if default_iterations <= 0:
-                default_iterations = 10
-            step_size = max(1, int(math.ceil(int(ctx.budget_remaining) / float(default_iterations))))
-        strategy = self.config.get("strategy", "uncertainty")
-        
-        pbar = self._create_progress_bar(ctx.budget_remaining, f"[{self.__class__.__name__}] Extracting")
-        
-        while ctx.budget_remaining > 0:
-            # Train substitute on current labeled data
-            substitute = self._train_substitute(self.state)
-            self.state.attack_state["substitute"] = substitute
+            elif self.step_size is not None:
+                self.initial_seed_size = int(self.step_size)
+            else:
+                self.initial_seed_size = 50
             
-            # Evaluate current substitute
-            self._evaluate_current_substitute(substitute, self.device)
-            
-            # Select next batch
-            k = min(step_size, ctx.budget_remaining)
-            if k <= 0:
-                break
-            
-            # Check if pool is empty
-            if not self.state.attack_state["unqueried_indices"]:
-                self.logger.warning("Unlabeled pool exhausted. Stopping attack.")
-                break
+        dataset_config = state.metadata.get("dataset_config", {})
+        self.pool_dataset = create_dataloader(
+            dataset_config,
+            batch_size=self.batch_size,
+            shuffle=False,
+        ).dataset
+        
+        # Initialize labeled/unlabeled splits
+        pool_size = len(self.pool_dataset)
+        self.unlabeled_indices = list(range(pool_size))
+        self.initial_seed_indices = []
 
-            self.logger.info(f"Selecting {k} samples using strategy: {strategy}")
-            queried_count = self._query_batch(k, self.state, ctx=ctx, strategy=strategy, substitute=substitute)
-            pbar.update(queried_count)
-            
-        pbar.close()
-        
-        # Final training
-        final_substitute = self._train_substitute(self.state)
-        self.state.attack_state["substitute"] = final_substitute
+        state.attack_state["labeled_indices"] = self.labeled_indices
+        state.attack_state["unlabeled_indices"] = self.unlabeled_indices
+        state.attack_state["initial_seed_indices"] = []
+        state.attack_state["initialized"] = True
 
-    def _query_batch(
-        self,
-        k: int,
-        state: BenchmarkState,
-        ctx: BenchmarkContext,
-        strategy: str,
-        substitute: nn.Module = None,
-        dataset_role: str = "train",
-    ) -> int:
-        indices = self._select_indices(k, state, strategy, substitute)
+    def _create_substitute(self, input_shape: tuple) -> nn.Module:
+        """Create substitute model."""
+        sub_config = self.state.metadata.get("substitute_config", {})
+        arch = sub_config.get("arch", "resnet18")
+        input_channels = int(input_shape[0])
         
-        if not indices:
-            return 0
-            
-        x_list = [self.pool_dataset[i][0] for i in indices]
-        x_batch = torch.stack(x_list)
-        
-        query_batch = QueryBatch(x=x_batch, meta={"strategy": strategy, "synthetic": False})
-        oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+        width_mult = int(sub_config.get("width_mult", 1))
+        dropout_prob = float(sub_config.get("dropout_prob", self.config.get("dropout_prob", 0.0)))
 
-        # Update state
-        if dataset_role == "validation":
-            state.attack_state["val_query_data_x"].append(query_batch.x.detach().cpu())
-            state.attack_state["val_query_data_y"].append(oracle_output.y.detach().cpu())
-        else:
-            state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
-            state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
-        
-        for idx in indices:
-            if idx in state.attack_state["unqueried_indices"]:
-                state.attack_state["unqueried_indices"].remove(idx)
-            state.attack_state["queried_indices"].append(int(idx))
-            
-        return len(indices)
-
-    def _query_and_update(self, indices: list[int], ctx: BenchmarkContext) -> None:
-        x_list = [self.pool_dataset[i][0] for i in indices]
-        x_batch = torch.stack(x_list)
-        
-        query_batch = QueryBatch(x=x_batch, meta={"synthetic": False})
-        oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
-        
-        # Update state
-        self.state.attack_state["query_data_x"].append(query_batch.x.detach().cpu())
-        self.state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
-        
-        for idx in indices:
-            if idx in self.state.attack_state["unqueried_indices"]:
-                self.state.attack_state["unqueried_indices"].remove(idx)
-            self.state.attack_state["queried_indices"].append(int(idx))
-
-    def _select_indices(
-        self, k: int, state: BenchmarkState, strategy: str, substitute: nn.Module = None
-    ) -> list[int]:
-        available = state.attack_state["unqueried_indices"]
-        if not available:
-            return []
-            
-        n_take = min(int(k), len(available))
-        
-        if strategy == "random" or substitute is None:
-            return np.random.choice(available, n_take, replace=False).tolist()
-            
-        # Strategy-based selection
-        # Create loader for pool
-        pool_subset = Subset(self.pool_dataset, available)
-        # We need a mapping from subset index to original index
-        # subset[i] maps to available[i]
-        
-        pool_loader = DataLoader(
-            pool_subset, 
-            batch_size=256, 
-            shuffle=False, 
-            **pool_loader_kwargs(self.device, {"num_workers": self.pool_num_workers}),
+        return create_substitute(
+            arch=arch,
+            num_classes=self.num_classes,
+            input_channels=input_channels,
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
         )
-        
-        scores = []
-        substitute.eval()
-        output_mode = self.config.get("output_mode", "soft_prob")
-        
-        with torch.no_grad():
-            for x, _ in pool_loader:
-                x = x.to(self.device)
-                outputs = substitute(x)
-                
-                if strategy == "uncertainty":
-                    # Entropy: -sum(p * log(p))
-                    if output_mode == "soft_prob":
-                        probs = torch.softmax(outputs, dim=1)
-                    else:
-                        # If hard labels, entropy is 0?
-                        # Fallback to random or some heuristic?
-                        # Assume outputs are logits even if trained with hard labels?
-                        probs = torch.softmax(outputs, dim=1)
-                        
-                    log_probs = torch.log_softmax(outputs, dim=1)
-                    entropy = -torch.sum(probs * log_probs, dim=1)
-                    scores.extend(entropy.cpu().numpy())
-                else:
-                    # Fallback to random
-                    scores.extend(np.random.rand(x.size(0)))
-                    
-        # Select top-k indices (highest entropy)
-        # scores correspond to available[0], available[1], ...
-        top_k_indices = np.argsort(scores)[-n_take:]
-        selected_indices = [available[i] for i in top_k_indices]
-        
-        return selected_indices
 
-    def _train_substitute(self, state: BenchmarkState) -> nn.Module:
-        """Train substitute model with fixed validation when available."""
+    def _train_substitute(self, state: BenchmarkState) -> None:
+        """Train substitute model from scratch on labeled data."""
+        device = state.metadata.get("device", "cpu")
+        input_shape = self.state.metadata.get("input_shape", (3, 32, 32))
+        
+        # Create fresh model (from scratch)
+        self.substitute = self._create_substitute(input_shape).to(device)
+        
+        sub_config = self.state.metadata.get("substitute_config", {})
+        
+        # IO optimization: train on cached queried tensors (exact x used for oracle queries)
+        # instead of re-indexing ImageFolder each epoch.
         query_x = state.attack_state.get("query_data_x", [])
         query_y = state.attack_state.get("query_data_y", [])
-        val_query_x = state.attack_state.get("val_query_data_x", [])
-        val_query_y = state.attack_state.get("val_query_data_y", [])
-        
         if len(query_x) == 0:
-             # Should not happen if initial seed is queried
-             return None
+            return
 
-        x_train_all = torch.cat(query_x, dim=0)
-        y_train_all = torch.cat(query_y, dim=0)
+        x_all = torch.cat(query_x, dim=0)
+        y_all = torch.cat(query_y, dim=0)
+        full_dataset = torch.utils.data.TensorDataset(x_all, y_all)
         
-        # Ensure sufficient data
-        if x_train_all.size(0) < 10:
-             return self._train_substitute_simple(state, x_train_all, y_train_all)
+        # Split into train/val (80/20) as per ActiveThief paper
+        total_len = len(full_dataset)
+        val_len = int(0.2 * total_len)
+        train_len = total_len - val_len
+        
+        # Use fixed generator for reproducibility if needed, or rely on global seed
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_len, val_len]
+        )
 
-        if len(val_query_x) > 0 and len(val_query_y) > 0:
-            x_val_all = torch.cat(val_query_x, dim=0)
-            y_val_all = torch.cat(val_query_y, dim=0)
-            train_dataset = TensorDataset(x_train_all, y_train_all)
-            val_dataset = TensorDataset(x_val_all, y_val_all)
-            train_size = x_train_all.size(0)
-        else:
-            total_size = x_train_all.size(0)
-            val_size = max(1, int(0.2 * total_size))
-            train_size = total_size - val_size
-
-            full_dataset = TensorDataset(x_train_all, y_train_all)
-            train_dataset, val_dataset = torch.utils.data.random_split(
-                full_dataset,
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
+        
+        # Create loaders
+        labeled_loader = DataLoader(
+            train_dataset,
+            batch_size=train_batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=str(device).startswith("cuda"),
+        )
+        
+        val_loader = None
+        if val_len > 0:
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=train_batch_size,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=str(device).startswith("cuda"),
             )
         
-        # Create Substitute
-        sub_config = state.metadata.get("substitute_config", {}) or self.config.get("substitute", {})
-        num_classes = int(state.metadata.get("num_classes", 10))
-        input_channels = int(state.metadata.get("input_shape", (3, 32, 32))[0])
-        
-        substitute = create_substitute(
-            arch=sub_config.get("arch", "resnet18"),
-            num_classes=num_classes,
-            input_channels=input_channels,
-            dropout_prob=float(sub_config.get("dropout_prob", 0.0))
-        ).to(self.device)
-        
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=int(sub_config.get("batch_size", 128)),
-            shuffle=True,
-            **pool_loader_kwargs(
-                self.device,
-                {
-                    "num_workers": int(
-                        sub_config.get(
-                            "train_num_workers",
-                            sub_config.get("num_workers", self.train_num_workers),
-                        )
-                    )
-                },
-            ),
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=int(sub_config.get("batch_size", 128)),
-            shuffle=False,
-            **pool_loader_kwargs(
-                self.device,
-                {
-                    "num_workers": int(
-                        sub_config.get(
-                            "val_num_workers",
-                            sub_config.get("num_workers", self.train_num_workers),
-                        )
-                    )
-                },
-            ),
-        )
-        
-        output_mode = str(self.config.get("output_mode", "soft_prob"))
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            return F.cross_entropy(outputs, targets.long())
 
-        def macro_f1_score(preds: torch.Tensor, targets: torch.Tensor, num_classes_local: int) -> float:
-            preds = preds.view(-1)
-            targets = targets.view(-1)
-            f1_sum = 0.0
-            for cls_idx in range(num_classes_local):
-                pred_pos = preds == cls_idx
-                true_pos = targets == cls_idx
-                tp = int((pred_pos & true_pos).sum().item())
-                fp = int((pred_pos & (~true_pos)).sum().item())
-                fn = int(((~pred_pos) & true_pos).sum().item())
-                denom = (2 * tp) + fp + fn
-                f1_sum += (2.0 * tp / denom) if denom > 0 else 0.0
-            return f1_sum / float(num_classes_local)
-        
-        def eval_fn(model, loader):
+        # Validation evaluation function
+        def eval_fn(model: nn.Module, loader: DataLoader) -> float:
             model.eval()
-            if output_mode == "soft_prob":
-                total_loss = 0.0
-                count = 0
-                loss_func = nn.KLDivLoss(reduction="batchmean")
-                with torch.no_grad():
-                    for x, y in loader:
-                        x, y = x.to(self.device), y.to(self.device)
-                        outputs = model(x)
-                        y = y.clamp_min(1e-10)
-                        y = y / y.sum(dim=1, keepdim=True)
-                        loss = loss_func(torch.log_softmax(outputs, dim=1), y)
-                        total_loss += loss.item() * x.size(0)
-                        count += x.size(0)
-                return total_loss / count if count > 0 else float("inf")
-
-            all_preds = []
-            all_targets = []
+            total_loss = 0.0
+            total_count = 0
             with torch.no_grad():
                 for x, y in loader:
-                    x = x.to(self.device)
+                    x, y = x.to(device), y.to(device)
                     outputs = model(x)
-                    preds = torch.argmax(outputs, dim=1).cpu()
-                    all_preds.append(preds)
-                    all_targets.append(y.long().cpu())
+                    loss = F.cross_entropy(outputs, y.long())
+                    total_loss += loss.item() * x.size(0)
+                    total_count += x.size(0)
+            return total_loss / total_count if total_count > 0 else float('inf')
 
-            if not all_preds:
-                return 0.0
-            preds_cat = torch.cat(all_preds, dim=0)
-            targets_cat = torch.cat(all_targets, dim=0)
-            return macro_f1_score(preds_cat, targets_cat, num_classes)
+        # Ensure optimizer config defaults to Adam if not specified (ActiveThief specific)
+        # But SubstituteTrainer pulls from sub_config. We can inject it if missing?
+        # Better to handle it in generate_configs.py or let it be.
+        # Here we just pass the val_loader.
 
-        def loss_fn(outputs, targets):
-            if output_mode == "soft_prob":
-                 targets = targets.clamp_min(1e-10)
-                 targets = targets / targets.sum(dim=1, keepdim=True)
-                 return nn.KLDivLoss(reduction="batchmean")(torch.log_softmax(outputs, dim=1), targets)
-            return nn.CrossEntropyLoss()(outputs, targets.long())
-
-        batch_size = int(sub_config.get("batch_size", 128))
-        steps_per_epoch = max(1, int(math.ceil(train_size / batch_size)))
-        max_epochs = int(sub_config.get("max_epochs", 1000))
-        patience_epochs = int(sub_config.get("patience", 100))
-        max_steps = max_epochs * steps_per_epoch
-        validate_every = steps_per_epoch
-        patience_steps = patience_epochs * steps_per_epoch
+        # [FEATURE] Enable TQDM for substitute training visualization
+        sub_config_with_tqdm = dict(sub_config)
+        sub_config_with_tqdm["use_tqdm"] = True
         
-        trainer = SubstituteTrainer(dict(sub_config), device=self.device)
+        trainer = SubstituteTrainer(sub_config_with_tqdm, device=device, logger=self.logger)
         request = TrainRequest(
-            model=substitute,
-            train_loader=train_loader,
+            model=self.substitute,
+            train_loader=labeled_loader,
             val_loader=val_loader,
             eval_fn=eval_fn,
             loss_fn=loss_fn,
-            max_steps=max_steps,
-            early_stop_mode="min" if output_mode == "soft_prob" else "max",
+            skip_on_error=True,
             load_best=True,
-            patience=patience_steps,
-            validate_every=validate_every,
+            early_stop_mode="min", # minimizing validation loss
         )
         trainer.train(request)
-        return substitute
 
-    def _train_substitute_simple(self, state, x_all, y_all):
-        """Fallback for very small data."""
-        # Simple training logic similar to RandomBaseline
-        sub_config = state.metadata.get("substitute_config", {}) or self.config.get("substitute", {})
-        num_classes = int(state.metadata.get("num_classes", 10))
-        input_channels = int(state.metadata.get("input_shape", (3, 32, 32))[0])
+    def train_substitute(self, state: BenchmarkState) -> None:
+        self._train_substitute(state)
+        state.attack_state["substitute"] = self.substitute
+
+    def _select_uncertainty(self, probs: torch.Tensor, k: int) -> List[int]:
+        """Select samples with highest entropy.
         
-        substitute = create_substitute(
-            arch=sub_config.get("arch", "resnet18"),
-            num_classes=num_classes,
-            input_channels=input_channels,
-        ).to(self.device)
+        Eq: H_n = -sum(y_nj * log(y_nj))
+        """
+        # Compute entropy
+        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
+        # [OPTIMIZATION] topk on GPU is much faster
+        _, indices = torch.topk(entropy, k)
+        return indices.cpu().tolist()
+
+    def _select_k_center(self, unlabeled_probs: torch.Tensor, labeled_probs: torch.Tensor, k: int) -> List[int]:
+        """Select samples using k-center greedy algorithm on probability vectors.
         
-        loader = DataLoader(
-             TensorDataset(x_all, y_all),
-             batch_size=32,
-             shuffle=True,
-             **pool_loader_kwargs(
-                 self.device,
-                 {
-                     "num_workers": int(
-                         sub_config.get(
-                             "train_num_workers",
-                             sub_config.get("num_workers", self.train_num_workers),
-                         )
-                     )
-                 },
-             ),
+        Implements Core-Set approach adapted for probability space (Pal et al. 2020).
+        labeled_probs: Probabilities of samples ALREADY in the labeled set (centers).
+        unlabeled_probs: Probabilities of samples in the pool.
+        """
+        if labeled_probs.shape[0] == 0:
+            # No labeled data yet, fall back to random initialization within unlabeled
+            selected = []
+            remaining = list(range(unlabeled_probs.shape[0]))
+            
+            if remaining:
+                first_idx = np.random.choice(remaining)
+                selected.append(first_idx)
+                remaining.remove(first_idx)
+            
+            min_dists = torch.full((unlabeled_probs.shape[0],), float('inf'), device=unlabeled_probs.device)
+            dists = torch.norm(unlabeled_probs - unlabeled_probs[selected[0]].unsqueeze(0), dim=1)
+            min_dists = torch.min(min_dists, dists)
+
+            for _ in range(min(k - 1, len(remaining))):
+                current_min_dists = min_dists[remaining]
+                if len(current_min_dists) == 0:
+                    break
+                
+                max_val, max_idx_local = torch.max(current_min_dists, dim=0)
+                best_idx = remaining[max_idx_local.item()]
+                
+                selected.append(best_idx)
+                remaining.remove(best_idx)
+                
+                new_dists = torch.norm(unlabeled_probs - unlabeled_probs[best_idx].unsqueeze(0), dim=1)
+                min_dists = torch.min(min_dists, new_dists)
+            
+            return selected
+        
+        # Paper: "most distant from all existing centers"
+        # 1. Initialize min_dists based on distance to CLOSEST existing labeled point
+        dists = torch.cdist(unlabeled_probs, labeled_probs)  # Shape: [unlabeled, labeled]
+        min_dists, _ = torch.min(dists, dim=1)  # Min distance to ANY existing center
+        
+        selected = []
+        
+        # 2. Greedy selection for k iterations
+        for _ in range(min(k, unlabeled_probs.shape[0])):
+            # Select point with maximum 'min_distance'
+            max_val, max_idx = torch.max(min_dists, dim=0)
+            best_idx = max_idx.item()
+            selected.append(best_idx)
+            
+            # Update distances relative to the NEWLY selected point
+            new_center = unlabeled_probs[best_idx].unsqueeze(0)
+            new_dists = torch.norm(unlabeled_probs - new_center, dim=1)
+            min_dists = torch.min(min_dists, new_dists)
+        
+        return selected
+
+    def _collect_probs(self, loader: DataLoader, device: str) -> torch.Tensor:
+        """Collect softmax probabilities for a loader."""
+        all_probs = []
+        self.substitute.eval()
+        non_blocking = str(device).startswith("cuda")
+        with torch.no_grad():
+            for x_batch, _ in loader:
+                x_batch = x_batch.to(device, non_blocking=non_blocking)
+                logits = self.substitute(x_batch)
+                probs = F.softmax(logits, dim=1)
+                # [OPTIMIZATION] Keep on GPU to avoid Host-Device transfer bottleneck
+                all_probs.append(probs.detach())
+        return torch.cat(all_probs, dim=0)
+
+    def _deepfool_distance_dfal_chunk(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        max_iter: int,
+    ) -> torch.Tensor:
+        device = x.device
+        batch = x.shape[0]
+        if batch == 0:
+            return torch.empty(0, device=device)
+
+        model.eval()
+        perturb = torch.zeros_like(x, device=device)
+        with torch.no_grad():
+            logits = model(x)
+            original = logits.argmax(dim=1)
+
+        active = torch.ones(batch, dtype=torch.bool, device=device)
+        for _ in range(max_iter):
+            if not active.any():
+                break
+
+            x_adv = (x + perturb).detach()
+            x_adv.requires_grad_(True)
+            logits = model(x_adv)
+            preds = logits.argmax(dim=1)
+            active = active & (preds == original)
+            if not active.any():
+                break
+
+            num_classes = logits.shape[1]
+            grads = []
+            for k in range(num_classes):
+                grad_k = torch.autograd.grad(
+                    logits[:, k].sum(),
+                    x_adv,
+                    retain_graph=(k != num_classes - 1),
+                    create_graph=False,
+                )[0]
+                grads.append(grad_k)
+
+            grads = torch.stack(grads, dim=1)
+            grad_current = grads[torch.arange(batch), original]
+            w = grads - grad_current.unsqueeze(1)
+            f = logits - logits.gather(1, original.unsqueeze(1))
+            w_norm = torch.norm(w.view(batch, num_classes, -1), dim=2)
+            dist = torch.abs(f) / (w_norm + 1e-8)
+            dist = torch.where(
+                w_norm > 0,
+                dist,
+                torch.full_like(dist, float("inf")),
+            )
+            dist[torch.arange(batch), original] = float("inf")
+            min_dist, best_idx = dist.min(dim=1)
+            valid = torch.isfinite(min_dist)
+            active = active & valid
+            if not active.any():
+                break
+
+            best_w = w[torch.arange(batch), best_idx]
+            best_w_norm = torch.norm(best_w.view(batch, -1), dim=1)
+            r_i = (min_dist + 1e-8).view(-1, 1, 1, 1) * best_w
+            r_i = r_i / (best_w_norm.view(-1, 1, 1, 1) + 1e-8)
+            with torch.no_grad():
+                perturb[active] = perturb[active] + r_i[active]
+
+        return torch.norm(perturb.view(batch, -1), dim=1)
+
+    def _deepfool_distance_dfal(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        max_iter: int,
+        internal_batch_size: int,
+    ) -> torch.Tensor:
+        if x.shape[0] == 0:
+            return torch.empty(0, device=x.device)
+
+        chunk = max(1, internal_batch_size)
+        distances = []
+        for start in range(0, x.shape[0], chunk):
+            x_chunk = x[start : start + chunk]
+            distances.append(
+                self._deepfool_distance_dfal_chunk(model, x_chunk, max_iter)
+            )
+
+        return torch.cat(distances, dim=0)
+
+    def _select_dfal(self, state: BenchmarkState, k: int) -> List[int]:
+        """Select samples using DeepFool Active Learning."""
+        device = state.metadata.get("device", "cpu")
+        pin_memory = str(device).startswith("cuda")
+        unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
+        unlabeled_loader = DataLoader(
+            unlabeled_dataset, 
+            batch_size=self.batch_size, 
+            shuffle=False, 
+            **pool_loader_kwargs(device),
         )
         
-        output_mode = str(self.config.get("output_mode", "soft_prob"))
-        def loss_fn(outputs, targets):
-            if output_mode == "soft_prob":
-                 targets = targets.clamp_min(1e-10)
-                 targets = targets / targets.sum(dim=1, keepdim=True)
-                 return nn.KLDivLoss(reduction="batchmean")(torch.log_softmax(outputs, dim=1), targets)
-            return nn.CrossEntropyLoss()(outputs, targets.long())
-
-        trainer = SubstituteTrainer(dict(sub_config), device=self.device)
-        request = TrainRequest(
-            model=substitute,
-            train_loader=loader,
-            loss_fn=loss_fn,
-            max_steps=200,
+        all_distances = []
+        self.substitute.eval()
+        
+        dfal_pbar = tqdm(
+            unlabeled_loader,
+            total=len(unlabeled_loader),
+            desc="[ActiveThief] DFAL Scoring",
+            leave=False,
         )
-        trainer.train(request)
-        return substitute
+        for x_batch, _ in dfal_pbar:
+            x_batch = x_batch.to(device, non_blocking=pin_memory)
+            # Enable grad for DeepFool
+            with torch.enable_grad():
+                distances = self._deepfool_distance_dfal(
+                    self.substitute,
+                    x_batch,
+                    max_iter=self.dfal_max_iter,
+                    internal_batch_size=min(self.batch_size, x_batch.shape[0]),
+                )
+            all_distances.append(distances.detach().cpu())
+        
+        distances = torch.cat(all_distances, dim=0)
+        
+        # Select k samples with smallest DeepFool distances (closest to boundary)
+        _, selected_local = torch.topk(distances, k, largest=False)
+        selected_indices = [self.unlabeled_indices[i] for i in selected_local.tolist()]
+        
+        return selected_indices
+
+    def _select_dfal_k_center(self, state: BenchmarkState, k: int) -> List[int]:
+        """DFAL pre-filtering + K-center selection."""
+        device = state.metadata.get("device", "cpu")
+        pin_memory = str(device).startswith("cuda")
+        # Pre-filter with DFAL to get rho candidates
+        base_rho = self.dfal_rho
+        if base_rho is None:
+            total_budget = int(
+                state.metadata.get("max_budget")
+                or self.config.get("max_budget", 0)
+                or 0
+            )
+            base_rho = total_budget if total_budget > 0 else len(self.unlabeled_indices)
+
+        rho = max(int(base_rho), k + 1)
+        rho = min(rho, len(self.unlabeled_indices))
+        self.logger.info(
+            "[ActiveThief] DFAL pre-filtering: rho=%s (unlabeled=%s)",
+            rho,
+            len(self.unlabeled_indices),
+        )
+        dfal_candidates = self._select_dfal(state, rho)
+        
+        # Create loader for candidates
+        candidate_dataset = Subset(self.pool_dataset, dfal_candidates)
+        candidate_loader = DataLoader(
+            candidate_dataset, 
+            batch_size=self.batch_size, 
+            shuffle=False, 
+            num_workers=0,
+            pin_memory=pin_memory,
+        )
+
+        if self.substitute is None:
+            self._train_substitute(state)
+        probs = self._collect_probs(candidate_loader, device)
+
+        # Need to get probs for ALREADY LABELED data to act as centers
+        if self.labeled_indices:
+            labeled_dataset = Subset(self.pool_dataset, self.labeled_indices)
+            labeled_loader = DataLoader(labeled_dataset, batch_size=self.batch_size, shuffle=False)
+            labeled_probs = self._collect_probs(labeled_loader, device)
+        else:
+            # No labeled data yet, pass empty tensor
+            labeled_probs = torch.empty(0, self.num_classes, device=device)
+        
+        # Apply k-center on candidates using probability vectors with labeled centers
+        selected_local_in_candidates = self._select_k_center(probs.to(device), labeled_probs.to(device), k)
+        selected_indices = [dfal_candidates[i] for i in selected_local_in_candidates]
+        
+        return selected_indices
+
+    def _finalize_query_batch(
+        self,
+        selected_indices: List[int],
+        state: BenchmarkState,
+        k: int,
+    ) -> QueryBatch:
+        for idx in selected_indices:
+            if idx in self.unlabeled_indices:
+                self.unlabeled_indices.remove(idx)
+                self.labeled_indices.append(idx)
+
+        state.attack_state["labeled_indices"] = self.labeled_indices
+        state.attack_state["unlabeled_indices"] = self.unlabeled_indices
+        state.attack_state["round"] += 1
+
+        selected_dataset = Subset(self.pool_dataset, selected_indices)
+        query_loader = DataLoader(selected_dataset, batch_size=k, shuffle=False, num_workers=0)
+        x_batch, _ = next(iter(query_loader))
+
+        return QueryBatch(
+            x=x_batch,
+            meta={
+                "strategy": self.strategy,
+                "selected_indices": selected_indices,
+                "indices": selected_indices,  # Add indices for observe method
+                "round": state.attack_state["round"],
+                "labeled_size": len(self.labeled_indices),
+                "unlabeled_size": len(self.unlabeled_indices),
+            },
+        )
+
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
+        if not state.attack_state.get("initialized"):
+            self._setup_datasets(state)
+
+        if not self.unlabeled_indices:
+            return QueryBatch(
+                x=torch.empty(0, *self.state.metadata.get("input_shape", (3, 32, 32))),
+                meta={"strategy": self.strategy, "status": "exhausted"},
+            )
+
+        device = state.metadata.get("device", "cpu")
+
+        if self.strategy == "random":
+            selected_local = np.random.choice(
+                len(self.unlabeled_indices),
+                size=min(k, len(self.unlabeled_indices)),
+                replace=False,
+            ).tolist()
+            selected_indices = [self.unlabeled_indices[i] for i in selected_local]
+            return self._finalize_query_batch(selected_indices, state, k)
+
+        if self.initial_seed_size is not None and len(self.labeled_indices) < self.initial_seed_size:
+            selected_local = np.random.choice(
+                len(self.unlabeled_indices),
+                size=min(k, len(self.unlabeled_indices)),
+                replace=False,
+            ).tolist()
+            selected_indices = [self.unlabeled_indices[i] for i in selected_local]
+            return self._finalize_query_batch(selected_indices, state, k)
+
+        if self.substitute is None:
+            self._train_substitute(state)
+
+        unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
+        unlabeled_loader = DataLoader(
+            unlabeled_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            **pool_loader_kwargs(device),
+        )
+        probs = self._collect_probs(unlabeled_loader, device)
+
+        if self.strategy == "uncertainty":
+            selected_local = self._select_uncertainty(probs, k)
+            selected_indices = [self.unlabeled_indices[i] for i in selected_local]
+            return self._finalize_query_batch(selected_indices, state, k)
+
+        if self.strategy == "k_center":
+            # Need to get probs for ALREADY LABELED data to act as centers
+            if self.labeled_indices:
+                labeled_dataset = Subset(self.pool_dataset, self.labeled_indices)
+                labeled_loader = DataLoader(
+                    labeled_dataset,
+                    batch_size=self.batch_size,
+                    shuffle=False,
+                    **pool_loader_kwargs(device),
+                )
+                labeled_probs = self._collect_probs(labeled_loader, device)
+            else:
+                # No labeled data yet, pass empty tensor
+                labeled_probs = torch.empty(0, self.num_classes, device=device)
+            
+            # Pass both to selector
+            selected_local = self._select_k_center(probs.to(device), labeled_probs.to(device), k)
+            selected_indices = [self.unlabeled_indices[i] for i in selected_local]
+            return self._finalize_query_batch(selected_indices, state, k)
+
+        if self.strategy == "dfal":
+            selected_indices = self._select_dfal(state, k)
+            return self._finalize_query_batch(selected_indices, state, k)
+
+        if self.strategy == "dfal_k_center":
+            selected_indices = self._select_dfal_k_center(state, k)
+            return self._finalize_query_batch(selected_indices, state, k)
+
+        selected_local = np.random.choice(
+            len(self.unlabeled_indices),
+            size=min(k, len(self.unlabeled_indices)),
+            replace=False,
+        ).tolist()
+        selected_indices = [self.unlabeled_indices[i] for i in selected_local]
+        return self._finalize_query_batch(selected_indices, state, k)
+
+    def run(self, ctx: BenchmarkContext) -> None:
+        """Run ActiveThief attack."""
+        state = ctx.state
+        self.victim = ctx.oracle.model
+        device = state.metadata.get("device", "cpu")
+
+        step_size = self.step_size
+        if step_size is None:
+            total_budget = int(state.metadata.get("max_budget", ctx.budget_remaining))
+            rounds = max(1, int(self.rounds))
+            step_size = max(1, int(math.ceil(total_budget / rounds)))
+            self.step_size = step_size
+        elif step_size <= 0:
+            raise ValueError("step_size must be positive")
+
+        if self.initial_seed_size is None:
+            self.initial_seed_size = step_size
+        
+        if not state.attack_state.get("initialized"):
+            self._setup_datasets(state)
+
+        if not state.attack_state.get("initial_seed_queried") and self.initial_seed_indices:
+            seed_k = min(len(self.initial_seed_indices), ctx.budget_remaining)
+            if seed_k > 0:
+                seed_indices = self.initial_seed_indices[:seed_k]
+                selected_dataset = Subset(self.pool_dataset, seed_indices)
+                query_loader = DataLoader(
+                    selected_dataset,
+                    batch_size=seed_k,
+                    shuffle=False,
+                    **pool_loader_kwargs(device),
+                )
+                x_batch, _ = next(iter(query_loader))
+                query_batch = QueryBatch(
+                    x=x_batch,
+                    meta={
+                        "strategy": self.strategy,
+                        "selected_indices": seed_indices,
+                        "indices": seed_indices,
+                        "round": state.attack_state.get("round", 0),
+                        "labeled_size": len(self.labeled_indices),
+                        "unlabeled_size": len(self.unlabeled_indices),
+                    },
+                )
+                oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+                self.observe(query_batch, oracle_output, state)
+                state.attack_state["initial_seed_queried"] = True
+                if self.labeled_indices:
+                    self._train_substitute(state)
+                    self.logger.info(
+                        "[ActiveThief] Initial seed training complete (budget_remaining=%s)",
+                        ctx.budget_remaining,
+                    )
+                    self._evaluate_current_substitute(self.substitute, device)
+        
+        while ctx.budget_remaining > 0 and self.unlabeled_indices:
+            step_size = min(step_size, ctx.budget_remaining, len(self.unlabeled_indices))
+            
+            query_batch = self._select_query_batch(step_size, state)
+            round_id = state.attack_state.get("round", 0)
+            self.logger.info(
+                "[ActiveThief] Round %s selected %s samples (labeled=%s, unlabeled=%s)",
+                round_id,
+                query_batch.x.shape[0],
+                len(self.labeled_indices),
+                len(self.unlabeled_indices),
+            )
+            
+            if query_batch.x.shape[0] == 0:
+                break
+            
+            oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+            self.observe(query_batch, oracle_output, state)
+            
+            if self.labeled_indices:
+                self._train_substitute(state)
+                self.logger.info(
+                    "[ActiveThief] Round %s training complete (budget_remaining=%s)",
+                    round_id,
+                    ctx.budget_remaining,
+                )
+                self._evaluate_current_substitute(self.substitute, device)
+
+    def observe(
+        self, 
+        query_batch: QueryBatch, 
+        oracle_output: OracleOutput, 
+        state: BenchmarkState
+    ) -> None:
+        """Observe oracle outputs and update attack state."""
+        # Store oracle labels to override dataset labels during training
+        # This handles cases where surrogate dataset has different label space than victim
+        indices = query_batch.meta.get("indices", [])
+        if not indices:
+            return
+
+        if oracle_output.kind == "soft_prob":
+            labels = oracle_output.y.argmax(dim=1)
+        else:
+            labels = oracle_output.y
+
+        for idx, label in zip(indices, labels):
+            self.observed_labels[int(idx)] = int(label.item())
+
+        # Cache queried tensors + labels for training (avoid re-reading pool data from disk).
+        # Store as batches to keep append overhead low.
+        x_cpu = query_batch.x.detach().cpu()
+        y_cpu = labels.detach().cpu().long()
+        state.attack_state.setdefault("query_data_x", []).append(x_cpu)
+        state.attack_state.setdefault("query_data_y", []).append(y_cpu)
+        
+        # ActiveThief state updates are handled in _select_query_batch (index management)
+        # and _train_substitute (model update).
+
+    def _handle_oracle_output(
+        self,
+        query_batch: QueryBatch,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        if not getattr(query_batch, "meta", None):
+            return
+        if not query_batch.meta.get("indices"):
+            return
+        self.observe(query_batch, oracle_output, state)

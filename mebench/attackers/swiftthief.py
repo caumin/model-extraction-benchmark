@@ -131,31 +131,52 @@ class SoftSupSimSiamLossV17(nn.Module):
         self.num_classes = num_classes
 
     def forward(self, p, z, targets):
+        """Paper-faithful soft-supervised contrastive loss (SwiftThief Eq.2-3).
+
+        Given view-level tensors:
+        - z: projection outputs for 2q views
+        - p: predictor outputs for 2q views
+        - targets: victim soft labels for 2q views (each query sample duplicated)
+
+        Eq.(2): - sum_{i} sum_{j} eta_ij ( z_i^T z'_j + z_j^T z'_i )
+        where z'_j corresponds to predictor output p_j.
+        Eq.(3): eta_ij = 1[i!=j] (1 + H(y_i)/logK)(1 + H(y_j)/logK) cos(y_i, y_j)
+        """
+        if p.numel() == 0 or z.numel() == 0:
+            return torch.zeros((), device=self.device)
+
+        # Normalize and stop-gradient on z as in SimSiam.
         z = z.detach()
         p = F.normalize(p, dim=1)
         z = F.normalize(z, dim=1)
 
-        dot_product = -torch.mm(p, z.T)
+        # Ensure targets are valid probability vectors.
+        targets = targets.to(self.device).float()
+        targets = targets.clamp_min(1e-12)
+        targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
 
+        # Entropy term: H(y) / logK
         entr = -(targets * targets.log()).sum(dim=1)
-        entr[torch.isnan(entr)] = 0.
-        norm_entr = entr / torch.log(torch.tensor(self.num_classes, device=self.device))
-        reversed_norm_entr = 1 - norm_entr
-        mask_similar_class1 = torch.outer(reversed_norm_entr, reversed_norm_entr)
+        log_k = torch.log(torch.tensor(float(self.num_classes), device=self.device))
+        norm_entr = entr / log_k
+        a = 1.0 + norm_entr
 
-        mask_similar_class2 = F.cosine_similarity(
-            targets.T.repeat(len(targets), 1, 1),
-            targets.unsqueeze(2)
-        ).to(self.device)
+        # cos angle between soft labels
+        targets_norm = F.normalize(targets, dim=1)
+        cos_y = targets_norm @ targets_norm.T
 
-        mask_anchor_out = (1 - torch.eye(dot_product.shape[0], device=self.device))
-        mask_combined = mask_similar_class1 * mask_similar_class2 * mask_anchor_out
+        # eta_ij with zero diagonal
+        eta = (a.unsqueeze(1) * a.unsqueeze(0)) * cos_y
+        eta.fill_diagonal_(0.0)
 
-        dot_product_selected = dot_product * mask_combined
-        selected = dot_product_selected[dot_product_selected.nonzero(as_tuple=True)]
-        if selected.numel() == 0:
-            return torch.zeros((), device=self.device)
-        return selected.mean()
+        # Similarity matrix for sym term (z_i^T p_j + z_j^T p_i)
+        sim = z @ p.T
+        sym = sim + sim.T
+
+        # Use mean over off-diagonal pairs to keep scale stable across batch sizes.
+        n = int(sym.shape[0])
+        denom = float(max(1, n * (n - 1)))
+        return -((eta * sym).sum() / denom)
 
 
 class CL_FGSM(nn.Module):
@@ -365,8 +386,13 @@ class SwiftThief(AttackRunner):
         # Core hyperparameters
         self.I = int(config.get("I", 10))
         self.initial_seed_ratio = float(config.get("initial_seed_ratio", 0.1))
+        # SwiftThief paper (IJCAI'24): lambda1=1.0, lambda2=0.01
+        self.lambda1 = float(config.get("lambda1", 1.0))
         self.lambda2 = float(config.get("lambda2", 0.01))  # weight for loss3
         self.fgsm_epsilon = float(config.get("fgsm_epsilon", 0.01))
+        # Effective-number beta for cost-sensitive regularization (paper defines beta, but
+        # does not pin a single value in the setup section).
+        self.effective_beta = float(config.get("effective_beta", 0.99))
         self.projection_dim = int(config.get("projection_dim", 2048))
 
         # Sampling
@@ -638,38 +664,25 @@ class SwiftThief(AttackRunner):
         device = next(substitute.parameters()).device
         self._ensure_normalizers(state, device)
 
-        # Use the ENTIRE unlabeled pool (Strict Protocol)
+        # Paper (Algorithm 1): entropy-based sampling (pure Shannon entropy top-k).
         candidates = unlabeled
         if not candidates:
             return []
 
-        entropy_scores = []
+        scores: list[tuple[int, float]] = []
         bs = min(self.batch_size, len(candidates))
         with torch.no_grad():
             for start in tqdm(range(0, len(candidates), bs), desc="[SwiftThief] Scoring Pool", leave=False):
-                chunk = candidates[start:start + bs]
+                chunk = candidates[start : start + bs]
                 x_raw = torch.stack([self.pool_dataset[i][0] for i in chunk]).to(device)
                 x = self.normalize(x_raw)
-
                 probs = F.softmax(substitute(x), dim=1)
-                entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
-                K = int(state.metadata.get("num_classes") or 10)
-                log_k = torch.log(torch.tensor(float(K), device=device))
-                entropy_weight = 1.0 - entropy / log_k
+                entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1)
+                for i, idx in enumerate(chunk):
+                    scores.append((int(idx), float(entropy[i].item())))
 
-                probs_norm = F.normalize(probs, dim=1)
-                cos_sim = probs_norm @ probs_norm.T
-                weights = entropy_weight.unsqueeze(1) * entropy_weight.unsqueeze(0)
-                eta = weights * cos_sim
-                eta.fill_diagonal_(0.0)
-
-                max_eta = eta.max(dim=1).values
-                entropy_scores.extend(
-                    [(chunk[i], float(max_eta[i].item())) for i in range(len(chunk))]
-                )
-
-        entropy_scores.sort(key=lambda t: t[1], reverse=True)
-        return [idx for idx, _ in entropy_scores[:min(k, len(entropy_scores))]]
+        scores.sort(key=lambda t: t[1], reverse=True)
+        return [idx for idx, _ in scores[: min(int(k), len(scores))]]
 
     def _extract_features_for_indices(
         self,
@@ -974,20 +987,23 @@ class SwiftThief(AttackRunner):
 
         self._ensure_normalizers(state, device)
 
-        # costs (effective number) from histogram
+        # costs (effective number) from histogram (paper Eq.4)
+        # c_y = (1 - beta) / (1 - beta^{N_y}), larger for rarer classes.
         cnt = torch.zeros(num_classes, device=device)
         for c in range(num_classes):
             cnt[c] = float(state.attack_state["class_counts"].get(c, 0))
-        beta = 0.99
-        costs = (1.0 - beta) / (1.0 - torch.pow(torch.tensor(beta, device=device), cnt + 1.0))
-        costs = costs / costs.sum().clamp_min(1e-12)
+        beta = float(self.effective_beta)
+        beta_t = torch.tensor(beta, device=device)
+        # Avoid division by zero when cnt==0 by clamping exponent.
+        denom = 1.0 - torch.pow(beta_t, cnt.clamp_min(1.0))
+        costs = (1.0 - beta_t) / denom.clamp_min(1e-12)
 
         criterion = SimSiamLoss('simplified').to(device)
         soft_criterion = SoftSupSimSiamLossV17(device, num_classes).to(device)
         cost_sensitive_criterion = SimSiamLoss_cost_sensitive(costs).to(device)
 
         fgsm_model = _SimSiamWrapper(substitute, self.projection_head, self.predictor_head).to(device)
-        reg_adversary = CL_FGSM(fgsm_model, self.fgsm_epsilon, device)
+        # FGSM is implemented inline in the CL loop (paper Eq.4).
 
         opt_config = substitute_config.get("optimizer", {})
         optimizer_cl = self._build_optimizer(
@@ -1050,31 +1066,53 @@ class SwiftThief(AttackRunner):
 
                 x1, x2 = self.normalize_pair(x1_raw, x2_raw)
 
-                adv_x1 = reg_adversary(x1, x2)
+                # Minority class regularization (paper Eq.4): FGSM inner-maximization in pixel space.
+                # Determine sample class indices for cost-sensitive weights.
+                if y.ndim > 1 and y.shape[1] > 1:
+                    targets_probs = y.clamp_min(1e-8)
+                    targets_probs = targets_probs / targets_probs.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                    y_idx = targets_probs.argmax(dim=1)
+                else:
+                    targets_probs = None
+                    y_idx = y.long()
+
+                # Compute adversarial perturbation on the first view only (x1_raw).
+                x1_raw_adv = x1_raw.detach().clone().requires_grad_(True)
+                x1_adv_n, x2_n = self.normalize_pair(x1_raw_adv, x2_raw)
+                outs_advgen = fgsm_model(im_aug1=x1_adv_n, im_aug2=x2_n)
+                adv_loss = cost_sensitive_criterion(
+                    outs_advgen["z1"], outs_advgen["z2"], outs_advgen["p1"], outs_advgen["p2"], y_idx
+                )
+                optimizer_cl.zero_grad(set_to_none=True)
+                adv_loss.backward()
+                with torch.no_grad():
+                    grad = x1_raw_adv.grad
+                    if grad is None:
+                        x1_raw_adv = x1_raw
+                    else:
+                        x1_raw_adv = (x1_raw_adv + self.fgsm_epsilon * grad.sign()).clamp(0.0, 1.0)
+                x1_raw_adv = x1_raw_adv.detach()
 
                 outs_l = fgsm_model(im_aug1=x1, im_aug2=x2)
 
-                if y.ndim > 1 and y.shape[1] > 1:
-                    targets = y.clamp_min(1e-8)
-                    targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                if targets_probs is not None:
+                    # SwiftThief Eq.(2)-(3)
                     loss2 = soft_criterion(
-                        p=torch.cat([outs_l['p1'], outs_l['p2']], dim=0),
-                        z=torch.cat([outs_l['z1'], outs_l['z2']], dim=0),
-                        targets=torch.cat([targets, targets], dim=0)
+                        p=torch.cat([outs_l["p1"], outs_l["p2"]], dim=0),
+                        z=torch.cat([outs_l["z1"], outs_l["z2"]], dim=0),
+                        targets=torch.cat([targets_probs, targets_probs], dim=0),
                     )
-                    y_idx = targets.argmax(dim=1)
                 else:
+                    # Hard-label mode: soft contrastive loss is undefined in the paper.
                     loss2 = torch.zeros((), device=device)
-                    y_idx = y.long()
 
-                outs_adv = fgsm_model(im_aug1=adv_x1, im_aug2=x2)
+                x1_adv, x2_again = self.normalize_pair(x1_raw_adv, x2_raw)
+                outs_adv = fgsm_model(im_aug1=x1_adv, im_aug2=x2_again)
                 loss3 = cost_sensitive_criterion(
-                    outs_adv['z1'], outs_adv['z2'],
-                    outs_adv['p1'], outs_adv['p2'],
-                    y_idx
+                    outs_adv["z1"], outs_adv["z2"], outs_adv["p1"], outs_adv["p2"], y_idx
                 )
 
-                loss = loss1 + loss2 + self.lambda2 * loss3
+                loss = loss1 + (self.lambda1 * loss2) + (self.lambda2 * loss3)
 
                 optimizer_cl.zero_grad(set_to_none=True)
                 loss.backward()

@@ -94,6 +94,16 @@
 - Batch Size: 공통값
 - Max Epochs / Patience: 공통값
 
+Early Stopping 기준도 통일한다.
+
+- Metric: `validation loss`
+  - `soft_prob`: KLDiv (target probability vs. log-softmax)
+  - `hard_top1`: CrossEntropy
+- Mode: `min` (loss minimize)
+
+Track A(From-scratch) 표준 루프는 `S(B)=ceil(0.2*B)` 고정 step을 끝까지 수행하며,
+early stopping / best checkpoint selection을 사용하지 않는다.
+
 단, 공격의 핵심 메커니즘에 결합된 내부 루프는 예외 처리한다 (Section 4).
 
 ### 3.5 평가/보고

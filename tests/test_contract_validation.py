@@ -23,6 +23,7 @@ def test_temperature_must_be_1_for_default_oracle():
         "attack": {"name": "random", "output_mode": "soft_prob"},
         "dataset": {"data_mode": "seed", "seed_name": "MNIST"},
         "victim": {"output_mode": "soft_prob", "temperature": 2.0},  # Invalid
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000]},
     }
 
@@ -50,6 +51,7 @@ def test_checkpoint_exceeds_max_budget():
         "attack": {"name": "random", "output_mode": "soft_prob"},
         "dataset": {"data_mode": "seed", "seed_name": "MNIST"},
         "victim": {"output_mode": "soft_prob", "temperature": 1.0},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 1000, "checkpoints": [1000, 10000]},  # 10000 > 1000
     }
 
@@ -63,6 +65,7 @@ def test_checkpoints_must_be_increasing():
         "attack": {"name": "random", "output_mode": "soft_prob"},
         "dataset": {"data_mode": "seed", "seed_name": "MNIST"},
         "victim": {"output_mode": "soft_prob", "temperature": 1.0},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 1000000, "checkpoints": [10000, 1000]},  # Not increasing
     }
 
@@ -76,6 +79,7 @@ def test_valid_config_passes():
         "attack": {"name": "random", "output_mode": "soft_prob"},
         "dataset": {"data_mode": "seed", "seed_name": "MNIST"},
         "victim": {"output_mode": "soft_prob", "temperature": 1.0},
+        "substitute": {"max_epochs": 200, "patience": 20},
         "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000, 100000]},
     }
 

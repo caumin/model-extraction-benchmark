@@ -164,7 +164,6 @@ class Evaluator:
             targets = targets.long().to(self.device)
             return nn.CrossEntropyLoss()(outputs, targets)
 
-        val_loader = train_loader
         trainer_config = dict(self.config["substitute"])
         if "grad_clip" not in trainer_config:
             trainer_config["grad_clip"] = 1.0
@@ -174,12 +173,11 @@ class Evaluator:
             model=model,
             train_loader=train_loader,
             loss_fn=loss_fn,
-            val_loader=val_loader,
-            eval_fn=lambda m, v: self._compute_f1(m, v, output_mode),
-            early_stop_mode="max",
             max_steps=num_steps,
-            validate_every=100,
-            load_best=True,
+            # Track A contract: run a fixed number of steps S(B)=ceil(0.2*B).
+            # Do not early-stop or select best checkpoint, since that would
+            # introduce an extra training-recipe degree of freedom.
+            load_best=False,
         )
         result = trainer.train(request)
 

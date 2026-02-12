@@ -456,7 +456,7 @@ class BlackboxDissector(AttackRunner):
         self.momentum = float(config.get("momentum", 0.9))
         # [P0 FIX] Paper mandates 200 epochs for BlackBox Dissector
         self.max_epochs = int(config.get("max_epochs", 200))
-        self.patience = int(config.get("patience", 100))
+        self.patience = int(config.get("patience", 20))
         self.dropout = float(config.get("dropout", 0.1))
         self.l2_reg = float(config.get("l2_reg", 5e-4))
         

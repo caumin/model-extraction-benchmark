@@ -90,7 +90,7 @@ class CopycatCNN(AttackRunner):
         self.substitute_lr = float(config.get("substitute_lr", 0.01))
         self.substitute_momentum = float(config.get("substitute_momentum", 0.9))
         self.substitute_weight_decay = float(config.get("substitute_weight_decay", 5e-4))
-        self.substitute_epochs = int(config.get("substitute_epochs", 5))
+        self.substitute_epochs = int(config.get("substitute_epochs", 200))
         # Round-based execution: query -> (re)train substitute, repeated.
         # Default aligns with common "10 round" reporting in prior works.
         self.rounds = int(config.get("rounds", 10))

@@ -3,6 +3,21 @@
 from typing import Dict, Any
 
 
+def _require_positive_int(config: Dict[str, Any], path: str) -> int:
+    cur: Any = config
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            raise KeyError(f"Missing required config field: {path}")
+        cur = cur[part]
+    try:
+        val = int(cur)
+    except Exception as exc:  # pragma: no cover
+        raise ValueError(f"Config field must be int: {path}={cur!r}") from exc
+    if val <= 0:
+        raise ValueError(f"Config field must be > 0: {path}={val}")
+    return val
+
+
 def validate_config(config: Dict[str, Any]) -> None:
     """Validate experiment configuration.
 
@@ -29,6 +44,22 @@ def validate_config(config: Dict[str, Any]) -> None:
     attack_mode = config["attack"]["output_mode"]
     if victim_mode != attack_mode:
         raise ValueError(f"Mode mismatch: victim={victim_mode}, attack={attack_mode}")
+
+    # Substitute supervised-training unification (pool-based attacks).
+    # Enforce presence of max_epochs/patience so runs cannot silently fall back
+    # to per-attack defaults.
+    pool_supervised_attacks = {
+        "random",
+        "activethief",
+        "knockoff_nets",
+        "cloudleak",
+        "copycatcnn",
+        "inversenet",
+        "blackbox_dissector",
+    }
+    if attack in pool_supervised_attacks:
+        _require_positive_int(config, "substitute.max_epochs")
+        _require_positive_int(config, "substitute.patience")
 
     # Output-mode capability (soft-only / hard-only / both).
     # This is a *capability* taxonomy used for fair evaluation grouping.

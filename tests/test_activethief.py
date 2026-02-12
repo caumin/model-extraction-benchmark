@@ -8,6 +8,9 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.attackers.activethief import ActiveThief
 
 
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
 def test_activethief_initialization():
     """Test ActiveThief initialization."""
     config = {
@@ -47,7 +50,7 @@ def test_activethief_select_first_round():
         "initial_seed_size": 10,
     }
     state = BenchmarkState()
-    state.metadata = {"device": "cpu", "dataset_config": config["dataset"]}
+    state.metadata = {"device": DEVICE, "dataset_config": config["dataset"]}
 
     attack = ActiveThief(config, state)
 
@@ -77,7 +80,7 @@ def test_activethief_uncertainty_strategy():
         "initial_seed_size": 10,
     }
     state = BenchmarkState()
-    state.metadata = {"device": "cpu", "dataset_config": {"name": "CIFAR10", "seed_size": 100}}
+    state.metadata = {"device": DEVICE, "dataset_config": {"name": "CIFAR10", "seed_size": 100}}
 
     attack = ActiveThief(config, state)
 
@@ -113,7 +116,7 @@ def test_activethief_kcenter_strategy():
         "initial_seed_size": 10,
     }
     state = BenchmarkState()
-    state.metadata = {"device": "cpu", "dataset_config": {"name": "CIFAR10", "seed_size": 100}}
+    state.metadata = {"device": DEVICE, "dataset_config": {"name": "CIFAR10", "seed_size": 100}}
 
     attack = ActiveThief(config, state)
 
@@ -147,7 +150,7 @@ def test_activethief_dfal_strategy():
         "initial_seed_size": 10,
     }
     state = BenchmarkState()
-    state.metadata = {"device": "cpu", "dataset_config": {"name": "CIFAR10", "seed_size": 100}}
+    state.metadata = {"device": DEVICE, "dataset_config": {"name": "CIFAR10", "seed_size": 100}}
 
     attack = ActiveThief(config, state)
 
