@@ -184,14 +184,32 @@ class ActiveThief(AttackRunner):
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
+
+        train_workers_raw = sub_config.get(
+            "train_num_workers",
+            sub_config.get("num_workers", self.config.get("num_workers")),
+        )
+        val_workers_raw = sub_config.get(
+            "val_num_workers",
+            sub_config.get("num_workers", self.config.get("num_workers", train_workers_raw)),
+        )
+        train_loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(train_workers_raw)})
+            if train_workers_raw is not None
+            else pool_loader_kwargs(device, self.config)
+        )
+        val_loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(val_workers_raw)})
+            if val_workers_raw is not None
+            else pool_loader_kwargs(device, self.config)
+        )
         
         # Create loaders
         labeled_loader = DataLoader(
             train_dataset,
             batch_size=train_batch_size,
             shuffle=True,
-            num_workers=0,
-            pin_memory=str(device).startswith("cuda"),
+            **train_loader_kwargs,
         )
         
         val_loader = None
@@ -200,8 +218,7 @@ class ActiveThief(AttackRunner):
                 val_dataset,
                 batch_size=train_batch_size,
                 shuffle=False,
-                num_workers=0,
-                pin_memory=str(device).startswith("cuda"),
+                **val_loader_kwargs,
             )
         
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -487,8 +504,7 @@ class ActiveThief(AttackRunner):
             candidate_dataset, 
             batch_size=self.batch_size, 
             shuffle=False, 
-            num_workers=0,
-            pin_memory=pin_memory,
+            **pool_loader_kwargs(device, self.config),
         )
 
         if self.substitute is None:
@@ -498,7 +514,12 @@ class ActiveThief(AttackRunner):
         # Need to get probs for ALREADY LABELED data to act as centers
         if self.labeled_indices:
             labeled_dataset = Subset(self.pool_dataset, self.labeled_indices)
-            labeled_loader = DataLoader(labeled_dataset, batch_size=self.batch_size, shuffle=False)
+            labeled_loader = DataLoader(
+                labeled_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                **pool_loader_kwargs(device, self.config),
+            )
             labeled_probs = self._collect_probs(labeled_loader, device)
         else:
             # No labeled data yet, pass empty tensor
@@ -526,7 +547,13 @@ class ActiveThief(AttackRunner):
         state.attack_state["round"] += 1
 
         selected_dataset = Subset(self.pool_dataset, selected_indices)
-        query_loader = DataLoader(selected_dataset, batch_size=k, shuffle=False, num_workers=0)
+        device = state.metadata.get("device", "cpu")
+        query_loader = DataLoader(
+            selected_dataset,
+            batch_size=k,
+            shuffle=False,
+            **pool_loader_kwargs(device, self.config),
+        )
         x_batch, _ = next(iter(query_loader))
 
         return QueryBatch(
