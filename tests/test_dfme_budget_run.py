@@ -3,7 +3,11 @@
 import csv
 from pathlib import Path
 
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+
 import mebench.core.engine as engine
+import mebench.attackers.runner as runner
 
 
 def test_dfme_budget_limited_run(tmp_path, monkeypatch) -> None:
@@ -14,6 +18,28 @@ def test_dfme_budget_limited_run(tmp_path, monkeypatch) -> None:
         return run_dir
 
     monkeypatch.setattr(engine, "create_run_dir", fake_create_run_dir)
+
+    # Avoid slow/full dataset IO in unit tests. Victim accuracy verification is
+    # orthogonal to this budget/accounting test.
+    def fake_get_test_dataloader(
+        name: str,
+        batch_size: int = 128,
+        num_workers=None,
+        *,
+        input_size=None,
+        channels=None,
+    ) -> DataLoader:
+        c = int(channels) if channels is not None else 3
+        if input_size is None:
+            h, w = (32, 32)
+        else:
+            h, w = (int(input_size[0]), int(input_size[1]))
+        x = torch.rand(256, c, h, w)
+        y = torch.randint(0, 10, (256,))
+        return DataLoader(TensorDataset(x, y), batch_size=batch_size, shuffle=False, num_workers=0)
+
+    monkeypatch.setattr(engine, "get_test_dataloader", fake_get_test_dataloader)
+    monkeypatch.setattr(runner, "get_test_dataloader", fake_get_test_dataloader)
 
     config = {
         "run": {"name": "dfme_budget_test", "seeds": [0], "device": "cpu"},
@@ -53,7 +79,8 @@ def test_dfme_budget_limited_run(tmp_path, monkeypatch) -> None:
         "cache": {"enabled": True, "delete_on_finish": False},
     }
 
-    engine.run_experiment(config, device="cpu")
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    engine.run_experiment(config, device=device)
 
     run_dir = tmp_path / "dfme_budget_test" / "seed_0"
     summary_path = run_dir / "summary.json"
