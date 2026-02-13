@@ -74,12 +74,13 @@ class BlackboxRipper(AttackRunner):
     - Official repo: https://github.com/antoniobarbalau/black-box-ripper
     - Paper: `papers/blackbox-ripper.pdf`
 
-    Key behavior we replicate:
+    Key behavior we replicate (paper, Algorithm 1 / Section 4.3):
     - Fixed pretrained generator (no GAN training during extraction)
     - Per-sample evolutionary search in latent space:
       - Population K=30, elites k=10
-      - Init: U(-3.3, 3.3)
-      - Offspring: elites + N(0, 0.5) twice (two mutated copies)
+      - Init: U(-3, 3)
+      - Offspring: sample K-k copies from elites uniformly, then mutate with N(0, 1)
+      - Stop when objective V <= t (t=0.02) or after at most 10 iterations
     - Student training uses SGD + BCELoss on softmax outputs.
 
     Benchmark adaptation:
@@ -104,14 +105,14 @@ class BlackboxRipper(AttackRunner):
         # Evolutionary search hyperparameters (upstream defaults).
         self.population_size = int(config.get("population_size", 30))
         self.elite_size = int(config.get("elite_size", 10))
-        self.latent_bound = float(config.get("latent_bound", 3.3))
-        self.mutation_scale = float(config.get("mutation_scale", 0.5))
-        self.confidence_threshold = float(config.get("confidence_threshold", 0.9))
-        # Keep as optional stop criterion.
-        # Upstream `torch_optimizer.optimize()` stops based on confidence; default to 0.0 (disabled).
-        self.fitness_threshold = float(config.get("fitness_threshold", 0.0))
-        # Official repo has variants; `optimize()` uses up to 300 iterations.
-        self.max_evolve_iters = int(config.get("max_evolve_iters", 300))
+        # Paper (Section 4.3): u=3, Gaussian mutation N(0,1), max 10 iterations, t=0.02.
+        self.latent_bound = float(config.get("latent_bound", 3.0))
+        self.mutation_scale = float(config.get("mutation_scale", 1.0))
+        self.fitness_threshold = float(config.get("fitness_threshold", 0.02))
+        self.max_evolve_iters = int(config.get("max_evolve_iters", 10))
+
+        # Optional additional stop criterion (NOT in Algorithm 1). Disabled by default.
+        self.confidence_threshold = float(config.get("confidence_threshold", 1.1))
 
         # Student training hyperparameters (upstream train_or_restore_predictor).
         self.train_batch_size = int(config.get("train_batch_size", config.get("batch_size", 64)))
@@ -201,6 +202,12 @@ class BlackboxRipper(AttackRunner):
 
         # Persist evaluation state.
         self.state.attack_state["bbr_evaluated_checkpoints"] = sorted(self._evaluated_checkpoints)
+
+    def observe(self, query_batch, oracle_output, state) -> None:
+        # This attack is implemented as a self-contained AttackRunner (Track B)
+        # that performs its own query/train loop in `run()`. This method exists
+        # for interface consistency with the benchmark test suite.
+        return None
 
     def _init_generator(self, device: str) -> None:
         if self.generator is not None:
@@ -364,7 +371,11 @@ class BlackboxRipper(AttackRunner):
             best_x = x[best_idx : best_idx + 1].detach()
             best_probs = probs[best_idx : best_idx + 1].detach()
 
-            if best_conf >= self.confidence_threshold or best_obj <= self.fitness_threshold:
+            # Paper Algorithm 1: iterate while V >= t.
+            if best_obj <= self.fitness_threshold:
+                break
+            # Optional safeguard: stop early if teacher is extremely confident.
+            if self.confidence_threshold < 1.0 and best_conf >= self.confidence_threshold:
                 break
 
             elites = population[elite_indices]
@@ -403,16 +414,26 @@ class BlackboxRipper(AttackRunner):
         return (diff * diff).sum(dim=1)
 
     def _make_next_population_from_elites(self, elites: torch.Tensor) -> torch.Tensor:
-        """Upstream mutation rule.
+        """Paper Algorithm 1 (Steps 6-7) population update.
 
-        Official repo pattern (see `temp_ripper/torch_optimizer.py`):
-        - keep elites
-        - add two mutated copies of elites with Gaussian noise (scale=0.5)
+        Pc <- {U(Pe)}_{K-k}   (uniformly sample K-k copies from elites, with replacement)
+        Pc <- Pc + N(0, 1)
+        P  <- Pe U Pc
         """
 
-        noise1 = torch.randn_like(elites) * self.mutation_scale
-        noise2 = torch.randn_like(elites) * self.mutation_scale
-        return torch.cat([elites, elites + noise1, elites + noise2], dim=0)
+        elite_k = int(elites.size(0))
+        if elite_k <= 0:
+            raise ValueError("BlackboxRipper: empty elites in population update")
+
+        num_children = int(self.population_size) - elite_k
+        if num_children <= 0:
+            return elites[: int(self.population_size)]
+
+        child_indices = torch.randint(0, elite_k, (num_children,), device=elites.device)
+        children = elites[child_indices].clone()
+        noise = torch.randn_like(children) * float(self.mutation_scale)
+        children = children + noise
+        return torch.cat([elites, children], dim=0)
 
     def _train_on_batch(self, x_batch: torch.Tensor, y_batch: torch.Tensor, device: str) -> None:
         if self.substitute is None or self.substitute_optimizer is None or self.substitute_loss is None:

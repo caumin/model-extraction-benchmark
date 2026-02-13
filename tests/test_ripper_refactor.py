@@ -20,20 +20,19 @@ def _make_min_state() -> BenchmarkState:
     return state
 
 
-def test_blackbox_ripper_mutation_structure_matches_upstream() -> None:
-    """Mutation should keep elites and add two mutated copies.
+def test_blackbox_ripper_mutation_structure_matches_paper() -> None:
+    """Mutation matches paper Algorithm 1 (Steps 6-7).
 
-    Upstream (temp_ripper/torch_optimizer.py) pattern:
-      new_pop = concat([elites,
-                        elites + N(0, sigma),
-                        elites + N(0, sigma)])
+    Pc <- {U(Pe)}_{K-k} (uniformly sample K-k copies from elites, with replacement)
+    Pc <- Pc + N(0, 1)
+    P  <- Pe U Pc
     """
 
     state = _make_min_state()
     config = {
         "population_size": 30,
         "elite_size": 10,
-        "mutation_scale": 0.5,
+        "mutation_scale": 1.0,
         # Not used by this unit test (only required when running the attack).
         "generator_checkpoint": "C:/path/to/weights.pth",
     }
@@ -51,18 +50,16 @@ def test_blackbox_ripper_mutation_structure_matches_upstream() -> None:
     assert new_pop.shape == (30, dim)
     assert torch.allclose(new_pop[:10], elites)
 
-    off1 = new_pop[10:20]
-    off2 = new_pop[20:30]
+    children = new_pop[10:30]
+    # Each child should be closest to some elite (since elites are far apart).
+    d = torch.cdist(children, elites)
+    parent_idx = d.argmin(dim=1)
+    min_dist = d.min(dim=1).values
+    assert torch.all(min_dist < 50.0)
 
-    # Offspring should differ from elites (noise added).
-    assert not torch.allclose(off1, elites)
-    assert not torch.allclose(off2, elites)
-
-    # Each offspring row should be closest to its corresponding elite row.
-    d1 = torch.cdist(off1, elites)
-    d2 = torch.cdist(off2, elites)
-    assert torch.equal(d1.argmin(dim=1), torch.arange(10))
-    assert torch.equal(d2.argmin(dim=1), torch.arange(10))
+    # Children should not be exactly equal to their nearest elite (noise added).
+    parents = elites[parent_idx]
+    assert not torch.allclose(children, parents)
 
 
 def test_blackbox_ripper_objective_eq2() -> None:
