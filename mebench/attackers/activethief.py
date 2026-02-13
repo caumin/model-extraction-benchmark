@@ -53,7 +53,8 @@ class ActiveThief(AttackRunner):
         )
         step_size = config.get("step_size")
         self.step_size = int(step_size) if step_size is not None else None
-        self.rounds = int(config.get("rounds", 10))
+        # Unified config key is `iterations` (default 10). Keep `rounds` as backwards-compatible alias.
+        self.rounds = int(config.get("iterations", config.get("rounds", 10)))
         
         # Store oracle labels to override dataset labels during training
         self.observed_labels = {}
@@ -764,22 +765,22 @@ class ActiveThief(AttackRunner):
         device = state.metadata.get("device", "cpu")
 
         step_size = self.step_size
-        if step_size is None:
-            total_budget = int(state.metadata.get("max_budget", ctx.budget_remaining))
-            rounds = max(1, int(self.rounds))
-            step_size = max(1, int(math.ceil(total_budget / rounds)))
-            self.step_size = step_size
-        elif step_size <= 0:
+        if step_size is not None and step_size <= 0:
             raise ValueError("step_size must be positive")
-
-        if self.initial_seed_size is None:
-            self.initial_seed_size = step_size
         
         if not state.attack_state.get("initialized"):
             self._setup_datasets(state)
 
         # Reserve validation (20%) and seed (10%) from total query budget.
         self._bootstrap_seed_and_validation_sets(ctx, state)
+
+        # Compute per-round query step AFTER reserving seed/validation.
+        # Semantics: divide the remaining active-learning budget into `rounds` rounds.
+        if step_size is None:
+            rounds = max(1, int(self.rounds))
+            active_budget = int(ctx.budget_remaining)
+            step_size = max(1, int(math.ceil(active_budget / rounds)))
+            self.step_size = step_size
 
         # Train initial substitute once after seed collection.
         if self.substitute is None and self.labeled_indices:
@@ -814,6 +815,8 @@ class ActiveThief(AttackRunner):
                     ctx.budget_remaining,
                 )
                 self._evaluate_current_substitute(self.substitute, device)
+
+            state.attack_state["round"] = int(round_id) + 1
 
     def observe(
         self, 
