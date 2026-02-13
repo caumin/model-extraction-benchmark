@@ -137,7 +137,6 @@ def generate_configs(
         AttackSpec("random", kind="pool", label_capability="both"),
         AttackSpec("knockoff_nets", kind="pool", label_capability="soft_only"),
         AttackSpec("cloudleak", kind="pool", label_capability="soft_only"),
-        AttackSpec("copycatcnn", kind="pool", label_capability="hard_only"),
         AttackSpec("inversenet", kind="pool", label_capability="hard_only"),
         AttackSpec("blackbox_dissector", kind="pool", label_capability="hard_only"),
 
@@ -203,7 +202,6 @@ def generate_configs(
         AttackSpec("game", kind="synthetic", label_capability="soft_only"),
         AttackSpec("blackbox_ripper", kind="synthetic", label_capability="soft_only"),
         AttackSpec("dfms", kind="synthetic", label_capability="hard_only"),
-        AttackSpec("es", kind="synthetic", label_capability="both"),
     ]
 
     if clean:
