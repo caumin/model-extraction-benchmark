@@ -19,7 +19,12 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader, get_test_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
-from mebench.utils.dataloader import pool_loader_kwargs
+from mebench.utils.dataloader import (
+    pool_loader_kwargs,
+    resolve_pool_num_workers,
+    resolve_train_num_workers,
+    resolve_val_num_workers,
+)
 from mebench.eval.metrics import evaluate_substitute
 
 
@@ -807,12 +812,18 @@ class BlackboxDissector(AttackRunner):
         scored: list[tuple[int, float]] = []
         
         # BATCH PROCESSING START
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        pool_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
         candidate_subset = Subset(self.pool_dataset, transfer_indices)
         candidate_loader = DataLoader(
             candidate_subset, 
             batch_size=self.selection_batch_size, 
             shuffle=False, 
-            **pool_loader_kwargs(device)
+            **pool_kwargs
         )
         
         current_idx_ptr = 0
@@ -915,6 +926,12 @@ class BlackboxDissector(AttackRunner):
             ).dataset
 
         device = state.metadata.get("device", "cpu")
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        pool_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
         victim_config = state.metadata.get("victim_config", {})
         normalization = victim_config.get("normalization")
         if normalization is None:
@@ -928,7 +945,7 @@ class BlackboxDissector(AttackRunner):
             subset,
             batch_size=min(self.selection_batch_size, len(unlabeled_indices)),
             shuffle=False,
-            **pool_loader_kwargs(device),
+            **pool_kwargs,
         )
 
         current_idx_ptr = 0
@@ -1063,18 +1080,8 @@ class BlackboxDissector(AttackRunner):
             sub_config.get("batch_size")
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
-        train_workers = int(
-            sub_config.get(
-                "train_num_workers",
-                sub_config.get("num_workers", self.config.get("num_workers", 0)),
-            )
-        )
-        val_workers = int(
-            sub_config.get(
-                "val_num_workers",
-                sub_config.get("num_workers", train_workers),
-            )
-        )
+        train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
         pseudo_workers = int(
             sub_config.get(
                 "pseudo_num_workers",

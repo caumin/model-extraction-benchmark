@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import f1_score
 import torchvision.transforms as transforms
 from tqdm import tqdm
@@ -33,6 +33,12 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.dataloader import (
+    pool_loader_kwargs,
+    resolve_pool_num_workers,
+    resolve_train_num_workers,
+    resolve_val_num_workers,
+)
 
 
 class QueryDataset(torch.utils.data.Dataset):
@@ -391,7 +397,8 @@ class SwiftThief(AttackRunner):
 
         # Training (CL)
         self.batch_size = int(config.get("batch_size", 256))
-        self.num_workers = int(config.get("num_workers", 4))
+        # Pool scanning/scoring workers. Keep `num_workers` as a backwards-compatible alias.
+        self.pool_num_workers = int(config.get("pool_num_workers", config.get("num_workers", 4)))
         self.prefetch_factor = int(config.get("prefetch_factor", 2))
         self.use_pil_transforms = bool(config.get("use_pil_transforms", False))
         self.lr = float(config.get("lr", 0.06))
@@ -662,15 +669,41 @@ class SwiftThief(AttackRunner):
 
         scores: list[tuple[int, float]] = []
         bs = min(self.batch_size, len(candidates))
+
+        pool_workers = resolve_pool_num_workers(
+            self.config,
+            state.metadata.get("dataset_config", {}),
+            default=self.pool_num_workers,
+        )
+        loader_kwargs = (
+            pool_loader_kwargs(str(device), {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(str(device))
+        )
+
+        subset = Subset(self.pool_dataset, candidates)
+        loader = DataLoader(
+            subset,
+            batch_size=bs,
+            shuffle=False,
+            **loader_kwargs,
+        )
+
+        ptr = 0
         with torch.no_grad():
-            for start in tqdm(range(0, len(candidates), bs), desc="[SwiftThief] Scoring Pool", leave=False):
-                chunk = candidates[start : start + bs]
-                x_raw = torch.stack([self.pool_dataset[i][0] for i in chunk]).to(device)
+            pbar = tqdm(loader, total=len(loader), desc="[SwiftThief] Scoring Pool", leave=False)
+            for x_raw, _ in pbar:
+                batch_len = int(x_raw.size(0))
+                batch_indices = candidates[ptr : ptr + batch_len]
+                ptr += batch_len
+
+                x_raw = x_raw.to(device, non_blocking=str(device).startswith("cuda"))
                 x = self.normalize(x_raw)
                 probs = F.softmax(substitute(x), dim=1)
                 entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1)
-                for i, idx in enumerate(chunk):
-                    scores.append((int(idx), float(entropy[i].item())))
+                entropy_list = entropy.detach().cpu().tolist()
+                for idx, ent in zip(batch_indices, entropy_list):
+                    scores.append((int(idx), float(ent)))
 
         scores.sort(key=lambda t: t[1], reverse=True)
         return [idx for idx, _ in scores[: min(int(k), len(scores))]]
@@ -684,12 +717,30 @@ class SwiftThief(AttackRunner):
         batch_size: int = 256
     ) -> torch.Tensor:
         self._ensure_normalizers(state, device)
+        pool_workers = resolve_pool_num_workers(
+            self.config,
+            state.metadata.get("dataset_config", {}),
+            default=self.pool_num_workers,
+        )
+        loader_kwargs = (
+            pool_loader_kwargs(str(device), {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(str(device))
+        )
+
+        subset = Subset(self.pool_dataset, indices)
+        loader = DataLoader(
+            subset,
+            batch_size=int(batch_size),
+            shuffle=False,
+            **loader_kwargs,
+        )
+
         feats = []
         substitute.eval()
         with torch.no_grad():
-            for start in range(0, len(indices), batch_size):
-                chunk = indices[start:start + batch_size]
-                x_raw = torch.stack([self.pool_dataset[i][0] for i in chunk]).to(device)
+            for x_raw, _ in loader:
+                x_raw = x_raw.to(device, non_blocking=str(device).startswith("cuda"))
                 x = self.normalize(x_raw)
                 f = substitute.features(x)
                 if f.ndim > 2:
@@ -882,20 +933,36 @@ class SwiftThief(AttackRunner):
         if bs_q <= 0:
             return
 
-        loader_kwargs = {
-            "num_workers": self.num_workers,
-            "pin_memory": True,
+        substitute_config = state.metadata.get("substitute_config") or self.config.get("substitute") or {}
+        device_str = str(state.metadata.get("device", "cpu"))
+        pin_memory = device_str.startswith("cuda")
+
+        train_workers = resolve_train_num_workers(substitute_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(substitute_config, self.config, default=train_workers)
+
+        train_loader_kwargs = {
+            "num_workers": int(train_workers),
+            "pin_memory": bool(pin_memory),
             "drop_last": False,
         }
-        if self.num_workers > 0:
-            loader_kwargs["persistent_workers"] = True
-            loader_kwargs["prefetch_factor"] = self.prefetch_factor
-             
+        if int(train_workers) > 0:
+            train_loader_kwargs["persistent_workers"] = True
+            train_loader_kwargs["prefetch_factor"] = self.prefetch_factor
+
+        val_loader_kwargs = {
+            "num_workers": int(val_workers),
+            "pin_memory": bool(pin_memory),
+            "drop_last": False,
+        }
+        if int(val_workers) > 0:
+            val_loader_kwargs["persistent_workers"] = True
+            val_loader_kwargs["prefetch_factor"] = self.prefetch_factor
+              
         labeled_loader = torch.utils.data.DataLoader(
             train_q_ssl,
             batch_size=bs_q,
             shuffle=True,
-            **loader_kwargs,
+            **train_loader_kwargs,
         )
         
         # Validation loader (standard)
@@ -903,7 +970,7 @@ class SwiftThief(AttackRunner):
             val_q,
             batch_size=min(self.batch_size, len(val_q)),
             shuffle=False,
-            **loader_kwargs,
+            **val_loader_kwargs,
         )
 
         # U loader
@@ -930,14 +997,13 @@ class SwiftThief(AttackRunner):
                     dataset_u_ssl,
                     batch_size=bs_u,
                     shuffle=True,
-                    **loader_kwargs,
+                    **train_loader_kwargs,
                 )
 
-        device = torch.device(state.metadata.get("device", "cpu"))
+        device = torch.device(device_str)
         num_classes = int(state.metadata.get("num_classes") or 10)
 
         # init / warm-start substitute
-        substitute_config = state.metadata.get("substitute_config") or self.config.get("substitute") or {}
         arch = substitute_config.get("arch", "resnet18")
         width_mult = int(substitute_config.get("width_mult", 1))
         dropout_prob = float(substitute_config.get("dropout_prob", 0.0))
@@ -1138,7 +1204,7 @@ class SwiftThief(AttackRunner):
             train_q,  # Standard dataset, not wrapped
             batch_size=bs_q,
             shuffle=True,
-            **loader_kwargs,
+            **train_loader_kwargs,
         )
 
         kd_opt_config = dict(opt_config)

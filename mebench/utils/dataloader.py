@@ -59,6 +59,148 @@ def pool_loader_kwargs(device: str, config: Optional[Mapping[str, Any]] = None) 
     return kwargs
 
 
+def resolve_pool_num_workers(
+    attack_config: Optional[Mapping[str, Any]] = None,
+    dataset_config: Optional[Mapping[str, Any]] = None,
+    *,
+    default: Optional[int] = None,
+) -> Optional[int]:
+    """Resolve DataLoader workers for pool scanning/scoring.
+
+    Precedence:
+    1) attack_config['pool_num_workers']
+    2) attack_config['num_workers']
+    3) dataset_config['num_workers']
+    4) default
+
+    Note: If this returns None, callers should omit explicit override and let
+    `pool_loader_kwargs()` fall back to env/default behavior.
+    """
+
+    if attack_config is not None:
+        raw = attack_config.get("pool_num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        raw = attack_config.get("num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+    if dataset_config is not None:
+        raw = dataset_config.get("num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+    return default
+
+
+def resolve_train_num_workers(
+    substitute_config: Optional[Mapping[str, Any]] = None,
+    attack_config: Optional[Mapping[str, Any]] = None,
+    *,
+    default: Optional[int] = None,
+) -> Optional[int]:
+    """Resolve DataLoader workers for substitute training loaders.
+
+    Precedence:
+    1) substitute_config['train_num_workers']
+    2) substitute_config['num_workers']
+    3) attack_config['train_num_workers'] (legacy)
+    4) attack_config['num_workers']
+    5) default
+    """
+
+    if substitute_config is not None:
+        raw = substitute_config.get("train_num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        raw = substitute_config.get("num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+    if attack_config is not None:
+        raw = attack_config.get("train_num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        raw = attack_config.get("num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+    return default
+
+
+def resolve_val_num_workers(
+    substitute_config: Optional[Mapping[str, Any]] = None,
+    attack_config: Optional[Mapping[str, Any]] = None,
+    *,
+    default: Optional[int] = None,
+) -> Optional[int]:
+    """Resolve DataLoader workers for substitute validation loaders.
+
+    Precedence:
+    1) substitute_config['val_num_workers']
+    2) substitute_config['num_workers']
+    3) attack_config['val_num_workers'] (legacy)
+    4) attack_config['num_workers']
+    5) default
+    """
+
+    if substitute_config is not None:
+        raw = substitute_config.get("val_num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        raw = substitute_config.get("num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+    if attack_config is not None:
+        raw = attack_config.get("val_num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        raw = attack_config.get("num_workers")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+    return default
+
+
 def load_pool_to_memory(
     config: Mapping[str, Any],
     device: str,

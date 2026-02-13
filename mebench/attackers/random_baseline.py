@@ -10,7 +10,11 @@ from tqdm import tqdm
 
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
-from mebench.utils.dataloader import pool_loader_kwargs
+from mebench.utils.dataloader import (
+    pool_loader_kwargs,
+    resolve_train_num_workers,
+    resolve_val_num_workers,
+)
 from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
@@ -180,15 +184,9 @@ class RandomBaseline(AttackRunner):
 
     def _track_a_num_workers(self, kind: str = "train") -> int:
         sub_config = self.state.metadata.get("substitute_config", {})
-        default_workers = int(
-            sub_config.get(
-                "train_num_workers",
-                sub_config.get("num_workers", self.config.get("num_workers", 0)),
-            )
-        )
-        if kind == "val":
-            return int(sub_config.get("val_num_workers", default_workers))
-        return default_workers
+        train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
+        return int(val_workers) if kind == "val" else int(train_workers)
 
     def _track_a_num_classes(self) -> int:
         return int(
@@ -375,30 +373,20 @@ class RandomBaseline(AttackRunner):
             or sub_config.get("trackA", {}).get("batch_size")
             or int(self.config.get("batch_size", 128))
         )
-        train_workers = int(
-            sub_config.get(
-                "train_num_workers",
-                sub_config.get("num_workers", self.config.get("num_workers", 0)),
-            )
-        )
-        val_workers = int(
-            sub_config.get(
-                "val_num_workers",
-                sub_config.get("num_workers", train_workers),
-            )
-        )
+        train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
         
         train_loader = DataLoader(
             train_dataset,
             batch_size=train_batch_size,
             shuffle=True,
-            **pool_loader_kwargs(device, {"num_workers": train_workers}),
+            **pool_loader_kwargs(device, {"num_workers": int(train_workers)}),
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=train_batch_size,
             shuffle=False,
-            **pool_loader_kwargs(device, {"num_workers": val_workers}),
+            **pool_loader_kwargs(device, {"num_workers": int(val_workers)}),
         )
 
         output_mode = str(self.config.get("output_mode", "soft_prob"))
@@ -476,10 +464,7 @@ class RandomBaseline(AttackRunner):
                 device,
                 {
                     "num_workers": int(
-                        sub_config.get(
-                            "train_num_workers",
-                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
-                        )
+                        resolve_train_num_workers(sub_config, self.config, default=0)
                     )
                 },
             ),

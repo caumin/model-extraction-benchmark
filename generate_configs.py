@@ -101,7 +101,6 @@ def generate_configs(
     synthetic_budget: int,
     include_both_hard: bool,
     clean: bool,
-    attack_num_workers: int,
     pool_num_workers: int,
     substitute_num_workers: int,
     substitute_train_num_workers: Optional[int],
@@ -339,7 +338,6 @@ def generate_configs(
                             "name": attack.name,
                             "output_mode": output_mode,
                             "max_budget": max_budget,
-                            "num_workers": int(attack_num_workers),
                             "pool_num_workers": int(pool_num_workers),
                             **attack_extra,
                         },
@@ -355,6 +353,7 @@ def generate_configs(
                     if attack.kind == "pool":
                         cfg["attack"].setdefault("initial_seed_ratio", pool_initial_seed_ratio)
                         cfg["attack"].setdefault("validation_budget_ratio", pool_validation_budget_ratio)
+                        cfg["attack"].setdefault("rounds", pool_iterations)
                         cfg["attack"].setdefault("iterations", pool_iterations)
 
                     def _maybe_add_imagenet_imagefolder_keys(d: Dict[str, Any]) -> None:
@@ -426,12 +425,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         help="Do not delete existing *.yaml in output dir before generation",
     )
     parser.add_argument(
-        "--attack-num-workers",
-        type=int,
-        default=8,
-        help="Default attack-level DataLoader workers (attack.num_workers)",
-    )
-    parser.add_argument(
         "--pool-num-workers",
         type=int,
         default=8,
@@ -466,7 +459,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         synthetic_budget=int(args.synthetic_budget),
         include_both_hard=bool(args.include_both_hard),
         clean=(not args.no_clean),
-        attack_num_workers=int(args.attack_num_workers),
         pool_num_workers=int(args.pool_num_workers),
         substitute_num_workers=int(args.substitute_num_workers),
         substitute_train_num_workers=(

@@ -15,7 +15,12 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
-from mebench.utils.dataloader import pool_loader_kwargs
+from mebench.utils.dataloader import (
+    pool_loader_kwargs,
+    resolve_pool_num_workers,
+    resolve_train_num_workers,
+    resolve_val_num_workers,
+)
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 
@@ -552,11 +557,17 @@ class CloudLeak(AttackRunner):
             return
 
         device = self.state.metadata.get("device", "cpu")
+        pool_workers = resolve_pool_num_workers(self.config, self.state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
         loader = DataLoader(
             self.pool_dataset,
             batch_size=256,
             shuffle=False,
-            **pool_loader_kwargs(device),
+            **loader_kwargs,
         )
         ptr = 0
         for _, y_batch in loader:
@@ -575,12 +586,18 @@ class CloudLeak(AttackRunner):
         if not candidate_indices:
             return []
 
+        pool_workers = resolve_pool_num_workers(self.config, self.state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
         subset = Subset(self.pool_dataset, candidate_indices)
         loader = DataLoader(
             subset,
             batch_size=self.gen_batch_size,
             shuffle=False,
-            **pool_loader_kwargs(device),
+            **loader_kwargs,
         )
 
         scored: List[Tuple[float, int, torch.Tensor]] = []
@@ -674,11 +691,17 @@ class CloudLeak(AttackRunner):
             return float(self.margin_m)
 
         subset = Subset(self.pool_dataset, class_indices)
+        pool_workers = resolve_pool_num_workers(self.config, self.state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
         loader = DataLoader(
             subset,
             batch_size=self.batch_size,
             shuffle=False,
-            **pool_loader_kwargs(device),
+            **loader_kwargs,
         )
 
         sum_feats: Optional[torch.Tensor] = None
@@ -760,34 +783,24 @@ class CloudLeak(AttackRunner):
                 generator=torch.Generator().manual_seed(42),
             )
 
-        train_workers = int(
-            sub_config.get(
-                "train_num_workers",
-                sub_config.get("num_workers", self.config.get("num_workers", 0)),
-            )
-        )
-        val_workers = int(
-            sub_config.get(
-                "val_num_workers",
-                sub_config.get("num_workers", train_workers),
-            )
-        )
+        device = state.metadata.get("device", "cpu")
+        train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
 
         train_loader = torch.utils.data.DataLoader(
             train_subset,
             batch_size=train_batch_size,
             shuffle=True,
-            **pool_loader_kwargs(state.metadata.get("device", "cpu"), {"num_workers": train_workers}),
+            **pool_loader_kwargs(device, {"num_workers": int(train_workers)}),
         )
         
         val_loader = torch.utils.data.DataLoader(
             val_subset,
             batch_size=train_batch_size,
             shuffle=False,
-            **pool_loader_kwargs(state.metadata.get("device", "cpu"), {"num_workers": val_workers}),
+            **pool_loader_kwargs(device, {"num_workers": int(val_workers)}),
         )
 
-        device = state.metadata.get("device", "cpu")
         substitute = self._ensure_substitute(state)
         substitute = substitute.to(device)
 

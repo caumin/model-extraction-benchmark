@@ -17,7 +17,11 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
-from mebench.utils.dataloader import pool_loader_kwargs
+from mebench.utils.dataloader import (
+    pool_loader_kwargs,
+    resolve_train_num_workers,
+    resolve_val_num_workers,
+)
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 
@@ -515,40 +519,22 @@ class KnockoffNets(AttackRunner):
                 generator=torch.Generator().manual_seed(42),
             )
 
+        device = state.metadata.get("device", "cpu")
+        train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
+
         loader = DataLoader(
             train_dataset,
             batch_size=train_batch_size,
             shuffle=True,
-            **pool_loader_kwargs(
-                state.metadata.get("device", "cpu"),
-                {
-                    "num_workers": int(
-                        sub_config.get(
-                            "train_num_workers",
-                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
-                        )
-                    )
-                },
-            ),
+            **pool_loader_kwargs(device, {"num_workers": int(train_workers)}),
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=train_batch_size,
             shuffle=False,
-            **pool_loader_kwargs(
-                state.metadata.get("device", "cpu"),
-                {
-                    "num_workers": int(
-                        sub_config.get(
-                            "val_num_workers",
-                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
-                        )
-                    )
-                },
-            ),
+            **pool_loader_kwargs(device, {"num_workers": int(val_workers)}),
         )
-
-        device = state.metadata.get("device", "cpu")
         opt_params = sub_config.get("optimizer", {})
         
         model = None

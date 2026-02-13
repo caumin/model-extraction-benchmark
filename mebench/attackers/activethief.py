@@ -17,7 +17,12 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
-from mebench.utils.dataloader import pool_loader_kwargs
+from mebench.utils.dataloader import (
+    pool_loader_kwargs,
+    resolve_pool_num_workers,
+    resolve_train_num_workers,
+    resolve_val_num_workers,
+)
 
 
 class ActiveThief(AttackRunner):
@@ -168,6 +173,18 @@ class ActiveThief(AttackRunner):
         self.initial_seed_size = int(seed_target)
 
         device = state.metadata.get("device", "cpu")
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        pool_kwargs = (
+            pool_loader_kwargs(str(device), {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(str(device), self.config)
+        )
 
         # 1) Build validation holdout (20% of budget)
         if not bool(state.attack_state.get("validation_built", False)) and int(val_target) > 0:
@@ -181,7 +198,7 @@ class ActiveThief(AttackRunner):
                     subset,
                     batch_size=min(self.batch_size, len(val_indices)),
                     shuffle=False,
-                    **pool_loader_kwargs(str(device), self.config),
+                    **pool_kwargs,
                 )
                 ptr = 0
                 for x_batch, _ in loader:
@@ -213,7 +230,7 @@ class ActiveThief(AttackRunner):
                     subset,
                     batch_size=min(self.batch_size, len(seed_indices)),
                     shuffle=False,
-                    **pool_loader_kwargs(str(device), self.config),
+                    **pool_kwargs,
                 )
                 ptr = 0
                 for x_batch, _ in loader:
@@ -292,24 +309,10 @@ class ActiveThief(AttackRunner):
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
 
-        train_workers_raw = sub_config.get(
-            "train_num_workers",
-            sub_config.get("num_workers", self.config.get("num_workers")),
-        )
-        val_workers_raw = sub_config.get(
-            "val_num_workers",
-            sub_config.get("num_workers", self.config.get("num_workers", train_workers_raw)),
-        )
-        train_loader_kwargs = (
-            pool_loader_kwargs(device, {"num_workers": int(train_workers_raw)})
-            if train_workers_raw is not None
-            else pool_loader_kwargs(device, self.config)
-        )
-        val_loader_kwargs = (
-            pool_loader_kwargs(device, {"num_workers": int(val_workers_raw)})
-            if val_workers_raw is not None
-            else pool_loader_kwargs(device, self.config)
-        )
+        train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
+        train_loader_kwargs = pool_loader_kwargs(device, {"num_workers": int(train_workers)})
+        val_loader_kwargs = pool_loader_kwargs(device, {"num_workers": int(val_workers)})
         
         # Create loaders
         labeled_loader = DataLoader(
@@ -545,12 +548,18 @@ class ActiveThief(AttackRunner):
         """Select samples using DeepFool Active Learning."""
         device = state.metadata.get("device", "cpu")
         pin_memory = str(device).startswith("cuda")
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
         unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
         unlabeled_loader = DataLoader(
             unlabeled_dataset, 
             batch_size=self.batch_size, 
             shuffle=False, 
-            **pool_loader_kwargs(device),
+            **loader_kwargs,
         )
         
         all_distances = []
@@ -586,6 +595,12 @@ class ActiveThief(AttackRunner):
         """DFAL pre-filtering + K-center selection."""
         device = state.metadata.get("device", "cpu")
         pin_memory = str(device).startswith("cuda")
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device, self.config)
+        )
         # Pre-filter with DFAL to get rho candidates
         base_rho = self.dfal_rho
         if base_rho is None:
@@ -611,7 +626,7 @@ class ActiveThief(AttackRunner):
             candidate_dataset, 
             batch_size=self.batch_size, 
             shuffle=False, 
-            **pool_loader_kwargs(device, self.config),
+            **loader_kwargs,
         )
 
         if self.substitute is None:
@@ -625,7 +640,7 @@ class ActiveThief(AttackRunner):
                 labeled_dataset,
                 batch_size=self.batch_size,
                 shuffle=False,
-                **pool_loader_kwargs(device, self.config),
+                **loader_kwargs,
             )
             labeled_probs = self._collect_probs(labeled_loader, device)
         else:
@@ -655,11 +670,17 @@ class ActiveThief(AttackRunner):
 
         selected_dataset = Subset(self.pool_dataset, selected_indices)
         device = state.metadata.get("device", "cpu")
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device, self.config)
+        )
         query_loader = DataLoader(
             selected_dataset,
             batch_size=k,
             shuffle=False,
-            **pool_loader_kwargs(device, self.config),
+            **loader_kwargs,
         )
         x_batch, _ = next(iter(query_loader))
 
@@ -713,7 +734,7 @@ class ActiveThief(AttackRunner):
             unlabeled_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            **pool_loader_kwargs(device),
+            **loader_kwargs,
         )
         probs = self._collect_probs(unlabeled_loader, device)
 
@@ -730,7 +751,7 @@ class ActiveThief(AttackRunner):
                     labeled_dataset,
                     batch_size=self.batch_size,
                     shuffle=False,
-                    **pool_loader_kwargs(device),
+                    **loader_kwargs,
                 )
                 labeled_probs = self._collect_probs(labeled_loader, device)
             else:

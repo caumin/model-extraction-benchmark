@@ -15,7 +15,11 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
-from mebench.utils.dataloader import pool_loader_kwargs
+from mebench.utils.dataloader import (
+    pool_loader_kwargs,
+    resolve_train_num_workers,
+    resolve_val_num_workers,
+)
 
 
 class _OfflineAugmentedTensorDataset(torch.utils.data.Dataset):
@@ -283,21 +287,13 @@ class CopycatCNN(AttackRunner):
             or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
         )
         device = state.metadata.get("device", "cpu")
+        train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
         loader = torch.utils.data.DataLoader(
             dataset,
             batch_size=train_batch_size,
             shuffle=True,
-            **pool_loader_kwargs(
-                device,
-                {
-                    "num_workers": int(
-                        sub_config.get(
-                            "train_num_workers",
-                            sub_config.get("num_workers", self.config.get("num_workers", 0)),
-                        )
-                    )
-                },
-            ),
+            **pool_loader_kwargs(device, {"num_workers": int(train_workers)}),
         )
 
         val_loader = None
@@ -308,17 +304,7 @@ class CopycatCNN(AttackRunner):
                 torch.utils.data.TensorDataset(x_val, y_val),
                 batch_size=train_batch_size,
                 shuffle=False,
-                **pool_loader_kwargs(
-                    device,
-                    {
-                        "num_workers": int(
-                            sub_config.get(
-                                "val_num_workers",
-                                sub_config.get("num_workers", self.config.get("num_workers", 0)),
-                            )
-                        )
-                    },
-                ),
+                **pool_loader_kwargs(device, {"num_workers": int(val_workers)}),
             )
 
         if self.substitute is None:
