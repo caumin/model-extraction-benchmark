@@ -83,6 +83,10 @@ class ActiveThief(AttackRunner):
         state.attack_state["labeled_indices"] = []
         state.attack_state.setdefault("query_data_x", [])
         state.attack_state.setdefault("query_data_y", [])
+        state.attack_state.setdefault("val_query_data_x", [])
+        state.attack_state.setdefault("val_query_data_y", [])
+        state.attack_state.setdefault("val_indices", [])
+        state.attack_state.setdefault("seed_indices", [])
         dataset_config = state.metadata.get("dataset_config", {})
         seed_size = dataset_config.get("seed_size")
         if seed_size is None and isinstance(dataset_config.get("dataset"), dict):
@@ -93,6 +97,7 @@ class ActiveThief(AttackRunner):
         state.attack_state["initialized"] = False
         state.attack_state["initial_seed_indices"] = []
         state.attack_state["initial_seed_queried"] = False
+        state.attack_state["validation_built"] = False
 
     def _setup_datasets(self, state: BenchmarkState) -> None:
         """Setup pool dataset and initial seed selection."""
@@ -105,11 +110,13 @@ class ActiveThief(AttackRunner):
                 or self.config.get("max_budget", 0)
                 or 0
             )
-            rounds = max(1, int(self.rounds))
-            if total_budget > 0:
-                self.initial_seed_size = max(
-                    1, int(math.ceil(total_budget / rounds))
-                )
+            seed_target, _ = self._resolve_seed_and_validation_targets(
+                total_budget=total_budget,
+                default_seed_ratio=0.1,
+                default_validation_ratio=0.2,
+            )
+            if seed_target > 0:
+                self.initial_seed_size = int(seed_target)
             elif self.step_size is not None:
                 self.initial_seed_size = int(self.step_size)
             else:
@@ -131,6 +138,94 @@ class ActiveThief(AttackRunner):
         state.attack_state["unlabeled_indices"] = self.unlabeled_indices
         state.attack_state["initial_seed_indices"] = []
         state.attack_state["initialized"] = True
+
+    def _pop_unlabeled_indices(self, k: int) -> List[int]:
+        """Pop k indices from unlabeled pool without replacement."""
+        if k <= 0 or not self.unlabeled_indices:
+            return []
+        k = min(int(k), len(self.unlabeled_indices))
+        selected = np.random.choice(self.unlabeled_indices, size=k, replace=False).tolist()
+        selected_set = set(int(i) for i in selected)
+        self.unlabeled_indices = [i for i in self.unlabeled_indices if int(i) not in selected_set]
+        return [int(i) for i in selected]
+
+    def _bootstrap_seed_and_validation_sets(self, ctx: BenchmarkContext, state: BenchmarkState) -> None:
+        """Reserve 20% validation + 10% seed budget up-front.
+
+        - Validation set: fixed holdout queried from the victim and never used for training.
+        - Seed set: initial labeled set queried from the victim and used to train the first substitute.
+        """
+
+        total_budget = int(state.metadata.get("max_budget") or ctx.budget_remaining)
+        seed_target, val_target = self._resolve_seed_and_validation_targets(
+            total_budget=total_budget,
+            default_seed_ratio=0.1,
+            default_validation_ratio=0.2,
+        )
+
+        # Ensure initial_seed_size matches the seed budget target.
+        self.initial_seed_size = int(seed_target)
+
+        device = state.metadata.get("device", "cpu")
+
+        # 1) Build validation holdout (20% of budget)
+        if not bool(state.attack_state.get("validation_built", False)) and int(val_target) > 0:
+            val_k = min(int(val_target), int(ctx.budget_remaining), len(self.unlabeled_indices))
+            val_indices = self._pop_unlabeled_indices(val_k)
+            state.attack_state["val_indices"] = list(val_indices)
+
+            if val_indices:
+                subset = Subset(self.pool_dataset, val_indices)
+                loader = DataLoader(
+                    subset,
+                    batch_size=min(self.batch_size, len(val_indices)),
+                    shuffle=False,
+                    **pool_loader_kwargs(str(device), self.config),
+                )
+                ptr = 0
+                for x_batch, _ in loader:
+                    batch_indices = val_indices[ptr : ptr + int(x_batch.size(0))]
+                    ptr += int(x_batch.size(0))
+                    query_batch = QueryBatch(
+                        x=x_batch,
+                        meta={"indices": batch_indices, "is_validation": True},
+                    )
+                    oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+                    self.observe(query_batch, oracle_output, state)
+
+            state.attack_state["validation_built"] = True
+
+        # 2) Build seed set (10% of budget)
+        if not bool(state.attack_state.get("initial_seed_queried", False)) and int(seed_target) > 0:
+            seed_k = min(int(seed_target), int(ctx.budget_remaining), len(self.unlabeled_indices))
+            seed_indices = self._pop_unlabeled_indices(seed_k)
+            state.attack_state["seed_indices"] = list(seed_indices)
+            state.attack_state["initial_seed_indices"] = list(seed_indices)
+
+            if seed_indices:
+                self.labeled_indices.extend(seed_indices)
+                state.attack_state["labeled_indices"] = self.labeled_indices
+                state.attack_state["unlabeled_indices"] = self.unlabeled_indices
+
+                subset = Subset(self.pool_dataset, seed_indices)
+                loader = DataLoader(
+                    subset,
+                    batch_size=min(self.batch_size, len(seed_indices)),
+                    shuffle=False,
+                    **pool_loader_kwargs(str(device), self.config),
+                )
+                ptr = 0
+                for x_batch, _ in loader:
+                    batch_indices = seed_indices[ptr : ptr + int(x_batch.size(0))]
+                    ptr += int(x_batch.size(0))
+                    query_batch = QueryBatch(
+                        x=x_batch,
+                        meta={"indices": batch_indices, "is_validation": False},
+                    )
+                    oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+                    self.observe(query_batch, oracle_output, state)
+
+            state.attack_state["initial_seed_queried"] = True
 
     def _create_substitute(self, input_shape: tuple) -> nn.Module:
         """Create substitute model."""
@@ -170,15 +265,24 @@ class ActiveThief(AttackRunner):
         y_all = torch.cat(query_y, dim=0)
         full_dataset = torch.utils.data.TensorDataset(x_all, y_all)
         
-        # Split into train/val (80/20) as per ActiveThief paper
-        total_len = len(full_dataset)
-        val_len = int(0.2 * total_len)
-        train_len = total_len - val_len
-        
-        # Use fixed generator for reproducibility if needed, or rely on global seed
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            full_dataset, [train_len, val_len]
-        )
+        # Paper protocol: reserve a fixed validation set (20% of total query budget).
+        # If we already queried a dedicated holdout set, use it as-is.
+        val_x = state.attack_state.get("val_query_data_x", [])
+        val_y = state.attack_state.get("val_query_data_y", [])
+        if len(val_x) > 0 and len(val_y) > 0:
+            train_dataset = full_dataset
+            x_val = torch.cat(val_x, dim=0)
+            y_val = torch.cat(val_y, dim=0)
+            val_dataset = torch.utils.data.TensorDataset(x_val, y_val)
+        else:
+            # Fallback: split collected training queries into train/val (80/20).
+            total_len = len(full_dataset)
+            val_len = int(0.2 * total_len)
+            train_len = total_len - val_len
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                full_dataset,
+                [train_len, val_len],
+            )
 
         train_batch_size = int(
             sub_config.get("batch_size")
@@ -672,40 +776,15 @@ class ActiveThief(AttackRunner):
         if not state.attack_state.get("initialized"):
             self._setup_datasets(state)
 
-        if not state.attack_state.get("initial_seed_queried") and self.initial_seed_indices:
-            seed_k = min(len(self.initial_seed_indices), ctx.budget_remaining)
-            if seed_k > 0:
-                seed_indices = self.initial_seed_indices[:seed_k]
-                selected_dataset = Subset(self.pool_dataset, seed_indices)
-                query_loader = DataLoader(
-                    selected_dataset,
-                    batch_size=seed_k,
-                    shuffle=False,
-                    **pool_loader_kwargs(device),
-                )
-                x_batch, _ = next(iter(query_loader))
-                query_batch = QueryBatch(
-                    x=x_batch,
-                    meta={
-                        "strategy": self.strategy,
-                        "selected_indices": seed_indices,
-                        "indices": seed_indices,
-                        "round": state.attack_state.get("round", 0),
-                        "labeled_size": len(self.labeled_indices),
-                        "unlabeled_size": len(self.unlabeled_indices),
-                    },
-                )
-                oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
-                self.observe(query_batch, oracle_output, state)
-                state.attack_state["initial_seed_queried"] = True
-                if self.labeled_indices:
-                    self._train_substitute(state)
-                    self.logger.info(
-                        "[ActiveThief] Initial seed training complete (budget_remaining=%s)",
-                        ctx.budget_remaining,
-                    )
-                    self._evaluate_current_substitute(self.substitute, device)
-        
+        # Reserve validation (20%) and seed (10%) from total query budget.
+        self._bootstrap_seed_and_validation_sets(ctx, state)
+
+        # Train initial substitute once after seed collection.
+        if self.substitute is None and self.labeled_indices:
+            self._train_substitute(state)
+            if self.substitute is not None:
+                self._evaluate_current_substitute(self.substitute, device)
+
         while ctx.budget_remaining > 0 and self.unlabeled_indices:
             step_size = min(step_size, ctx.budget_remaining, len(self.unlabeled_indices))
             
@@ -755,12 +834,16 @@ class ActiveThief(AttackRunner):
         for idx, label in zip(indices, labels):
             self.observed_labels[int(idx)] = int(label.item())
 
-        # Cache queried tensors + labels for training (avoid re-reading pool data from disk).
+        # Cache queried tensors + labels. Validation holdout is stored separately.
         # Store as batches to keep append overhead low.
         x_cpu = query_batch.x.detach().cpu()
         y_cpu = labels.detach().cpu().long()
-        state.attack_state.setdefault("query_data_x", []).append(x_cpu)
-        state.attack_state.setdefault("query_data_y", []).append(y_cpu)
+        if bool(query_batch.meta.get("is_validation", False)):
+            state.attack_state.setdefault("val_query_data_x", []).append(x_cpu)
+            state.attack_state.setdefault("val_query_data_y", []).append(y_cpu)
+        else:
+            state.attack_state.setdefault("query_data_x", []).append(x_cpu)
+            state.attack_state.setdefault("query_data_y", []).append(y_cpu)
         
         # ActiveThief state updates are handled in _select_query_batch (index management)
         # and _train_substitute (model update).
