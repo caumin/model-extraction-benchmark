@@ -35,13 +35,18 @@ class DFMSHL(AttackRunner):
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
         self.base_channels = int(config.get("base_channels", 64))
-        
-        # [STRICT] Paper specifies lambda_div = 500.0 for CIFAR-10.
-        self.diversity_weight = float(config.get("diversity_weight", 500.0))
-        
-        # [P0 FIX] Paper mandates 50,000 initial queries for CIFAR-10, not 1,000
+
         dataset_name = state.metadata.get("dataset_config", {}).get("name", "cifar10")
-        if dataset_name.lower() in ["cifar10", "svhn", "cifar100"]:
+        dataset_name_lower = str(dataset_name).lower()
+
+        # Paper specifies div=500 for CIFAR-10 and div=100 for CIFAR-100.
+        default_div = 500.0
+        if dataset_name_lower == "cifar100":
+            default_div = 100.0
+        self.diversity_weight = float(config.get("diversity_weight", default_div))
+
+        # [P0 FIX] Paper mandates 50,000 initial queries for CIFAR-10, not 1,000
+        if dataset_name_lower in ["cifar10", "svhn", "cifar100"]:
             self.init_nc = int(config.get("init_nc", 50000))
         else:
             self.init_nc = int(config.get("init_nc", 1000))
@@ -69,14 +74,14 @@ class DFMSHL(AttackRunner):
         # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         # Replaced manual tqdm with self._create_progress_bar for consistency
         pbar = self._create_progress_bar(total_budget, "[DFMSHL] Extracting")
-        
+
         # [UNIFIED] MultiStepLR Scheduler (10%, 30%, 50% of budget)
         max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
         milestones = [int(max_budget * p) for p in [0.1, 0.3, 0.5]]
         gamma = 0.3
         self.milestones = sorted(milestones)
         self.current_milestone_idx = 0
-        
+
         while ctx.budget_remaining > 0:
             # Check for LR decay
             current_queries = self.state.query_count
@@ -84,15 +89,17 @@ class DFMSHL(AttackRunner):
                 if current_queries >= self.milestones[self.current_milestone_idx]:
                     if self.generator_optimizer:
                         for param_group in self.generator_optimizer.param_groups:
-                            param_group['lr'] *= gamma
+                            param_group["lr"] *= gamma
                     if self.discriminator_optimizer:
                         for param_group in self.discriminator_optimizer.param_groups:
-                            param_group['lr'] *= gamma
+                            param_group["lr"] *= gamma
                     if self.clone_optimizer:
                         for param_group in self.clone_optimizer.param_groups:
-                            param_group['lr'] *= gamma
-                    
-                    self.logger.info(f"[DFMSHL] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})")
+                            param_group["lr"] *= gamma
+
+                    self.logger.info(
+                        f"[DFMSHL] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})"
+                    )
                     self.current_milestone_idx += 1
 
             step_size = self._default_step_size(ctx)
@@ -244,9 +251,10 @@ class DFMSHL(AttackRunner):
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
             ).to(device)
+
             # [UNIFIED] Config-driven optimizer construction
             self.clone_optimizer = self._build_optimizer(self.clone.parameters(), opt_params)
-            
+
             # [UNIFIED] Use Manual MultiStepLR logic in run() loop instead of Cosine
             self.clone_scheduler = None
 
@@ -301,8 +309,9 @@ class DFMSHL(AttackRunner):
 
         self.generator_optimizer.zero_grad()
         fake_logits = self.discriminator(fake_x_gen)
-        real_labels = torch.ones_like(fake_logits)
-        adv_loss = F.binary_cross_entropy_with_logits(fake_logits, real_labels)
+        # Paper Eq.(3): L_adv,fake = E[ log(1 - D(G(z))) ]
+        # Here D(x) = sigmoid(logit). So log(1 - D) = log_sigmoid(-logit).
+        adv_loss = F.logsigmoid(-fake_logits).mean()
 
         victim_config = self.state.metadata.get("victim_config", {})
         normalization = victim_config.get("normalization")
@@ -314,7 +323,20 @@ class DFMSHL(AttackRunner):
         def _norm(x):
             return (x - norm_mean) / norm_std
         
-        clone_logits = self.clone(_norm(fake_x_gen))
+        # Paper protocol: during generator update, clone C is fixed.
+        # Freeze clone parameters and BN/Dropout state while keeping gradients w.r.t. input.
+        clone_was_training = self.clone.training
+        self.clone.eval()
+        prev_requires_grad = [p.requires_grad for p in self.clone.parameters()]
+        for p in self.clone.parameters():
+            p.requires_grad_(False)
+        try:
+            clone_logits = self.clone(_norm(fake_x_gen))
+        finally:
+            for p, rg in zip(self.clone.parameters(), prev_requires_grad, strict=False):
+                p.requires_grad_(rg)
+            if clone_was_training:
+                self.clone.train()
         probs = F.softmax(clone_logits, dim=1)
         
         # Diversity: entropy of batch-mean distribution alpha.
@@ -344,8 +366,8 @@ class DFMSHL(AttackRunner):
             
             self.generator_optimizer.zero_grad()
             fake_logits = self.discriminator(fake_x_2)
-            real_labels = torch.ones_like(fake_logits)
-            loss_g = F.binary_cross_entropy_with_logits(fake_logits, real_labels)
+            # Use the same paper Eq.(3) form for generator adversarial objective.
+            loss_g = F.logsigmoid(-fake_logits).mean()
             loss_g.backward()
             self.generator_optimizer.step()
             pre_pbar.set_postfix({"Loss G": f"{loss_g.item():.4f}"})
@@ -400,8 +422,9 @@ class DFMSHL(AttackRunner):
             self.clone.parameters(),
             lr=float(opt_params.get("lr", self.clone_lr)),
             momentum=float(opt_params.get("momentum", 0.9)),
-            weight_decay=float(opt_params.get("weight_decay", 5e-4))
+            weight_decay=float(opt_params.get("weight_decay", 5e-4)),
         )
+
         if self.use_clone_cosine:
             max_budget = self.state.metadata.get("max_budget", 1000)
             t_max = max(1, int(max_budget / self.batch_size))
