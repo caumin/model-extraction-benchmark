@@ -715,7 +715,7 @@ class InverseNet(AttackRunner):
             # Let's simply loop over centers for initialization (N_centers is small initially)
             for j in range(c_chunk.size(0)):
                 c_vec = c_chunk[j].unsqueeze(0) # [1, D]
-                d = torch.norm(candidates_matrix - c_vec, p=2, dim=1) # [N_rem]
+                d = torch.norm(candidates_matrix - c_vec, p=1, dim=1) # [N_rem]
                 min_dists = torch.minimum(min_dists, d)
 
         # Greedy selection loop
@@ -732,7 +732,7 @@ class InverseNet(AttackRunner):
             
             # Update min_dists for all candidates using the new center
             # New min_dist = min(old_min_dist, dist(x, new_center))
-            new_dists = torch.norm(candidates_matrix - new_center_vec, p=2, dim=1)
+            new_dists = torch.norm(candidates_matrix - new_center_vec, p=1, dim=1)
             min_dists = torch.minimum(min_dists, new_dists)
             
             # Effectively remove the selected one by setting its dist to -1
