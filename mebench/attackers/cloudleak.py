@@ -1,6 +1,7 @@
 """CloudLeak attack implementation."""
 
 from typing import Dict, Any, List, Optional, Tuple
+from collections import OrderedDict
 import bisect
 import math
 import torch
@@ -31,6 +32,7 @@ class FeatureFool:
         model: nn.Module,
         margin_m: float = 0.5,
         lambda_adv: float = 0.001,
+        objective: str = "euclidean",
         max_iters: int = 10,
         epsilon: float = 8.0 / 255.0,
         factr: float = 1e7,
@@ -41,13 +43,17 @@ class FeatureFool:
         self.model = model.eval()
         self.margin_m = margin_m
         self.lambda_adv = lambda_adv
+        self.objective = str(objective)
         self.max_iters = max_iters
-        self.epsilon = epsilon
+        self.epsilon = float(epsilon)
         self.factr = factr
         self.pgtol = pgtol
         self.device = device
         self.feature_layer_name = feature_layer
         self._feature_layer = self._get_feature_layer(model)
+
+        if self.epsilon < 0:
+            raise ValueError(f"FeatureFool epsilon must be >= 0, got {self.epsilon}")
 
         for param in self.model.parameters():
             param.requires_grad = False
@@ -74,13 +80,17 @@ class FeatureFool:
                 if len(linears) == 1:
                     return linears[0]
 
-        last_linear = None
+        linears: List[nn.Linear] = []
         for module in model.modules():
             if isinstance(module, nn.Linear):
-                last_linear = module
-        if last_linear is None:
+                linears.append(module)
+        if not linears:
             raise ValueError("FeatureFool requires a Linear layer for feature extraction")
-        return last_linear
+
+        # Prefer the penultimate Linear (representation) when available.
+        if len(linears) >= 2:
+            return linears[-2]
+        return linears[-1]
 
     def _extract_features(self, x: torch.Tensor) -> torch.Tensor:
         activations: List[torch.Tensor] = []
@@ -131,48 +141,72 @@ class FeatureFool:
 
             with torch.no_grad():
                 activations.clear()
-                _ = self.model(x_source_dev)
-                phi_s = activations.pop(0).detach().view(B, -1)
-
-                activations.clear()
                 _ = self.model(x_target_dev)
                 phi_t = activations.pop(0).detach().view(B, -1)
 
-            # Eq.(9) requires x'_s in [0,1]^n with a box-constrained optimizer (L-BFGS-B).
-            # PyTorch LBFGS is unconstrained; instead use a reparameterization:
-            # x_adv = sigmoid(w) which guarantees x_adv in (0,1) without clamp.
-            x_init = x_source_dev.detach().clamp(1e-6, 1.0 - 1e-6)
-            w = torch.log(x_init / (1.0 - x_init)).clone().detach().requires_grad_(True)
+            objective = str(self.objective).lower().strip()
+            if objective not in {"euclidean", "triplet"}:
+                raise ValueError(f"Unknown FeatureFool objective: {self.objective}")
+
+            phi_s = None
+            if objective == "triplet":
+                with torch.no_grad():
+                    activations.clear()
+                    _ = self.model(x_source_dev)
+                    phi_s = activations.pop(0).detach().view(B, -1)
+
+            # Official implementation uses explicit box bounds around the base image.
+            # Implement per-pixel bounds in [0,1] via a reparameterization that always
+            # stays within the intersection of [0,1] and [x_source - eps, x_source + eps].
+            x_base = x_source_dev.detach().clamp(0.0, 1.0)
+            eps = float(self.epsilon)
+            lb = (x_base - eps).clamp(0.0, 1.0)
+            ub = (x_base + eps).clamp(0.0, 1.0)
+            span = ub - lb
+
+            # Initialize w so that x_adv starts (approximately) at x_base.
+            safe_span = span.clone()
+            safe_span[safe_span == 0] = 1.0
+            t_init = ((x_base - lb) / safe_span).clamp(1e-6, 1.0 - 1e-6)
+            w = torch.log(t_init / (1.0 - t_init)).clone().detach().requires_grad_(True)
             optimizer = torch.optim.LBFGS(
                 [w],
                 lr=1.0,
                 max_iter=self.max_iters,
                 history_size=10,
                 line_search_fn="strong_wolfe",
+                tolerance_grad=float(self.pgtol),
             )
 
-            margin_m = margin_m.view(B, 1)
+            if margin_m is not None:
+                margin_m = margin_m.view(B)
 
             def closure() -> torch.Tensor:
                 optimizer.zero_grad()
-                x_adv = torch.sigmoid(w)
+                x_adv = lb + span * torch.sigmoid(w)
 
                 activations.clear()
                 _ = self.model(x_adv)
                 phi_adv = activations.pop(0).view(B, -1)
 
-                dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1).view(B, 1)
-                dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1).view(B, 1)
-                triplet = torch.clamp(dist_t - dist_s + margin_m, min=0.0)
-                visual_loss = torch.sum((x_adv - x_source_dev) ** 2, dim=(1, 2, 3)).view(B, 1)
-                loss = torch.mean(visual_loss + self.lambda_adv * triplet)
+                if objective == "euclidean":
+                    diff = phi_adv - phi_t
+                    loss = torch.mean(torch.sum(diff * diff, dim=1))
+                else:
+                    if phi_s is None or margin_m is None:
+                        raise RuntimeError("Triplet objective requires phi_s and margin_m")
+                    dist_t = torch.norm(phi_adv - phi_t, p=2, dim=1)
+                    dist_s = torch.norm(phi_adv - phi_s, p=2, dim=1)
+                    triplet = torch.clamp(dist_t - dist_s + margin_m, min=0.0)
+                    visual_loss = torch.sum((x_adv - x_source_dev) ** 2, dim=(1, 2, 3))
+                    loss = torch.mean(visual_loss + self.lambda_adv * triplet)
                 loss.backward()
                 return loss
 
             optimizer.step(closure)
 
             with torch.no_grad():
-                x_adv = torch.sigmoid(w)
+                x_adv = lb + span * torch.sigmoid(w)
             out = x_adv.detach()
             if to_cpu:
                 out = out.cpu()
@@ -281,10 +315,20 @@ class CloudLeak(AttackRunner):
         self.patience = int(config.get("patience", 20))
 
         # Paper Section III.C uses VGG19 modified with a DeepID layer.
-        self.use_pretrained = bool(config.get("use_pretrained", True))
-        self.pretrained_arch = str(config.get("pretrained_arch", "vgg19_deepid"))
+        # For benchmark fairness across attacks, pretrained substitutes are disabled by default.
+        self.use_pretrained = bool(config.get("use_pretrained", False))
+
+        # If pretrained is enabled but no explicit pretrained arch is provided, default to the
+        # configured substitute architecture (keeps behavior consistent with other attacks).
+        pretrained_arch = config.get("pretrained_arch")
+        if pretrained_arch is None:
+            pretrained_arch = (state.metadata.get("substitute_config", {}) or {}).get("arch")
+        if pretrained_arch is None:
+            pretrained_arch = "resnet18"
+        self.pretrained_arch = str(pretrained_arch)
         self.deepid_dim = int(config.get("deepid_dim", 480))
         self.feature_layer = config.get("feature_layer")
+        self.featurefool_objective = str(config.get("featurefool_objective", "euclidean"))
 
         self.pool_dataset = None
         self.featurefool: Optional[FeatureFool] = None
@@ -438,16 +482,20 @@ class CloudLeak(AttackRunner):
             base.fc = nn.Linear(base.fc.in_features, num_classes)
 
             pre_layers: List[nn.Module] = []
+
+            named_pre_layers: list[tuple[str, nn.Module]] = []
             if input_channels == 1:
-                pre_layers.append(nn.Conv2d(1, 3, kernel_size=1, bias=False))
+                # Trainable input adapter for grayscale -> RGB.
+                named_pre_layers.append(("pre", nn.Conv2d(1, 3, kernel_size=1, bias=False)))
 
             if input_size != (224, 224):
-                pre_layers.append(
-                    nn.Upsample(size=(224, 224), mode="bilinear", align_corners=False)
+                named_pre_layers.append(
+                    ("resize", nn.Upsample(size=(224, 224), mode="bilinear", align_corners=False))
                 )
 
-            if pre_layers:
-                model = nn.Sequential(*pre_layers, base)
+            if named_pre_layers:
+                named_pre_layers.append(("backbone", base))
+                model = nn.Sequential(OrderedDict(named_pre_layers))
             else:
                 model = base
 
@@ -481,6 +529,7 @@ class CloudLeak(AttackRunner):
                 substitute,
                 margin_m=self.margin_m,
                 lambda_adv=self.lambda_adv,
+                objective=self.featurefool_objective,
                 max_iters=self.lbfgs_iters,
                 epsilon=self.epsilon,
                 factr=self.lbfgs_factr,
@@ -868,7 +917,11 @@ class CloudLeak(AttackRunner):
         self.featurefool = None
 
     def _freeze_backbone(self, model: nn.Module) -> None:
-        head_keywords = ["fc", "classifier", "last_linear"]
+        # For pretrained substitutes, keep the backbone frozen but allow training for:
+        # - classifier heads (fc/classifier)
+        # - CloudLeak-specific projection layer (deepid)
+        # - input adapters (pre) inserted for grayscale compatibility
+        head_keywords = ["fc", "classifier", "last_linear", "deepid", "pre"]
         for name, param in model.named_parameters():
             if not any(k in name for k in head_keywords):
                 param.requires_grad = False

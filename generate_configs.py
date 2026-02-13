@@ -356,6 +356,10 @@ def generate_configs(
                         cfg["attack"].setdefault("rounds", pool_iterations)
                         cfg["attack"].setdefault("iterations", pool_iterations)
 
+                    # CloudLeak: disable pretrained substitutes by default for fairness.
+                    if attack.name == "cloudleak":
+                        cfg["attack"].setdefault("use_pretrained", False)
+
                     def _maybe_add_imagenet_imagefolder_keys(d: Dict[str, Any]) -> None:
                         if str(d.get("data_mode")).lower() != "surrogate":
                             return
