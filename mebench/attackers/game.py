@@ -61,11 +61,30 @@ class GAME(AttackRunner):
         self.proxy_loader = None
         self._proxy_iter = None
         self.tdl_done = False
+        self._norm_cache: dict[tuple[str, tuple[float, ...], tuple[float, ...]], tuple[torch.Tensor, torch.Tensor]] = {}
         self._ctx: Optional[BenchmarkContext] = None
         self._query_fn: Optional[Callable[..., OracleOutput]] = None
         self._pending_query_k: Optional[int] = None
 
         self._initialize_state(state)
+
+    def _get_norm_tensors(self, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+        victim_config = self.state.metadata.get("victim_config", {})
+        normalization = victim_config.get("normalization")
+        if normalization is None:
+            normalization = {"mean": [0.0], "std": [1.0]}
+
+        mean_vals = tuple(float(v) for v in normalization["mean"])
+        std_vals = tuple(float(v) for v in normalization["std"])
+        key = (str(device), mean_vals, std_vals)
+        cached = self._norm_cache.get(key)
+        if cached is not None:
+            return cached
+
+        norm_mean = torch.tensor(mean_vals).view(1, -1, 1, 1).to(device)
+        norm_std = torch.tensor(std_vals).view(1, -1, 1, 1).to(device)
+        self._norm_cache[key] = (norm_mean, norm_std)
+        return norm_mean, norm_std
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
@@ -558,8 +577,7 @@ class GAME(AttackRunner):
         normalization = victim_config.get("normalization")
         if normalization is None:
             normalization = {"mean": [0.0], "std": [1.0]}
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        norm_mean, norm_std = self._get_norm_tensors(device)
 
         def _norm(img: torch.Tensor) -> torch.Tensor:
             return (img - norm_mean) / norm_std
@@ -640,8 +658,7 @@ class GAME(AttackRunner):
         normalization = victim_config.get("normalization")
         if normalization is None:
             normalization = {"mean": [0.0], "std": [1.0]}
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        norm_mean, norm_std = self._get_norm_tensors(device)
         
         student_in = (x_query - norm_mean) / norm_std
         student_logits = self.student(student_in)

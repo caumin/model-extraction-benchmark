@@ -125,24 +125,40 @@ class MAZE(AttackRunner):
                 # Base output for estimation
                 x_base = self.generator(z)
                 x_base_01 = torch.clamp((x_base + 1.0) / 2.0, 0.0, 1.0)
-                y_t_base = ctx.query(x_base_01).y.to(device)
                 y_c_base = F.softmax(self.clone(self._normalize(x_base)), dim=1)
                 
                 # Objective LG: -KL(yT || yC) to maximize disagreement
-                loss_base = -F.kl_div(torch.log(y_c_base + 1e-10), y_t_base, reduction='none').sum(dim=1)
+                # loss_base depends on victim output; computed after batching oracle queries below.
                 
                 # Zeroth-Order Gradient Estimation (Eq. 11)
                 grad_est_x = torch.zeros_like(x_base)
                 d = x_base[0].numel()
+
+                x_pert_01_list = []
+                u_list = []
                 for _ in range(self.grad_approx_m):
                     u = torch.randn_like(x_base)
                     u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
                     x_pert = torch.clamp(x_base + self.epsilon * u, -1.0, 1.0)
                     x_pert_01 = torch.clamp((x_pert + 1.0) / 2.0, 0.0, 1.0)
-                    y_t_pert = ctx.query(x_pert_01).y.to(device)
+
+                    x_pert_01_list.append(x_pert_01)
+                    u_list.append(u)
+
+                # Batch oracle queries: base + perturbed (same total images queried).
+                x_query = torch.cat([x_base_01] + x_pert_01_list, dim=0)
+                y_t_all = ctx.query(x_query).y.to(device)
+                y_t_base = y_t_all[:batch]
+                y_t_pert_all = y_t_all[batch:].view(self.grad_approx_m, batch, -1)
+
+                loss_base = -F.kl_div(torch.log(y_c_base + 1e-10), y_t_base, reduction='none').sum(dim=1)
+
+                for j in range(self.grad_approx_m):
+                    u = u_list[j]
+                    x_pert = torch.clamp(x_base + self.epsilon * u, -1.0, 1.0)
                     y_c_pert = F.softmax(self.clone(self._normalize(x_pert)), dim=1)
+                    y_t_pert = y_t_pert_all[j]
                     loss_pert = -F.kl_div(torch.log(y_c_pert + 1e-10), y_t_pert, reduction='none').sum(dim=1)
-                    
                     grad_est_x += (d / self.grad_approx_m) * ((loss_pert - loss_base).view(-1, 1, 1, 1) / self.epsilon) * u
                 
                 self.g_opt.zero_grad()

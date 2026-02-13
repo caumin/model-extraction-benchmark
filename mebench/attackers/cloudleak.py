@@ -99,6 +99,8 @@ class FeatureFool:
         x_source: torch.Tensor,
         x_target: torch.Tensor,
         margin_m: Optional[torch.Tensor] = None,
+        *,
+        to_cpu: bool = True,
     ) -> torch.Tensor:
         if x_source.numel() == 0:
             return x_source.detach().cpu()
@@ -166,7 +168,10 @@ class FeatureFool:
 
             with torch.no_grad():
                 x_adv = torch.sigmoid(w)
-            return x_adv.detach().cpu()
+            out = x_adv.detach()
+            if to_cpu:
+                out = out.cpu()
+            return out
         finally:
             hook_handle.remove()
 
@@ -313,17 +318,14 @@ class CloudLeak(AttackRunner):
                 break
 
             pbar.set_postfix_str("selecting")
-            pbar.refresh()
             query_batch = self._select_query_batch(step_size, self.state)
             if query_batch.x.size(0) == 0:
                 self.logger.warning("CloudLeak query selection returned empty batch. Stopping attack.")
                 break
 
             pbar.set_postfix_str("querying")
-            pbar.refresh()
             oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
             pbar.set_postfix_str("training")
-            pbar.refresh()
             self.observe(query_batch, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
         pbar.close()
@@ -593,6 +595,8 @@ class CloudLeak(AttackRunner):
                 curr_indices = candidate_indices[ptr : ptr + batch_len]
                 ptr += batch_len
 
+                non_blocking = str(device).startswith("cuda")
+
                 t_imgs_list = []
                 for k_idx, s_idx in enumerate(curr_indices):
                     source_label = int(s_labels[k_idx].item())
@@ -601,17 +605,21 @@ class CloudLeak(AttackRunner):
                     t_imgs_list.append(t_img)
 
                 t_imgs = torch.stack(t_imgs_list)
-                margins = [self._compute_margin_m(int(s_labels[i].item()), device) for i in range(batch_len)]
-                margin_m = torch.tensor(margins, device=device)
+
+                labels_list = [int(v) for v in s_labels.view(-1).tolist()]
+                unique_labels = sorted(set(labels_list))
+                margin_by_label = {lab: self._compute_margin_m(lab, device) for lab in unique_labels}
+                margin_m = torch.tensor([margin_by_label[lab] for lab in labels_list], device=device)
 
                 s_imgs_adv = self.featurefool.generate_batch(
-                    s_imgs.to(device, non_blocking=str(device).startswith("cuda")),
-                    t_imgs.to(device, non_blocking=str(device).startswith("cuda")),
+                    s_imgs.to(device, non_blocking=non_blocking),
+                    t_imgs.to(device, non_blocking=non_blocking),
                     margin_m=margin_m,
+                    to_cpu=False,
                 )
 
                 with torch.no_grad():
-                    logits = substitute(s_imgs_adv.to(device, non_blocking=str(device).startswith("cuda")))
+                    logits = substitute(s_imgs_adv)
                     probs = F.softmax(logits, dim=1)
                     max_prob, _ = probs.max(dim=1)
                     scores = 1.0 - max_prob

@@ -1014,6 +1014,9 @@ class SwiftThief(AttackRunner):
         labeled_iter = iter(labeled_loader)
         unlabeled_iter = iter(unlabeled_loader) if unlabeled_loader is not None else None
 
+        # CL adversary is stateless w.r.t. model weights; create once per CL stage.
+        reg_adversary = CL_FGSM(fgsm_model, float(self.fgsm_epsilon), str(device)).to(device)
+
         # ---------------- CL stage ----------------
         cl_epochs = int(cl_epochs_override) if cl_epochs_override is not None else self.cl_epochs
         cl_pbar = tqdm(range(cl_epochs), desc="[SwiftThief] Training (CL)", leave=False)
@@ -1070,7 +1073,6 @@ class SwiftThief(AttackRunner):
                     targets_probs = None
                     y_idx = y.long()
 
-                reg_adversary = CL_FGSM(fgsm_model, float(self.fgsm_epsilon), str(device)).to(device)
                 adv_x1 = reg_adversary(x1, x2)
 
                 outs_l = fgsm_model(im_aug1=x1, im_aug2=x2)

@@ -131,27 +131,43 @@ class DFME(AttackRunner):
                 pre_tanh, x_raw = self.generator(z, return_pre_tanh=True)
                 # Benchmark contract: oracle inputs are in [0, 1] (no mean/std normalization).
                 x = torch.clamp(x_raw * 0.5 + 0.5, 0.0, 1.0)
-                v_out = self._recover_logits(ctx.query(x).y.to(device))
                 with torch.no_grad():
                     s_out = self.student(x)
-                # [FIX] Align with Official Code (approximate_gradients.py line 90)
-                # Use mean(dim=1) over classes for gradient estimation signal
-                loss_base = torch.norm(v_out - s_out, p=1, dim=1) / v_out.size(1) 
+                # loss_base depends on victim output; computed after querying v_out below.
                 
                 # Estimating Gradient
                 d = pre_tanh.view(pre_tanh.size(0), -1).size(1)
                 grad_est = torch.zeros_like(pre_tanh)
+                x_pert_list = []
+                u_list = []
                 for _ in range(self.m):
                     u = torch.randn_like(pre_tanh)
                     u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
                     x_pert_raw = torch.tanh(pre_tanh + self.epsilon * u)
                     x_pert = torch.clamp(x_pert_raw * 0.5 + 0.5, 0.0, 1.0)
-                    v_pert = self._recover_logits(ctx.query(x_pert).y.to(device))
+
+                    x_pert_list.append(x_pert)
+                    u_list.append(u)
+
+                # Query victim once for base + perturbed batches (same total images queried).
+                x_query = torch.cat([x] + x_pert_list, dim=0)
+                v_all = self._recover_logits(ctx.query(x_query).y.to(device))
+                v_out = v_all[:batch]
+                v_pert_all = v_all[batch:].view(self.m, batch, -1)
+
+                # [FIX] Align with Official Code (approximate_gradients.py line 90)
+                # Use mean(dim=1) over classes for gradient estimation signal
+                loss_base = torch.norm(v_out - s_out, p=1, dim=1) / v_out.size(1)
+
+                for j in range(self.m):
+                    x_pert_j = x_pert_list[j]
+                    u_j = u_list[j]
                     with torch.no_grad():
-                        s_pert = self.student(x_pert)
+                        s_pert = self.student(x_pert_j)
+                    v_pert = v_pert_all[j]
                     # [FIX] Use mean(dim=1) here as well
                     loss_pert = torch.norm(v_pert - s_pert, p=1, dim=1) / v_pert.size(1)
-                    grad_est += (loss_pert - loss_base).view(-1, 1, 1, 1) * u
+                    grad_est += (loss_pert - loss_base).view(-1, 1, 1, 1) * u_j
                 
                 self.g_opt.zero_grad()
                 # Maximize L1 Disagreement (Gradient Ascent)
@@ -188,3 +204,14 @@ class DFME(AttackRunner):
         
         self.state.attack_state["substitute"] = self.student
         pbar.close()
+
+    def observe(
+        self,
+        query_batch,
+        oracle_output,
+        state,
+    ) -> None:
+        # DFME is implemented as a self-contained AttackRunner (Track B) with
+        # all query/train logic inside run(). This method exists for interface
+        # consistency with the benchmark test suite.
+        return None
