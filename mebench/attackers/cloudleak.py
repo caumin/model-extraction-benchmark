@@ -340,8 +340,9 @@ class CloudLeak(AttackRunner):
 
         self.num_rounds = int(config.get("num_rounds", 10))
         self.initial_pool_size = int(config.get("initial_pool_size", 0))
-        self.candidate_ratio = float(config.get("candidate_ratio", 5.0))
-        self.use_full_pool = bool(config.get("use_full_pool", False))
+        # Paper selection scores the available pool; for benchmark fairness and
+        # determinism, we always score the full remaining pool rather than an
+        # arbitrary candidate subset.
 
         self.batch_size = int(config.get("batch_size", 64))
         self.gen_batch_size = int(config.get("gen_batch_size", 64))
@@ -592,11 +593,8 @@ class CloudLeak(AttackRunner):
         self._ensure_featurefool(substitute, device)
         self._build_class_indices()
 
-        if self.use_full_pool:
-            candidate_indices = list(pool_indices)
-        else:
-            candidate_size = min(len(pool_indices), max(k, int(self.candidate_ratio * k)))
-            candidate_indices = np.random.choice(pool_indices, candidate_size, replace=False).tolist()
+        # Always score the full remaining pool.
+        candidate_indices = list(pool_indices)
 
         scored = self._generate_and_score(candidate_indices, substitute, device)
         if not scored:
@@ -693,16 +691,26 @@ class CloudLeak(AttackRunner):
         # torchvision datasets commonly expose `.targets`
         if hasattr(ds, "targets"):
             base_targets = ds.targets
+            try:
+                base_targets_list = list(base_targets)
+            except TypeError:
+                # Some dataset-like objects (e.g., mocks) may define `.targets` but
+                # are not actually iterable.
+                return None
             if indices is None:
-                return [int(t) for t in list(base_targets)]
-            return [int(base_targets[i]) for i in indices]
+                return [int(t) for t in base_targets_list]
+            return [int(base_targets_list[i]) for i in indices]
 
         # ImageFolder exposes `.samples` (list[(path, class_index)])
         if hasattr(ds, "samples"):
             samples = ds.samples
+            try:
+                samples_list = list(samples)
+            except TypeError:
+                return None
             if indices is None:
-                return [int(s[1]) for s in samples]
-            return [int(samples[i][1]) for i in indices]
+                return [int(s[1]) for s in samples_list]
+            return [int(samples_list[i][1]) for i in indices]
 
         return None
 
