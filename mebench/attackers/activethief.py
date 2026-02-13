@@ -269,11 +269,13 @@ class ActiveThief(AttackRunner):
         # If we already queried a dedicated holdout set, use it as-is.
         val_x = state.attack_state.get("val_query_data_x", [])
         val_y = state.attack_state.get("val_query_data_y", [])
+        val_len = 0
         if len(val_x) > 0 and len(val_y) > 0:
             train_dataset = full_dataset
             x_val = torch.cat(val_x, dim=0)
             y_val = torch.cat(val_y, dim=0)
             val_dataset = torch.utils.data.TensorDataset(x_val, y_val)
+            val_len = len(val_dataset)
         else:
             # Fallback: split collected training queries into train/val (80/20).
             total_len = len(full_dataset)
