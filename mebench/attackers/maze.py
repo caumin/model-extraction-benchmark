@@ -17,12 +17,11 @@ from mebench.models.substitute_factory import create_substitute
 
 
 class MAZE(AttackRunner):
-    """MAZE implementation strictly aligned with Kariyappa et al. (2021).
-    
-    Ref Logic:
-    - Loss: KL Divergence (Eq. 4/5).
-    - Generator Gradient: Zeroth-order estimation on unit sphere with dimension scaling (Eq. 11).
-    - Training Schedule: 1 Generator iteration -> 5 Clone iterations -> 10 Replay iterations.
+    """MAZE (data-free) implementation aligned with Kariyappa et al. (2021).
+
+    Implements Algorithm 1 (data-free MAZE) with KL objectives and zeroth-order
+    gradient estimation. MAZE-PD (partial-data; Section 6 / Algorithm 2) is not
+    implemented in this benchmark.
     """
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -55,10 +54,10 @@ class MAZE(AttackRunner):
             output_size=input_shape[1]
         ).to(device)
         
-        # [UNIFIED] Use Adam for Generator (Stability) instead of SGD (Paper)
-        # Paper uses SGD lr=1e-4, but Adam 2e-4 is standard for DCGAN.
-        # We stick to Adam for robustness in the benchmark.
-        self.g_opt = optim.Adam(self.generator.parameters(), lr=2e-4, betas=(0.5, 0.999))
+        # Paper (Section 5.1): SGD optimizer with lr=1e-4 for G.
+        g_lr = float(self.config.get("generator_lr", 1e-4))
+        g_momentum = float(self.config.get("generator_momentum", 0.0))
+        self.g_opt = optim.SGD(self.generator.parameters(), lr=g_lr, momentum=g_momentum)
         
         # Clone: honor substitute config if provided
         sub_config = state.metadata.get("substitute_config", {})
@@ -193,6 +192,16 @@ class MAZE(AttackRunner):
 
         self.state.attack_state["substitute"] = self.clone
         pbar.close()
+
+    def observe(
+        self,
+        query_batch: QueryBatch,
+        oracle_output: OracleOutput,
+        state: BenchmarkState,
+    ) -> None:
+        # MAZE is implemented as a self-contained AttackRunner (Track B) with all
+        # logic inside run(). This method exists for interface consistency.
+        return None
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Map [-1, 1] to [0, 1] then apply standard normalization."""
