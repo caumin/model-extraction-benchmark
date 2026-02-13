@@ -64,6 +64,10 @@ class InverseNet(AttackRunner):
 
         self._initialize_state(state)
 
+        # Runtime caches (protocol-preserving)
+        self._phase3_templates: Dict[str, torch.Tensor] = {}
+        self._inversion_aug = None
+
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
         device = self.state.metadata.get("device", "cpu")
@@ -91,18 +95,9 @@ class InverseNet(AttackRunner):
         if phase == 3 and self.inversion_model is not None:
             device = state.metadata.get("device", "cpu")
 
-            confidences = [1.0, 0.9, 0.8]
-            templates = []
-
-            for c in range(self.num_classes):
-                for conf in confidences:
-                    y = torch.zeros(self.num_classes, device=device)
-                    y[c] = float(conf)
-                    templates.append(y)
-
-            templates = torch.stack(templates)
-            idx = torch.randint(0, templates.size(0), (k,))
-            y_sample = templates[idx]
+            templates = self._get_phase3_templates(device)
+            idx = torch.randint(0, templates.size(0), (k,), device=device)
+            y_sample = templates.index_select(0, idx)
 
             with torch.no_grad():
                 x = self.inversion_model(y_sample)
@@ -152,10 +147,13 @@ class InverseNet(AttackRunner):
             victim_probs = F.one_hot(victim_labels, num_classes=self.num_classes).float()
             query_targets = victim_labels
 
-        state.attack_state["query_data_x"].append(x_query.detach().cpu())
-        state.attack_state["query_data_y"].append(query_targets)
         self._update_phase(state)
         phase = state.attack_state["phase"]
+
+        # Phase 3 trains online on current batches; keeping full history is unnecessary.
+        if phase in (1, 2):
+            state.attack_state["query_data_x"].append(x_query.detach().cpu())
+            state.attack_state["query_data_y"].append(query_targets)
 
         if phase == 2 and not self.train_phase_1:
             self._train_substitute_from_queries(state)
@@ -187,6 +185,11 @@ class InverseNet(AttackRunner):
         state.attack_state["used_pool_indices"] = []
         state.attack_state["phase1_pending"] = []
 
+        # Phase-2-only HCSS cache (DeepFool scoring over full pool is expensive).
+        state.attack_state["hcss_cache"] = None
+        state.attack_state["hcss_cache_cursor"] = 0
+        state.attack_state["hcss_cache_sub_id"] = None
+
     def _get_dataset_config(self, state: BenchmarkState) -> dict:
         dataset_config = self.config.get("attack", {}).get("dataset")
         if not dataset_config:
@@ -210,6 +213,7 @@ class InverseNet(AttackRunner):
         ).dataset
 
     def _update_phase(self, state: BenchmarkState) -> None:
+        prev_phase = state.attack_state.get("phase")
         total_budget = int(state.metadata.get("max_budget", 0))
         if total_budget <= 0:
             total_budget = int(self.config.get("total_budget", 10000))
@@ -222,6 +226,31 @@ class InverseNet(AttackRunner):
             state.attack_state["phase"] = 2
         else:
             state.attack_state["phase"] = 3
+
+        new_phase = state.attack_state.get("phase")
+        if prev_phase != new_phase:
+            # HCSS cache is only valid within Phase 2.
+            state.attack_state["hcss_cache"] = None
+            state.attack_state["hcss_cache_cursor"] = 0
+            state.attack_state["hcss_cache_sub_id"] = None
+
+    def _get_phase3_templates(self, device: str) -> torch.Tensor:
+        key = str(device)
+        cached = self._phase3_templates.get(key)
+        if cached is not None:
+            return cached
+
+        confidences = [1.0, 0.9, 0.8]
+        templates = []
+        for c in range(self.num_classes):
+            for conf in confidences:
+                y = torch.zeros(self.num_classes, device=device)
+                y[c] = float(conf)
+                templates.append(y)
+
+        out = torch.stack(templates)
+        self._phase3_templates[key] = out
+        return out
 
     def _train_inversion(self, state: BenchmarkState) -> None:
         if self.inversion_model is None:
@@ -371,28 +400,45 @@ class InverseNet(AttackRunner):
         x: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # Custom Gaussian Noise transform
-        class GaussianNoise:
-            def __init__(self, mean=0.0, std=0.1):
-                self.mean = mean
-                self.std = std
-                
-            def __call__(self, img):
-                noise = torch.randn_like(img) * self.std + self.mean
-                return torch.clamp(img + noise, 0.0, 1.0)
-        
-        aug = transforms.Compose(
-            [
-                transforms.RandomResizedCrop(x.shape[-2:], scale=(0.8, 1.0), ratio=(0.9, 1.1)),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomRotation(degrees=15),
-                transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=10, scale=(0.9, 1.1)),
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                transforms.RandomApply([transforms.GaussianBlur(3)], p=0.2),
-                transforms.RandomApply([GaussianNoise(mean=0.0, std=0.05)], p=0.3),
-            ]
-        )
-        x_aug = aug(x)
+        # Cache augmentation pipeline to avoid per-call object construction.
+        if self._inversion_aug is None:
+            # Custom Gaussian Noise transform
+            class GaussianNoise:
+                def __init__(self, mean: float = 0.0, std: float = 0.1) -> None:
+                    self.mean = float(mean)
+                    self.std = float(std)
+
+                def __call__(self, img: torch.Tensor) -> torch.Tensor:
+                    noise = torch.randn_like(img) * self.std + self.mean
+                    return torch.clamp(img + noise, 0.0, 1.0)
+
+            self._inversion_aug = transforms.Compose(
+                [
+                    transforms.RandomResizedCrop(
+                        x.shape[-2:],
+                        scale=(0.8, 1.0),
+                        ratio=(0.9, 1.1),
+                    ),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomRotation(degrees=15),
+                    transforms.RandomAffine(
+                        degrees=0,
+                        translate=(0.1, 0.1),
+                        shear=10,
+                        scale=(0.9, 1.1),
+                    ),
+                    transforms.ColorJitter(
+                        brightness=0.2,
+                        contrast=0.2,
+                        saturation=0.2,
+                        hue=0.1,
+                    ),
+                    transforms.RandomApply([transforms.GaussianBlur(3)], p=0.2),
+                    transforms.RandomApply([GaussianNoise(mean=0.0, std=0.05)], p=0.3),
+                ]
+            )
+
+        x_aug = self._inversion_aug(x)
 
         if labels is None or x_aug.size(0) < 2:
             return x_aug
@@ -704,7 +750,23 @@ class InverseNet(AttackRunner):
     ) -> List[int]:
         device = next(substitute.parameters()).device
         substitute.eval()
-        scores = []
+        cache = self.state.attack_state.get("hcss_cache")
+        cache_sub_id = self.state.attack_state.get("hcss_cache_sub_id")
+        if cache is not None and cache_sub_id == id(substitute):
+            cursor = int(self.state.attack_state.get("hcss_cache_cursor", 0))
+            candidate_set = set(int(i) for i in candidates)
+            selected: List[int] = []
+            for pos in range(cursor, len(cache)):
+                idx = int(cache[pos])
+                if idx in candidate_set:
+                    selected.append(idx)
+                    if len(selected) >= min(int(k), len(candidates)):
+                        self.state.attack_state["hcss_cache_cursor"] = pos + 1
+                        return selected
+            self.state.attack_state["hcss_cache_cursor"] = len(cache)
+            return selected
+
+        scores: List[Tuple[int, float]] = []
 
         batch_size = min(self.batch_size, 32)
 
@@ -743,12 +805,18 @@ class InverseNet(AttackRunner):
                 substitute,
                 x_batch,
             )
-            
-            for i, dist in enumerate(distances):
-                scores.append((batch_indices[i], (1.0 + self.hcss_xi) * dist.item()))
+
+            batch_scores = ((1.0 + self.hcss_xi) * distances).detach().cpu().tolist()
+            for i, idx in enumerate(batch_indices):
+                scores.append((int(idx), float(batch_scores[i])))
 
         scores.sort(key=lambda x: x[1], reverse=True)
-        return [idx for idx, _ in scores[: min(k, len(scores))]]
+
+        sorted_indices = [idx for idx, _ in scores]
+        self.state.attack_state["hcss_cache"] = sorted_indices
+        self.state.attack_state["hcss_cache_cursor"] = min(int(k), len(sorted_indices))
+        self.state.attack_state["hcss_cache_sub_id"] = id(substitute)
+        return sorted_indices[: min(int(k), len(sorted_indices))]
 
     def _hcss_noise_distance_batch(
         self,

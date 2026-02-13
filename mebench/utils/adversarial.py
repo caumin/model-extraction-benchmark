@@ -72,7 +72,6 @@ def deepfool_vectorized(
                     break
                 
                 # Gradient w.r.t. current class
-                model.zero_grad()
                 grad_current = torch.autograd.grad(
                     logits_current[0, current_pred],
                     x_current,
@@ -123,9 +122,14 @@ def deepfool_vectorized(
                 sample_perturb = sample_perturb * (1 + overshoot)
             
             perturb_batch[i] = sample_perturb
-            final_preds[batch_start + i] = model(x[batch_start + i:batch_start + i + 1] + sample_perturb).argmax(dim=1)[0]
+            # Final prediction is computed in a batched pass below.
         
         perturbations[batch_start:batch_end] = perturb_batch
+
+        # Batched final prediction for the chunk (reduces per-sample forward overhead).
+        with torch.inference_mode():
+            logits_final = model(x[batch_start:batch_end] + perturb_batch)
+            final_preds[batch_start:batch_end] = logits_final.argmax(dim=1)
     
     return perturbations, final_preds
 
