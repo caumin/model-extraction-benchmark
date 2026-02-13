@@ -51,12 +51,29 @@ def _budget_for_kind(kind: str, pool_budget: int, synthetic_budget: int) -> int:
 
 
 def _checkpoints_for_budget(max_budget: int) -> List[int]:
-    # Monitoring-only checkpoints (not used for cross-attack comparison).
-    if max_budget <= 20_000:
-        return [5_000, 10_000, max_budget]
-    if max_budget <= 100_000:
-        return [10_000, 50_000, max_budget]
-    return [100_000, 500_000, 1_000_000, max_budget]
+    """Return monotonic checkpoints within max_budget.
+
+    These checkpoints are for monitoring/logging only (not used for cross-attack
+    comparison). We generate them as a mix of:
+    - canonical budget milestones (1k/10k/100k/1m) clipped to max_budget
+    - ratio-based milestones relative to max_budget (1/3 and 2/3)
+
+    This avoids invalid configs when max_budget is smaller than fixed milestones
+    (e.g., max_budget=30k must not include a 50k checkpoint).
+    """
+
+    b = int(max_budget)
+    if b <= 0:
+        return []
+
+    canonical = [1_000, 10_000, 100_000, 1_000_000]
+    ratio_points = [int(round(b / 3.0)), int(round(2.0 * b / 3.0))]
+    base = canonical + ratio_points + [b]
+
+    checkpoints = sorted({int(cp) for cp in base if 0 < int(cp) <= b})
+    if not checkpoints or checkpoints[-1] != b:
+        checkpoints.append(b)
+    return checkpoints
 
 
 def _budget_suffix(budget: int) -> str:
