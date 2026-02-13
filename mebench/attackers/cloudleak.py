@@ -283,7 +283,8 @@ class CloudLeak(AttackRunner):
 
         self.pool_dataset = None
         self.featurefool: Optional[FeatureFool] = None
-        self._class_feature_cache: Dict[int, torch.Tensor] = {}
+        # Cache per-class computed margins (float) to avoid repeated full-pool scans.
+        self._class_feature_cache: Dict[int, float] = {}
         self._class_indices_cache: Dict[int, List[int]] = {}
 
         self._initialize_state(state)
@@ -516,7 +517,8 @@ class CloudLeak(AttackRunner):
         selected_indices = [int(idx) for _, idx, _ in top_scored]
         x_list = [img for _, _, img in top_scored]
 
-        state.attack_state["pool_indices"] = [i for i in pool_indices if i not in selected_indices]
+        selected_set = set(selected_indices)
+        state.attack_state["pool_indices"] = [i for i in pool_indices if i not in selected_set]
         state.attack_state["round"] = int(state.attack_state.get("round", 0)) + 1
 
         x_batch = torch.stack(x_list)
@@ -537,7 +539,8 @@ class CloudLeak(AttackRunner):
 
         selected = np.random.choice(pool_indices, min(k, len(pool_indices)), replace=False).tolist()
         x_list = [self.pool_dataset[idx][0] for idx in selected]
-        state.attack_state["pool_indices"] = [i for i in pool_indices if i not in selected]
+        selected_set = set(int(i) for i in selected)
+        state.attack_state["pool_indices"] = [i for i in pool_indices if i not in selected_set]
         state.attack_state["round"] = int(state.attack_state.get("round", 0)) + 1
 
         x_batch = torch.stack(x_list)
@@ -589,24 +592,26 @@ class CloudLeak(AttackRunner):
         )
 
         substitute.eval()
+        non_blocking = str(device).startswith("cuda")
         try:
             for s_imgs, s_labels in loader:
-                batch_len = s_imgs.size(0)
+                batch_len = int(s_imgs.size(0))
                 curr_indices = candidate_indices[ptr : ptr + batch_len]
                 ptr += batch_len
 
-                non_blocking = str(device).startswith("cuda")
+                # Extract labels once to avoid per-element `.item()` overhead.
+                labels_list = [int(v) for v in s_labels.view(-1).detach().cpu().tolist()]
 
-                t_imgs_list = []
+                # Keep target selection logic/call order identical: one `_select_target_index`
+                # call per candidate in the same sequence.
+                t_imgs_list: List[torch.Tensor] = []
                 for k_idx, s_idx in enumerate(curr_indices):
-                    source_label = int(s_labels[k_idx].item())
-                    target_idx = self._select_target_index(source_label, s_idx)
+                    source_label = labels_list[k_idx]
+                    target_idx = self._select_target_index(source_label, int(s_idx))
                     t_img, _ = self.pool_dataset[target_idx]
                     t_imgs_list.append(t_img)
-
                 t_imgs = torch.stack(t_imgs_list)
 
-                labels_list = [int(v) for v in s_labels.view(-1).tolist()]
                 unique_labels = sorted(set(labels_list))
                 margin_by_label = {lab: self._compute_margin_m(lab, device) for lab in unique_labels}
                 margin_m = torch.tensor([margin_by_label[lab] for lab in labels_list], device=device)
@@ -618,14 +623,17 @@ class CloudLeak(AttackRunner):
                     to_cpu=False,
                 )
 
-                with torch.no_grad():
+                with torch.inference_mode():
                     logits = substitute(s_imgs_adv)
                     probs = F.softmax(logits, dim=1)
                     max_prob, _ = probs.max(dim=1)
                     scores = 1.0 - max_prob
 
-                for j in range(s_imgs_adv.size(0)):
-                    scored.append((float(scores[j].item()), int(curr_indices[j]), s_imgs_adv[j].detach().cpu()))
+                # Avoid per-element CUDA sync (`.item()`) and per-element D2H copies.
+                scores_list = scores.detach().cpu().tolist()
+                adv_cpu = s_imgs_adv.detach().cpu()
+                for j, idx in enumerate(curr_indices):
+                    scored.append((float(scores_list[j]), int(idx), adv_cpu[j]))
 
                 score_pbar.update(batch_len)
         finally:
@@ -673,8 +681,8 @@ class CloudLeak(AttackRunner):
             **pool_loader_kwargs(device),
         )
 
-        sum_feats = None
-        sum_norms = 0.0
+        sum_feats: Optional[torch.Tensor] = None
+        sum_norms_t = torch.zeros((), device=device)
         count = 0
 
         with torch.no_grad():
@@ -686,18 +694,19 @@ class CloudLeak(AttackRunner):
                     sum_feats = feats.sum(dim=0)
                 else:
                     sum_feats = sum_feats + feats.sum(dim=0)
-                sum_norms += float((feats ** 2).sum().item())
-                count += feats.size(0)
+                sum_norms_t = sum_norms_t + (feats ** 2).sum()
+                count += int(feats.size(0))
 
         if sum_feats is None or count < 2:
             return float(self.margin_m)
 
-        sum_feats_norm = float((sum_feats ** 2).sum().item())
-        mean_sq_dist = (2.0 * count * sum_norms - 2.0 * sum_feats_norm) / (count * (count - 1))
+        sum_feats_norm = (sum_feats ** 2).sum()
+        mean_sq_dist = (2.0 * count * sum_norms_t - 2.0 * sum_feats_norm) / (count * (count - 1))
         alpha = 0.5
-        margin_m = alpha - mean_sq_dist
-        self._class_feature_cache[class_id] = torch.tensor(margin_m)
-        return float(margin_m)
+        margin_m_t = alpha - mean_sq_dist
+        margin_m = float(margin_m_t.detach().cpu().item())
+        self._class_feature_cache[class_id] = margin_m
+        return margin_m
 
     def _handle_oracle_output(
         self,
