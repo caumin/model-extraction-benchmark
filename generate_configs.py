@@ -398,8 +398,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--out", type=str, default="configs/matrix")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
-    parser.add_argument("--pool-budget", type=int, default=20_000)
-    parser.add_argument("--synthetic-budget", type=int, default=20_000_000)
+    parser.add_argument("--pool-budget", type=int, default=30_000)
+    parser.add_argument("--synthetic-budget", type=int, default=30_000_000)
     parser.add_argument(
         "--include-both-hard",
         action="store_true",
