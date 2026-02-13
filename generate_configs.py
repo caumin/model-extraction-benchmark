@@ -359,6 +359,10 @@ def generate_configs(
                     # CloudLeak: disable pretrained substitutes by default for fairness.
                     if attack.name == "cloudleak":
                         cfg["attack"].setdefault("use_pretrained", False)
+                        # Official-style FeatureFool settings (optimize.py): bounded feature matching.
+                        cfg["attack"].setdefault("featurefool_objective", "euclidean")
+                        cfg["attack"].setdefault("max_thres", 10.0 / 255.0)
+                        cfg["attack"].setdefault("lbfgs_iters", 10)
 
                     def _maybe_add_imagenet_imagefolder_keys(d: Dict[str, Any]) -> None:
                         if str(d.get("data_mode")).lower() != "surrogate":

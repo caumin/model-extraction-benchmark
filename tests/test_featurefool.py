@@ -43,3 +43,23 @@ def test_featurefool_epsilon_bound_and_range_constraints() -> None:
     eps = float(ff.epsilon)
     linf = (x_adv - x_source).abs().amax(dim=(1, 2, 3))
     assert bool(torch.all(linf <= eps + 1e-6))
+
+
+def test_featurefool_max_thres_alias_matches_epsilon_bound() -> None:
+    model = create_substitute("lenet_mnist", num_classes=10, input_channels=1)
+
+    max_thres = 10.0 / 255.0
+    ff = FeatureFool(
+        model,
+        device="cpu",
+        objective="euclidean",
+        max_iters=1,
+        epsilon=max_thres,
+    )
+
+    x_source = torch.rand(1, 1, 28, 28)
+    x_target = torch.rand(1, 1, 28, 28)
+    x_adv = ff.generate_batch(x_source, x_target, to_cpu=True)
+
+    linf = (x_adv - x_source).abs().amax(dim=(1, 2, 3))
+    assert bool(torch.all(linf <= max_thres + 1e-6))

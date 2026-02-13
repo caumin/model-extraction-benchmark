@@ -34,7 +34,7 @@ class FeatureFool:
         lambda_adv: float = 0.001,
         objective: str = "euclidean",
         max_iters: int = 10,
-        epsilon: float = 8.0 / 255.0,
+        epsilon: float = 10.0 / 255.0,
         factr: float = 1e7,
         pgtol: float = 1e-5,
         device: str = "cpu",
@@ -236,6 +236,36 @@ class _QueryListDataset(torch.utils.data.Dataset):
         return self.x_batches[batch_idx][offset], self.y_batches[batch_idx][offset]
 
 
+class _PairedIndexDataset(torch.utils.data.Dataset):
+    """Dataset that returns (source_img, source_label, target_img) by index lists.
+
+    This allows DataLoader workers to load BOTH source and target images in parallel
+    without invoking random target selection in worker processes.
+    """
+
+    def __init__(
+        self,
+        pool_dataset: torch.utils.data.Dataset,
+        source_indices: List[int],
+        target_indices: List[int],
+    ) -> None:
+        if len(source_indices) != len(target_indices):
+            raise ValueError("source_indices and target_indices must have same length")
+        self.pool_dataset = pool_dataset
+        self.source_indices = source_indices
+        self.target_indices = target_indices
+
+    def __len__(self) -> int:
+        return len(self.source_indices)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, torch.Tensor]:
+        s_idx = int(self.source_indices[idx])
+        t_idx = int(self.target_indices[idx])
+        s_img, s_label = self.pool_dataset[s_idx]
+        t_img, _ = self.pool_dataset[t_idx]
+        return s_img, int(s_label), t_img
+
+
 class CloudLeakVGGDeepID(nn.Module):
     """VGG19-based substitute with a DeepID layer (CloudLeak Section III.C).
 
@@ -293,13 +323,20 @@ class CloudLeak(AttackRunner):
         super().__init__(config, state)
 
         # Paper uses box-constrained L-BFGS (Section IV.A.3). Use enough iters to converge.
-        self.lbfgs_iters = int(config.get("lbfgs_iters", 50))
+        self.lbfgs_iters = int(config.get("lbfgs_iters", 10))
         self.lbfgs_factr = float(config.get("lbfgs_factr", 1e7))
         self.lbfgs_pgtol = float(config.get("lbfgs_pgtol", 1e-5))
 
         self.margin_m = float(config.get("margin_m", 0.5))
         self.lambda_adv = float(config.get("lambda_adv", 0.001))
-        self.epsilon = float(config.get("epsilon", 8.0 / 255.0))
+        # Official reference code (optimize.py) uses a per-pixel bound `max_thres` around
+        # the base image. In our [0,1] input contract, interpret it as `max_thres/255`.
+        max_thres = config.get("max_thres")
+        if max_thres is None:
+            max_thres = config.get("epsilon")
+        if max_thres is None:
+            max_thres = 10.0 / 255.0
+        self.epsilon = float(max_thres)
 
         self.num_rounds = int(config.get("num_rounds", 10))
         self.initial_pool_size = int(config.get("initial_pool_size", 0))
@@ -605,6 +642,13 @@ class CloudLeak(AttackRunner):
         if self._class_indices_cache or self.pool_dataset is None:
             return
 
+        targets = self._try_get_pool_targets()
+        if targets is not None:
+            for idx, y in enumerate(targets):
+                self._class_indices_cache.setdefault(int(y), []).append(int(idx))
+            return
+
+        # Fallback: scan via DataLoader (may decode images for some datasets).
         device = self.state.metadata.get("device", "cpu")
         pool_workers = resolve_pool_num_workers(self.config, self.state.metadata.get("dataset_config", {}))
         loader_kwargs = (
@@ -626,6 +670,42 @@ class CloudLeak(AttackRunner):
                 self._class_indices_cache.setdefault(label, []).append(ptr)
                 ptr += 1
 
+    def _try_get_pool_targets(self) -> Optional[List[int]]:
+        """Best-effort label extraction without decoding images.
+
+        For ImageNet surrogate (ImageFolder) and most torchvision datasets, labels
+        are accessible via `.targets` / `.samples` on the underlying dataset.
+        """
+
+        if self.pool_dataset is None:
+            return None
+
+        ds: Any = self.pool_dataset
+        if hasattr(ds, "dataset"):
+            ds = ds.dataset
+
+        # Unwrap Subset
+        indices = None
+        if isinstance(ds, Subset):
+            indices = list(ds.indices)
+            ds = ds.dataset
+
+        # torchvision datasets commonly expose `.targets`
+        if hasattr(ds, "targets"):
+            base_targets = ds.targets
+            if indices is None:
+                return [int(t) for t in list(base_targets)]
+            return [int(base_targets[i]) for i in indices]
+
+        # ImageFolder exposes `.samples` (list[(path, class_index)])
+        if hasattr(ds, "samples"):
+            samples = ds.samples
+            if indices is None:
+                return [int(s[1]) for s in samples]
+            return [int(samples[i][1]) for i in indices]
+
+        return None
+
     def _generate_and_score(
         self,
         candidate_indices: List[int],
@@ -641,9 +721,26 @@ class CloudLeak(AttackRunner):
             if pool_workers is not None
             else pool_loader_kwargs(device)
         )
-        subset = Subset(self.pool_dataset, candidate_indices)
+        # Precompute per-candidate target indices in the SAME order as candidates to
+        # preserve RNG consumption while allowing workers to load both images.
+        targets = self._try_get_pool_targets()
+        if targets is None:
+            # Fallback: will decode source images later; keep legacy behavior.
+            targets = []
+
+        target_indices: List[int] = []
+        for s_idx in candidate_indices:
+            if targets:
+                source_label = int(targets[int(s_idx)])
+            else:
+                # Worst-case fallback: decode label.
+                _, y = self.pool_dataset[int(s_idx)]
+                source_label = int(y)
+            target_indices.append(self._select_target_index(source_label, int(s_idx)))
+
+        paired = _PairedIndexDataset(self.pool_dataset, candidate_indices, target_indices)
         loader = DataLoader(
-            subset,
+            paired,
             batch_size=self.gen_batch_size,
             shuffle=False,
             **loader_kwargs,
@@ -660,7 +757,7 @@ class CloudLeak(AttackRunner):
         substitute.eval()
         non_blocking = str(device).startswith("cuda")
         try:
-            for s_imgs, s_labels in loader:
+            for s_imgs, s_labels, t_imgs in loader:
                 batch_len = int(s_imgs.size(0))
                 curr_indices = candidate_indices[ptr : ptr + batch_len]
                 ptr += batch_len
@@ -668,19 +765,16 @@ class CloudLeak(AttackRunner):
                 # Extract labels once to avoid per-element `.item()` overhead.
                 labels_list = [int(v) for v in s_labels.view(-1).detach().cpu().tolist()]
 
-                # Keep target selection logic/call order identical: one `_select_target_index`
-                # call per candidate in the same sequence.
-                t_imgs_list: List[torch.Tensor] = []
-                for k_idx, s_idx in enumerate(curr_indices):
-                    source_label = labels_list[k_idx]
-                    target_idx = self._select_target_index(source_label, int(s_idx))
-                    t_img, _ = self.pool_dataset[target_idx]
-                    t_imgs_list.append(t_img)
-                t_imgs = torch.stack(t_imgs_list)
-
-                unique_labels = sorted(set(labels_list))
-                margin_by_label = {lab: self._compute_margin_m(lab, device) for lab in unique_labels}
-                margin_m = torch.tensor([margin_by_label[lab] for lab in labels_list], device=device)
+                margin_m = None
+                if self.featurefool_objective.lower().strip() == "triplet":
+                    # Triplet objective requires per-sample margins.
+                    unique_labels = sorted(set(labels_list))
+                    margin_by_label = {
+                        lab: self._compute_margin_m(lab, device) for lab in unique_labels
+                    }
+                    margin_m = torch.tensor(
+                        [margin_by_label[lab] for lab in labels_list], device=device
+                    )
 
                 s_imgs_adv = self.featurefool.generate_batch(
                     s_imgs.to(device, non_blocking=non_blocking),
