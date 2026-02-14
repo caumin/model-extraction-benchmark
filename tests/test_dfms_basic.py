@@ -23,7 +23,8 @@ def test_dfms_basic_flow(tmp_path) -> None:
     state.metadata = {"device": "cpu", "input_shape": (3, 32, 32)}
 
     attack = DFMSHL(config, state)
-    x_query, _meta = attack._select_query_batch(2, state)
+    query_batch = attack._select_query_batch(2, state)
+    x_query = query_batch.x
     labels = torch.randint(0, 10, (2,))
     oracle_output = OracleOutput(kind="hard_top1", y=labels)
     attack._handle_oracle_output(x_query, oracle_output, state)

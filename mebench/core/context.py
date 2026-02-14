@@ -73,12 +73,21 @@ class BenchmarkContext:
                 f"Query batch size {batch_size} exceeds remaining budget {self.state.budget_remaining}."
             )
 
+        prev_queries = int(self.state.query_count)
         oracle_output = self.oracle.query(x)
-        # Print progress at coarse intervals (handles batch jumps)
-        if self._progress_interval and self.state.query_count % self._progress_interval < batch_size:
-            print(
-                f"[Query Progress] Used: {self.state.query_count} / Remaining: {self.state.budget_remaining}"
-            )
+
+        # Print progress at coarse intervals (handles batch jumps).
+        # Always print once on the first successful query so users can confirm
+        # that oracle traffic has started, even if tqdm rendering is suppressed.
+        if self._progress_interval:
+            if prev_queries == 0:
+                print(
+                    f"[Query Progress] Used: {self.state.query_count} / Remaining: {self.state.budget_remaining}"
+                )
+            elif self.state.query_count % self._progress_interval < batch_size:
+                print(
+                    f"[Query Progress] Used: {self.state.query_count} / Remaining: {self.state.budget_remaining}"
+                )
 
         if self.record_queries:
             if self.query_storage is None:

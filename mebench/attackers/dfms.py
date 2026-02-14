@@ -134,6 +134,17 @@ class DFMSHL(AttackRunner):
         # Replaced manual tqdm with self._create_progress_bar for consistency
         pbar = self._create_progress_bar(total_budget, "[DFMSHL] Extracting")
 
+        self.logger.info(
+            "[DFMSHL] Starting (budget=%d, device=%s, official_stages=%s)",
+            int(total_budget),
+            str(device),
+            str(bool(self.use_official_stages)),
+        )
+        if self.use_official_stages:
+            self.logger.info(
+                "[DFMSHL] Query progress bar tracks oracle queries only; stage bars show no-query training."
+            )
+
         # Paper (DFMS.pdf) defines the optimization objectives (Eq.(2)-(4)) but does not
         # specify any budget-percentage LR milestone schedule. The official repo scripts
         # keep constant learning rates for GAN components and use cosine annealing for
@@ -152,13 +163,33 @@ class DFMSHL(AttackRunner):
             return
 
         # Official-repo aligned stage pipeline (see `temp_dfms_hl/run_*.sh`).
+        self.logger.info("[DFMSHL] Initializing models + caching proxy data (if needed)...")
         self._init_models(self.state)
 
+        if isinstance(self.proxy_data, torch.Tensor) and self.proxy_data.numel() > 0:
+            self.logger.info(
+                "[DFMSHL] Proxy cache ready: shape=%s device=%s",
+                tuple(int(x) for x in self.proxy_data.shape),
+                str(self.proxy_data.device),
+            )
+        self.logger.info(
+            "[DFMSHL] Stages: dcgan_epochs=%d student_init_epochs=%d degan_epochs=%d student_degan_epochs=%d alternate_epochs=%d",
+            int(self.dcgan_epochs),
+            int(self.student_init_epochs),
+            int(self.degan_epochs),
+            int(self.student_degan_epochs),
+            int(self.alternate_epochs),
+        )
+
         # Stage 1: DCGAN pretrain (no oracle queries).
+        ctx.log_event("dfmshl_stage", {"stage": "dcgan_pretrain", "queries": 0})
+        self.logger.info("[DFMSHL] Stage 1/5: DCGAN pretrain (no queries)")
         self._official_stage_dcgan_pretrain(device)
 
         # Stage 2: student init with proxy + DCGAN images (oracle labeling consumes budget).
         if ctx.budget_remaining > 0:
+            ctx.log_event("dfmshl_stage", {"stage": "student_init_dcgan", "queries": "labels"})
+            self.logger.info("[DFMSHL] Stage 2/5: student init (proxy + DCGAN) (queries for labels)")
             self._official_stage_student_init(
                 ctx,
                 device,
@@ -170,10 +201,14 @@ class DFMSHL(AttackRunner):
             )
 
         # Stage 3: train DeGAN/DivGAN (no oracle queries).
+        ctx.log_event("dfmshl_stage", {"stage": "train_degan", "queries": 0})
+        self.logger.info("[DFMSHL] Stage 3/5: train DeGAN/DivGAN (no queries)")
         self._official_stage_train_degan(device)
 
         # Stage 4: student init with proxy + DeGAN images (oracle labeling consumes budget).
         if ctx.budget_remaining > 0:
+            ctx.log_event("dfmshl_stage", {"stage": "student_init_degan", "queries": "labels"})
+            self.logger.info("[DFMSHL] Stage 4/5: student init (proxy + DeGAN) (queries for labels)")
             self._official_stage_student_init(
                 ctx,
                 device,
@@ -186,6 +221,8 @@ class DFMSHL(AttackRunner):
 
         # Stage 5: alternate training until budget exhausted (budget-capped).
         if ctx.budget_remaining > 0:
+            ctx.log_event("dfmshl_stage", {"stage": "alternate", "queries": "labels"})
+            self.logger.info("[DFMSHL] Stage 5/5: alternate training (queries for labels)")
             self._official_stage_alternate(ctx, device, pbar=pbar)
 
         pbar.close()
@@ -360,19 +397,28 @@ class DFMSHL(AttackRunner):
         """
 
         if self.generator is None or self.discriminator is None or self.proxy_data is None:
+            self.logger.info("[DFMSHL] Stage 1/5 skipped (models/proxy not initialized)")
             return
         if int(self.dcgan_epochs) <= 0:
+            self.logger.info("[DFMSHL] Stage 1/5 skipped (dcgan_epochs<=0)")
             return
 
         subset_n = self._official_proxy_subset_size()
         if subset_n <= 0:
+            self.logger.info("[DFMSHL] Stage 1/5 skipped (proxy_subset_size=0)")
             return
 
         self.generator.train()
         self.discriminator.train()
 
         batch_size = int(self.batch_size)
-        for _ep in range(int(self.dcgan_epochs)):
+        for _ep in tqdm(
+            range(int(self.dcgan_epochs)),
+            desc="[DFMSHL] Stage 1/5 DCGAN pretrain (epochs)",
+            leave=False,
+            position=1,
+            mininterval=1.0,
+        ):
             for real_x in self._iter_proxy_epoch_batches(
                 device=device, batch_size=batch_size, subset_size=subset_n
             ):
@@ -388,12 +434,15 @@ class DFMSHL(AttackRunner):
         """Stage 3: train DeGAN/DivGAN generator with diversity loss (official train_gen.py)."""
 
         if self.generator is None or self.discriminator is None or self.clone is None or self.proxy_data is None:
+            self.logger.info("[DFMSHL] Stage 3/5 skipped (models/proxy not initialized)")
             return
         if int(self.degan_epochs) <= 0:
+            self.logger.info("[DFMSHL] Stage 3/5 skipped (degan_epochs<=0)")
             return
 
         subset_n = self._official_proxy_subset_size()
         if subset_n <= 0:
+            self.logger.info("[DFMSHL] Stage 3/5 skipped (proxy_subset_size=0)")
             return
 
         self.generator.train()
@@ -402,7 +451,13 @@ class DFMSHL(AttackRunner):
         self.clone.eval()
 
         batch_size = int(self.batch_size)
-        for _ep in range(int(self.degan_epochs)):
+        for _ep in tqdm(
+            range(int(self.degan_epochs)),
+            desc="[DFMSHL] Stage 3/5 DeGAN train (epochs)",
+            leave=False,
+            position=1,
+            mininterval=1.0,
+        ):
             for real_x in self._iter_proxy_epoch_batches(
                 device=device, batch_size=batch_size, subset_size=subset_n
             ):
@@ -495,6 +550,15 @@ class DFMSHL(AttackRunner):
         y_proxy = torch.cat(y_proxy_list, dim=0) if y_proxy_list else torch.empty(0, dtype=torch.long)
         y_synth = torch.cat(y_synth_list, dim=0) if y_synth_list else torch.empty(0, dtype=torch.long)
 
+        self.logger.info(
+            "[DFMSHL] %s labeled: proxy=%d synth=%d (query_used=%d remaining=%d)",
+            str(stage_name),
+            int(proxy_labeled),
+            int(synth_labeled),
+            int(ctx.query_count),
+            int(ctx.budget_remaining),
+        )
+
         # Reset clone from scratch and train as in official train_student.py (SGD + cosine).
         self._reset_clone_for_stage(
             device=device,
@@ -524,7 +588,13 @@ class DFMSHL(AttackRunner):
             return
 
         self.clone.train()
-        for ep in range(int(train_epochs)):
+        for ep in tqdm(
+            range(int(train_epochs)),
+            desc=f"[DFMSHL] {stage_name} train (epochs)",
+            leave=False,
+            position=1,
+            mininterval=1.0,
+        ):
             proxy_perm = torch.randperm(int(proxy_indices.numel())) if proxy_indices.numel() > 0 else None
             synth_perm = torch.randperm(int(z_synth.size(0))) if z_synth.size(0) > 0 else None
             p_ptr = 0
@@ -608,7 +678,13 @@ class DFMSHL(AttackRunner):
         self.discriminator.train()
 
         batch_size = int(self.batch_size)
-        for ep in range(int(self.alternate_epochs)):
+        for ep in tqdm(
+            range(int(self.alternate_epochs)),
+            desc="[DFMSHL] Stage 5/5 alternate (epochs)",
+            leave=False,
+            position=1,
+            mininterval=1.0,
+        ):
             if ctx.budget_remaining <= 0:
                 break
 
@@ -938,7 +1014,7 @@ class DFMSHL(AttackRunner):
             range(self.pretrain_steps),
             desc="[DFMSHL] Pre-training GAN",
             leave=False,
-            disable=True,
+            disable=bool(self.config.get("disable_stage_pbar", False)),
         )
         for _ in pre_pbar:
             real_x = self._next_proxy_batch(device)
@@ -1024,7 +1100,12 @@ class DFMSHL(AttackRunner):
             "Fine-tuning: Training clone for 50 epochs on %s samples...",
             x_collected.size(0),
         )
-        for _ in tqdm(range(50), desc="[DFMSHL] Fine-tuning Clone", leave=False, disable=True):
+        for _ in tqdm(
+            range(50),
+            desc="[DFMSHL] Fine-tuning Clone",
+            leave=False,
+            disable=bool(self.config.get("disable_stage_pbar", False)),
+        ):
             self._train_clone(x_collected, y_collected)
         
         # Then tune G
@@ -1034,7 +1115,7 @@ class DFMSHL(AttackRunner):
             range(epochs),
             desc="[DFMSHL] Fine-tuning Generator",
             leave=False,
-            disable=True,
+            disable=bool(self.config.get("disable_stage_pbar", False)),
         ):
             real_x = self._next_proxy_batch(device)
             z = torch.randn(self.batch_size, self.noise_dim, device=device)

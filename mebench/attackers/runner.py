@@ -61,7 +61,10 @@ class AttackRunner(ABC):
     def _create_progress_bar(self, total: int, desc: str) -> tqdm:
         miniters = int(self.config.get("log_miniters", 0))
         if miniters <= 0:
-            miniters = max(1, int(total // 100))
+            # Keep progress bars responsive on very large budgets.
+            # `mininterval` already throttles rendering, so a low `miniters`
+            # avoids the "stuck at 0%" effect when `total` is huge.
+            miniters = 1
         mininterval = float(self.config.get("log_mininterval", 1.0))
         return tqdm(total=total, desc=desc, miniters=miniters, mininterval=mininterval)
 
