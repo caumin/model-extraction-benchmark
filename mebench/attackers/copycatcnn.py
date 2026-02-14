@@ -138,17 +138,19 @@ class CopycatCNN(AttackRunner):
         while ctx.budget_remaining > 0:
             round_id += 1
             step_size = min(round_size, ctx.budget_remaining)
-            x, indices = self._select_query_batch(step_size, self.state)
-            oracle_output = ctx.query(x, meta={"indices": indices, "round": round_id})
-            self._handle_oracle_output(x, oracle_output, self.state)
-            pbar.update(x.size(0))
+            query_batch = self._select_query_batch(step_size, self.state)
+            meta = dict(query_batch.meta or {})
+            meta["round"] = round_id
+            oracle_output = ctx.query(query_batch.x, meta=meta)
+            self._handle_oracle_output(query_batch.x, oracle_output, self.state)
+            pbar.update(query_batch.x.size(0))
 
             # Offline training after each round on accumulated labeled set.
             self._train_substitute(self.state)
 
         pbar.close()
 
-    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, list[int]]:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         if self.pool_dataset is None:
             self._load_pool(state)
 
@@ -159,7 +161,7 @@ class CopycatCNN(AttackRunner):
         indices = np.random.choice(len(self.pool_dataset), k, replace=replace).tolist()
         x_list = [self.pool_dataset[idx][0] for idx in indices]
         x = torch.stack(x_list)
-        return x, indices
+        return QueryBatch(x=x, meta={"indices": indices, "synthetic": False})
 
     def _handle_oracle_output(
         self,

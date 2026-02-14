@@ -78,19 +78,40 @@ class KnockoffNets(AttackRunner):
         pbar = self._create_progress_bar(self.state.budget_remaining, "[KnockoffNets] Extracting")
         while ctx.budget_remaining > 0:
             step_size = min(self.batch_size, ctx.budget_remaining)
-            x, indices, classes = self._select_query_batch(step_size, self.state)
-            oracle_output = ctx.query(x, meta={"indices": indices, "classes": classes})
-            self._handle_oracle_output(x, oracle_output, classes, self.state)
-            pbar.update(x.size(0))
+            query_batch = self._select_query_batch(step_size, self.state)
+            meta = query_batch.meta or {}
+            oracle_output = ctx.query(query_batch.x, meta=meta)
+            classes = list(meta.get("classes", []))
+            self._handle_oracle_output(query_batch.x, oracle_output, classes, self.state)
+            pbar.update(query_batch.x.size(0))
         pbar.close()
 
         self._finalize_attack(self.state)
 
-    def _select_query_batch(
-        self, k: int, state: BenchmarkState
-    ) -> tuple[torch.Tensor, list[int], list[int]]:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         if self.pool_dataset is None:
             self._load_pool(state)
+
+        pool_len = len(self.pool_dataset) if self.pool_dataset is not None else 0
+        if pool_len <= 0:
+            raise ValueError(f"{self.__class__.__name__} requires a non-empty pool dataset.")
+
+        # Regression/unit tests may set `pool_dataset` directly (mock) without calling `_load_pool`,
+        # leaving bookkeeping uninitialized. Ensure a consistent minimal state.
+        state.attack_state.setdefault("queried_indices", [])
+        state.attack_state.setdefault("unqueried_indices", [])
+        if len(state.attack_state["unqueried_indices"]) == 0:
+            state.attack_state["unqueried_indices"] = list(range(pool_len))
+
+        if not self.class_to_indices:
+            self.class_to_indices = {i: [] for i in range(int(self.num_classes))}
+            for idx in range(pool_len):
+                try:
+                    _, label = self.pool_dataset[idx]
+                    class_id = int(label) % int(self.num_classes)
+                except Exception:
+                    class_id = 0
+                self.class_to_indices.setdefault(class_id, []).append(idx)
 
         unqueried = state.attack_state["unqueried_indices"]
         if len(unqueried) == 0:
@@ -140,7 +161,10 @@ class KnockoffNets(AttackRunner):
             )
 
         x = torch.stack(x_list)
-        return x, selected_indices, selected_classes
+        return QueryBatch(
+            x=x,
+            meta={"indices": selected_indices, "classes": selected_classes, "synthetic": False},
+        )
 
     def _handle_oracle_output(
         self,
@@ -615,13 +639,14 @@ class KnockoffNets(AttackRunner):
         state.attack_state[store_key] = model
 
     def _get_normalization(self, state: BenchmarkState, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-        victim_config = state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        # Benchmark scaling unification (DFME-style): inputs are in [0,1] and we do NOT
+        # apply dataset mean/std normalization inside attacks. KnockoffNets paper
+        # (knockoffnets.pdf) typically follows dataset preprocessing; we deviate
+        # intentionally for benchmark-wide consistency under the oracle contract.
+        input_shape = state.metadata.get("input_shape", (3, 32, 32))
+        channels = int(input_shape[0])
+        norm_mean = torch.zeros((1, channels, 1, 1), device=device)
+        norm_std = torch.ones((1, channels, 1, 1), device=device)
         return norm_mean, norm_std
 
     def _finalize_attack(self, state: BenchmarkState) -> None:

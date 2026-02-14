@@ -932,12 +932,14 @@ class BlackboxDissector(AttackRunner):
             if pool_workers is not None
             else pool_loader_kwargs(device)
         )
-        victim_config = state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        # Benchmark scaling unification (DFME-style): inputs are [0,1] and no dataset
+        # mean/std normalization is applied. The Blackbox Dissector paper
+        # (blackbox-dissector.pdf) may assume dataset preprocessing; we deviate
+        # intentionally for benchmark-wide consistency.
+        input_shape = state.metadata.get("input_shape", (3, 32, 32))
+        channels = int(input_shape[0])
+        norm_mean = torch.zeros((1, channels, 1, 1), device=device)
+        norm_std = torch.ones((1, channels, 1, 1), device=device)
 
         teacher.eval()
         subset = Subset(self.pool_dataset, unlabeled_indices)
@@ -1146,13 +1148,11 @@ class BlackboxDissector(AttackRunner):
             log_probs = F.log_softmax(logits, dim=1)
             return -(soft_targets * log_probs).sum(dim=1)
 
-        victim_config = state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-        
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        # Benchmark scaling unification: identity normalization.
+        input_shape = state.metadata.get("input_shape", (3, 32, 32))
+        channels = int(input_shape[0])
+        norm_mean = torch.zeros((1, channels, 1, 1), device=device)
+        norm_std = torch.ones((1, channels, 1, 1), device=device)
 
         def step_fn(model_local: nn.Module, x_batch: torch.Tensor, y_batch: torch.Tensor) -> torch.Tensor:
             nonlocal pseudo_iter
@@ -1184,13 +1184,11 @@ class BlackboxDissector(AttackRunner):
             total_count = 0
             loss_func = nn.CrossEntropyLoss()
             
-            # Use normalization if provided
-            victim_config = state.metadata.get("victim_config", {})
-            normalization = victim_config.get("normalization")
-            if normalization is None:
-                normalization = {"mean": [0.0], "std": [1.0]}
-            norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-            norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+            # Benchmark scaling unification: identity normalization.
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            channels = int(input_shape[0])
+            norm_mean = torch.zeros((1, channels, 1, 1), device=device)
+            norm_std = torch.ones((1, channels, 1, 1), device=device)
 
             with torch.no_grad():
                 for x, y in loader:

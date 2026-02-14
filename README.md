@@ -132,6 +132,7 @@ For implementation details of specific attacks, see [docs/reference/](docs/refer
 1.  **Budget**: `1 query` = `1 image`. Batched queries count as `batch_size`.
 2.  **Oracle**: Default `soft_prob` uses Temperature `T=1.0`. `hard_top1` returns labels.
 3.  **Determinism**: Victims run in `eval()`/`no_grad()`. Seeds are fixed for Track A.
+4.  **Input Scaling (Benchmark-Wide)**: The benchmark contract assumes **all oracle/eval inputs are in `[0, 1]`** and applies **no dataset mean/std normalization**. Attacks must keep `[0,1]` as the canonical image scale. If an attack uses a generator with `tanh` outputs in `[-1, 1]`, convert exactly once via `(x * 0.5 + 0.5)` and clamp to `[0,1]` (DFME-style). If a paper/official repo normalizes to `[-1,1]` (e.g., `(x-0.5)/0.5`), our implementations may deviate and will note it in code comments to preserve benchmark consistency.
 
 ### 🔄 Protocol v1.2: Track Logic & Control Experiments
 To ensure fair attribution of performance gains, we enforce **Protocol v1.2** branching rules:

@@ -141,25 +141,115 @@ def deepfool_distance_vectorized(
     batch_size: int = 32,
 ) -> torch.Tensor:
     """Compute DeepFool perturbation distances for a batch of samples.
-    
+
+    This preserves the original DeepFool logic (iterative updates, all classes, stop when
+    the predicted label changes) but is implemented in a more GPU-friendly way by:
+    - processing samples in batches
+    - computing per-class input gradients for the whole batch (one backward per class),
+      instead of nested per-sample loops
+
     Args:
-        model: PyTorch model to attack
-        x: Input tensor of shape (B, C, H, W)
-        max_iter: Maximum number of iterations per sample
-        batch_size: Internal batch size for gradient computation
-        
+        model: PyTorch model to attack.
+        x: Input tensor of shape (B, C, H, W).
+        max_iter: Maximum number of DeepFool iterations per sample.
+        batch_size: Chunk size for memory control.
+
     Returns:
-        Tensor of shape (B,) containing perturbation norms for each sample
+        Tensor of shape (B,) containing L2 norms of the DeepFool perturbations.
     """
-    perturbations, _ = deepfool_vectorized(
-        model, x, max_iter=max_iter, overshoot=0.0, batch_size=batch_size
-    )
-    
-    # Compute L2 norm of perturbations
-    perturbations_flat = perturbations.view(perturbations.shape[0], -1)
-    distances = torch.norm(perturbations_flat, dim=1)
-    
-    return distances
+
+    device = x.device
+    b_total = int(x.shape[0])
+    if b_total == 0:
+        return torch.empty(0, device=device)
+
+    model.eval()
+    with torch.no_grad():
+        base_logits = model(x)
+        base_labels = base_logits.argmax(dim=1)
+
+    out: list[torch.Tensor] = []
+
+    bs = max(1, int(batch_size))
+    eps = 1e-8
+
+    for start in range(0, b_total, bs):
+        end = min(start + bs, b_total)
+        x_b = x[start:end].detach()
+        labels_b = base_labels[start:end]
+        b = int(x_b.size(0))
+
+        r = torch.zeros_like(x_b)
+        done = torch.zeros((b,), dtype=torch.bool, device=device)
+
+        for _it in range(int(max_iter)):
+            if bool(done.all()):
+                break
+
+            x_cur = (x_b + r).detach().clone().requires_grad_(True)
+            logits = model(x_cur)
+
+            pred = logits.argmax(dim=1)
+            done = done | (pred != labels_b)
+            active = ~done
+            if not bool(active.any()):
+                break
+
+            num_classes = int(logits.size(1))
+            # Reference class is the initial prediction (matches deepfool_vectorized).
+            logit_c = logits.gather(1, labels_b.view(-1, 1)).squeeze(1)
+
+            grad_c = torch.autograd.grad(
+                logit_c.sum(),
+                x_cur,
+                retain_graph=True,
+                create_graph=False,
+            )[0]
+
+            min_dist = torch.full((b,), float("inf"), device=device)
+            best_w = torch.zeros_like(x_cur)
+
+            for k in range(num_classes):
+                # Skip k == reference class per-sample by masking distance.
+                retain = k != (num_classes - 1)
+                grad_k = torch.autograd.grad(
+                    logits[:, k].sum(),
+                    x_cur,
+                    retain_graph=retain,
+                    create_graph=False,
+                )[0]
+
+                w_k = grad_k - grad_c
+                w_flat = w_k.view(b, -1)
+                w_norm = torch.norm(w_flat, p=2, dim=1)
+
+                f_k = logits[:, k] - logit_c
+                # Distance for this class; if w_norm==0 treat as not a candidate.
+                dist_k = torch.where(
+                    w_norm > 0,
+                    torch.abs(f_k) / w_norm,
+                    torch.full_like(w_norm, float("inf")),
+                )
+
+                dist_k = dist_k.masked_fill(labels_b == int(k), float("inf"))
+                dist_k = dist_k.masked_fill(~active, float("inf"))
+
+                upd = dist_k < min_dist
+                min_dist = torch.where(upd, dist_k, min_dist)
+                best_w = torch.where(upd.view(-1, 1, 1, 1), w_k, best_w)
+
+            best_norm = torch.norm(best_w.view(b, -1), p=2, dim=1)
+            valid = active & torch.isfinite(min_dist) & (best_norm > 0)
+            if not bool(valid.any()):
+                break
+
+            scale = torch.zeros((b,), device=device)
+            scale[valid] = (min_dist[valid] + eps) / best_norm[valid]
+            r = r + scale.view(-1, 1, 1, 1) * best_w
+
+        out.append(torch.norm(r.view(b, -1), p=2, dim=1).detach())
+
+    return torch.cat(out, dim=0)
 
 
 class DeepFoolAttack:

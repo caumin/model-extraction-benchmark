@@ -16,6 +16,7 @@ from mebench.models.gan import DCGANGenerator, DCGANDiscriminator, ACGANGenerato
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
+from mebench.utils.scaling import tanh_to_unit, clamp_unit
 
 
 class GAME(AttackRunner):
@@ -61,7 +62,12 @@ class GAME(AttackRunner):
         self.proxy_loader = None
         self._proxy_iter = None
         self.tdl_done = False
-        self._norm_cache: dict[tuple[str, tuple[float, ...], tuple[float, ...]], tuple[torch.Tensor, torch.Tensor]] = {}
+        # Cache for normalization tensors.
+        # NOTE (Benchmark scaling unification vs GAME.pdf): The benchmark contract enforces
+        # oracle/eval inputs in [0,1] and ignores dataset mean/std normalization. For
+        # benchmark-wide consistency, GAME uses identity normalization (mean=0,std=1).
+        # We keep the cache to avoid per-step tensor allocs.
+        self._norm_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._ctx: Optional[BenchmarkContext] = None
         self._query_fn: Optional[Callable[..., OracleOutput]] = None
         self._pending_query_k: Optional[int] = None
@@ -69,20 +75,15 @@ class GAME(AttackRunner):
         self._initialize_state(state)
 
     def _get_norm_tensors(self, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-        victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-
-        mean_vals = tuple(float(v) for v in normalization["mean"])
-        std_vals = tuple(float(v) for v in normalization["std"])
-        key = (str(device), mean_vals, std_vals)
+        input_shape = self.state.metadata.get("input_shape", (3, 32, 32))
+        channels = int(input_shape[0])
+        key = (str(device), channels)
         cached = self._norm_cache.get(key)
         if cached is not None:
             return cached
 
-        norm_mean = torch.tensor(mean_vals).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(std_vals).view(1, -1, 1, 1).to(device)
+        norm_mean = torch.zeros((1, channels, 1, 1), device=device)
+        norm_std = torch.ones((1, channels, 1, 1), device=device)
         self._norm_cache[key] = (norm_mean, norm_std)
         return norm_mean, norm_std
 
@@ -170,7 +171,8 @@ class GAME(AttackRunner):
         with torch.no_grad():
             x = self.generator(z, y_g)
 
-        x_query = x * 0.5 + 0.5
+        # Benchmark scaling unification (DFME-style): convert tanh [-1,1] -> [0,1] once.
+        x_query = tanh_to_unit(x)
 
         meta = {
             "generator_step": state.attack_state["step"],
@@ -397,7 +399,7 @@ class GAME(AttackRunner):
             # -------------------------
             z = torch.randn(batch_size, self.noise_dim, device=device)
             y_g = torch.randint(0, self.num_classes, (batch_size,), device=device)
-            fake_x = self.generator(z, y_g) * 0.5 + 0.5
+            fake_x = tanh_to_unit(self.generator(z, y_g))
 
             self.discriminator_optimizer.zero_grad()
 
@@ -434,7 +436,7 @@ class GAME(AttackRunner):
             # -------------------------
             z = torch.randn(batch_size, self.noise_dim, device=device)
             y_g = torch.randint(0, self.num_classes, (batch_size,), device=device)
-            fake_x = self.generator(z, y_g) * 0.5 + 0.5
+            fake_x = tanh_to_unit(self.generator(z, y_g))
 
             self.generator_optimizer.zero_grad()
             g_fake_out = self.discriminator(fake_x)
@@ -462,14 +464,12 @@ class GAME(AttackRunner):
         """
         if self.student is None or self.generator is None:
             return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
-        victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
-        def _norm(img):
-            return (img * 0.5 + 0.5 - norm_mean) / norm_std
+        # Benchmark scaling unification: identity normalization (mean=0,std=1).
+        norm_mean, norm_std = self._get_norm_tensors(device)
+        def _norm(img: torch.Tensor) -> torch.Tensor:
+            # NOTE: `img` here is already in [0,1]. Do NOT apply an extra *0.5+0.5.
+            # The benchmark uses identity normalization.
+            return (img - norm_mean) / norm_std
 
         if self.acs_strategy != "deviation":
             # Uncertainty-based selection (default): Prefer classes where student is uncertain
@@ -479,7 +479,7 @@ class GAME(AttackRunner):
                 # We need ACGAN to control class generation. If DCGAN, class_ids ignored.
                 # GAME assumes ACGAN for class-conditional generation.
                 x_gen_raw = self.generator(z, class_ids)
-                x_gen = x_gen_raw * 0.5 + 0.5
+                x_gen = tanh_to_unit(x_gen_raw)
                 student_logits = self.student(_norm(x_gen))
                 student_probs = F.softmax(student_logits, dim=1)
             
@@ -514,11 +514,11 @@ class GAME(AttackRunner):
             z = torch.randn(class_ids.size(0), self.noise_dim, device=device)
             with torch.no_grad():
                 x_gen_raw = self.generator(z, class_ids)
-                x_gen = x_gen_raw * 0.5 + 0.5
+                x_gen = tanh_to_unit(x_gen_raw)
                 student_logits = self.student(_norm(x_gen))
                 student_probs = F.softmax(student_logits, dim=1)
 
-            x_query = x_gen # already [0,1]
+            x_query = x_gen
             oracle_output = self._query_fn(x_query, meta={"acs_probe": True, "y_g": class_ids.detach().cpu()})
             if oracle_output.kind == "soft_prob":
                 victim_probs = oracle_output.y.to(device)
@@ -573,10 +573,6 @@ class GAME(AttackRunner):
         if z is None or y_g is None:
             return
 
-        victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
         norm_mean, norm_std = self._get_norm_tensors(device)
 
         def _norm(img: torch.Tensor) -> torch.Tensor:
@@ -589,7 +585,7 @@ class GAME(AttackRunner):
             
             # Re-generate fake batch to detach from previous graph
             fake_x_raw = self.generator(z.to(device), y_g.to(device))
-            fake_x = fake_x_raw * 0.5 + 0.5
+            fake_x = tanh_to_unit(fake_x_raw)
             
             real_validity, real_label = self.discriminator(real_x)
             fake_validity, fake_label = self.discriminator(fake_x.detach())
@@ -654,10 +650,6 @@ class GAME(AttackRunner):
         self.student.train()
         self.student_optimizer.zero_grad()
         
-        victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
         norm_mean, norm_std = self._get_norm_tensors(device)
         
         student_in = (x_query - norm_mean) / norm_std

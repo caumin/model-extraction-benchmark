@@ -15,6 +15,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DCGANGenerator, ACGANGenerator
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.scaling import tanh_to_unit, clamp_unit
 
 
 class ESAttack(AttackRunner):
@@ -83,13 +84,13 @@ class ESAttack(AttackRunner):
         
         while ctx.budget_remaining > 0:
             step_size = self._default_step_size(ctx)
-            x_query, meta = self._select_query_batch(step_size, self.state)
-            oracle_output = ctx.query(x_query, meta=meta)
-            self._handle_oracle_output(x_query, meta, oracle_output, self.state)
-            pbar.update(x_query.size(0))
+            query_batch = self._select_query_batch(step_size, self.state)
+            oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+            self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, self.state)
+            pbar.update(query_batch.x.size(0))
         pbar.close()
 
-    def _select_query_batch(self, k: int, state: BenchmarkState) -> tuple[torch.Tensor, dict]:
+    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         self._init_models(state)
         device = state.metadata.get("device", "cpu")
 
@@ -101,17 +102,18 @@ class ESAttack(AttackRunner):
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             c, h, w = int(input_shape[0]), int(input_shape[1]), int(input_shape[2])
             z_img = torch.randn(k, c, h, w, device=device)
-            x_query = torch.clamp(z_img * 0.5 + 0.5, 0.0, 1.0)
+            # Benchmark scaling unification: oracle inputs are [0,1].
+            x_query = clamp_unit(z_img * 0.5 + 0.5)
             meta = {"synthetic": True, "mode": "init_gaussian", "step": 0}
-            return x_query, meta
+            return QueryBatch(x=x_query, meta=meta)
 
         if self.synthesis_mode == "opt_syn":
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             x_init = self._sample_syn_batch(k, device, input_shape)
             x_opt = self._optimize_syn_batch(x_init, device)
-            x_query = x_opt * 0.5 + 0.5
+            x_query = tanh_to_unit(x_opt)
             meta = {"synthetic": True, "mode": "opt_syn"}
-            return x_query, meta
+            return QueryBatch(x=x_query, meta=meta)
 
         # z should be from a Gaussian Distribution
         z = torch.randn(k, self.noise_dim, device=device)
@@ -129,8 +131,8 @@ class ESAttack(AttackRunner):
                 x_raw = self.generator(z)
                 meta = {"synthetic": True, "mode": "dnn_syn", "z": z.cpu()}
 
-        x_query = x_raw * 0.5 + 0.5
-        return x_query, meta
+        x_query = tanh_to_unit(x_raw)
+        return QueryBatch(x=x_query, meta=meta)
 
     def _handle_oracle_output(
         self,
@@ -225,12 +227,12 @@ class ESAttack(AttackRunner):
             self.syn_data = self.syn_data.clamp(-1.0, 1.0)
 
     def _train_student(self, x: torch.Tensor, victim_probs: torch.Tensor) -> None:
-        victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(x.device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(x.device)
+        # Benchmark scaling unification (DFME-style): keep student inputs in [0,1] with
+        # identity normalization (no dataset mean/std). The ES-Attack paper (esattack.pdf)
+        # and related repos may apply dataset-specific normalization; we deviate
+        # intentionally for benchmark-wide consistency.
+        norm_mean = torch.zeros((1, x.size(1), 1, 1), device=x.device)
+        norm_std = torch.ones((1, x.size(1), 1, 1), device=x.device)
         
         # Augmentation logic moved here (Step 4)
         augmenter = transforms.Compose(
@@ -447,21 +449,15 @@ class ESAttack(AttackRunner):
         # Dirichlet requires strictly-positive concentration; we use softplus(+eps) to guarantee.
         y_target = self._sample_dirichlet_targets(int(x.size(0)), device)
 
-        # Student normalization
-        victim_config = self.state.metadata.get("victim_config", {})
-        normalization = victim_config.get("normalization")
-        if normalization is None:
-            normalization = {"mean": [0.0], "std": [1.0]}
-        norm_mean = torch.tensor(normalization["mean"]).view(1, -1, 1, 1).to(device)
-        norm_std = torch.tensor(normalization["std"]).view(1, -1, 1, 1).to(device)
+        # Benchmark scaling unification: identity normalization (no dataset mean/std).
 
         for _ in range(self.opt_steps):
             optimizer.zero_grad()
             
-            # Forward pass: [-1, 1] -> [0, 1] -> Normalized
+            # Forward pass: [-1, 1] -> [0, 1] (benchmark contract)
             # Note: No augmentation here as per Correction Plan Step 4
             x_input_clamped = torch.clamp(x, -1.0, 1.0)
-            logits = self.student((x_input_clamped * 0.5 + 0.5 - norm_mean) / norm_std)
+            logits = self.student(tanh_to_unit(x_input_clamped))
             
             # [FIX] Loss: KL Divergence with Dirichlet Targets
             loss = F.kl_div(F.log_softmax(logits, dim=1), y_target, reduction='batchmean')

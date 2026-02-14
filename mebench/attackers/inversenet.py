@@ -114,18 +114,39 @@ class InverseNet(AttackRunner):
 
         indices = self._select_phase_indices(k, state, phase)
 
-        used = set(state.attack_state.get("used_pool_indices", []))
+        used_set = state.attack_state.get("used_pool_set")
+        if not isinstance(used_set, set):
+            used_set = set(state.attack_state.get("used_pool_indices", []))
+            state.attack_state["used_pool_set"] = used_set
         for idx in indices:
-            used.add(int(idx))
-        state.attack_state["used_pool_indices"] = sorted(used)
+            used_set.add(int(idx))
+        # Keep list for compatibility/serialization (avoid sorting every step).
+        state.attack_state["used_pool_indices"] = list(used_set)
 
-        x_list = [self.pool_dataset[idx][0] for idx in indices]
-        if len(x_list) == 0:
+        if len(indices) == 0:
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             x_empty = torch.empty((0, *input_shape))
             return QueryBatch(x=x_empty, meta={"indices": [], "phase": phase, "status": "exhausted"})
 
-        x = torch.stack(x_list)
+        # Batch-load selected indices (avoids per-item Python indexing).
+        device = state.metadata.get("device", "cpu")
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
+        subset = Subset(self.pool_dataset, indices)
+        loader = DataLoader(
+            subset,
+            batch_size=min(len(indices), int(self.batch_size)),
+            shuffle=False,
+            **loader_kwargs,
+        )
+        x_batches: List[torch.Tensor] = []
+        for x_b, _y_b in loader:
+            x_batches.append(x_b)
+        x = torch.cat(x_batches, dim=0)
         meta = {"indices": indices, "phase": phase}
         return QueryBatch(x=x, meta=meta)
 
@@ -211,6 +232,11 @@ class InverseNet(AttackRunner):
             batch_size=1,
             shuffle=False,
         ).dataset
+
+        # Cache pool index list once (avoids rebuilding range(...) every step).
+        state.attack_state["all_pool_indices"] = list(range(len(self.pool_dataset)))
+        # Track used indices as a set for fast membership checks.
+        state.attack_state["used_pool_set"] = set()
 
     def _update_phase(self, state: BenchmarkState) -> None:
         prev_phase = state.attack_state.get("phase")
@@ -584,8 +610,16 @@ class InverseNet(AttackRunner):
         if len(self.pool_dataset) == 0:
             return []
 
-        used = set(state.attack_state.get("used_pool_indices", []))
-        all_indices = list(range(len(self.pool_dataset)))
+        used = state.attack_state.get("used_pool_set")
+        if not isinstance(used, set):
+            used = set(state.attack_state.get("used_pool_indices", []))
+            state.attack_state["used_pool_set"] = used
+
+        all_indices = state.attack_state.get("all_pool_indices")
+        if not isinstance(all_indices, list) or len(all_indices) != len(self.pool_dataset):
+            all_indices = list(range(len(self.pool_dataset)))
+            state.attack_state["all_pool_indices"] = all_indices
+
         unused = [i for i in all_indices if i not in used]
         if not unused:
             return []
@@ -595,7 +629,8 @@ class InverseNet(AttackRunner):
             coreset_centers = state.attack_state.get("coreset_centers", [])
 
             if len(coreset_centers) > 0:
-                available = [i for i in unused if i not in set(coreset_centers)]
+                coreset_set = set(int(i) for i in coreset_centers)
+                available = [i for i in unused if i not in coreset_set]
             else:
                 available = unused
                 
@@ -701,22 +736,15 @@ class InverseNet(AttackRunner):
         # Initialize with infinity
         min_dists = torch.full((candidates_matrix.size(0),), float('inf'), device=device)
         
-        # Update min_dists against existing centers
-        # Chunking centers to avoid OOM [N_rem, N_cen, D] tensor
-        chunk_size = 100
+        # Update min_dists against existing centers.
+        # Use torch.cdist(p=1) in chunks to avoid Python loops.
+        chunk_size = int(self.config.get("coreset_cdist_chunk", 128))
+        chunk_size = max(1, chunk_size)
         for i in range(0, centers_matrix.size(0), chunk_size):
-            c_chunk = centers_matrix[i:i+chunk_size] # [C, D]
+            c_chunk = centers_matrix[i : i + chunk_size]  # [C, D]
             # dists: [N_rem, C]
-            # L1: |x - c|
-            # Expand: [N_rem, 1, D] - [1, C, D] -> [N_rem, C, D] -> sum(abs) -> [N_rem, C]
-            # This is still heavy. 
-            # Alternative: Iterate candidates? No, slow.
-            # Efficient L1 distance matrix computation is tricky without expansion.
-            # Let's simply loop over centers for initialization (N_centers is small initially)
-            for j in range(c_chunk.size(0)):
-                c_vec = c_chunk[j].unsqueeze(0) # [1, D]
-                d = torch.norm(candidates_matrix - c_vec, p=1, dim=1) # [N_rem]
-                min_dists = torch.minimum(min_dists, d)
+            dists = torch.cdist(candidates_matrix, c_chunk, p=1)
+            min_dists = torch.minimum(min_dists, dists.min(dim=1).values)
 
         # Greedy selection loop
         for _ in range(min(k, len(remaining))):
@@ -768,7 +796,9 @@ class InverseNet(AttackRunner):
 
         scores: List[Tuple[int, float]] = []
 
-        batch_size = min(self.batch_size, 32)
+        # DeepFool scoring is expensive; use a moderate batch size for GPU efficiency.
+        # Tunable via attack config: hcss_batch_size.
+        batch_size = min(self.batch_size, int(self.config.get("hcss_batch_size", 64)))
 
         pool_workers = resolve_pool_num_workers(self.config, self.state.metadata.get("dataset_config", {}))
         loader_kwargs = (

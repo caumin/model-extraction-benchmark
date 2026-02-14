@@ -17,26 +17,28 @@ from mebench.models.blackbox_ripper import (
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
+from mebench.utils.scaling import tanh_to_unit, clamp_unit
 
 
-def _clamp_to_unit_range(x: torch.Tensor) -> torch.Tensor:
-    """Clamp a batch of images into the benchmark [0, 1] contract.
+def _to_benchmark_unit_range(x: torch.Tensor, *, mode: str) -> torch.Tensor:
+    """Convert generator outputs to the benchmark [0,1] input contract.
 
-    The upstream Ripper generators are mostly bounded to [-1, 1] (e.g. SNGAN's tanh), while
-    some checkpoints/models may already emit [0, 1].
+    Benchmark-wide scaling unification (DFME-style): treat [0,1] as canonical image scale.
+
+    Notes on papers/upstream (blackbox-ripper.pdf):
+    - The vendored CIFAR SNGAN generator ends with tanh, so outputs are in [-1,1]
+      (see `mebench/models/blackbox_ripper/cifar_sngan.py`).
+    - Some generators/checkpoints may emit values that are not strictly bounded.
+    - For benchmark consistency we avoid per-batch heuristics (which can compress already
+      [0,1] values if any negative value exists in the batch).
     """
 
-    if not torch.isfinite(x).all():
-        return torch.zeros_like(x)
-
-    x_min = float(x.min().item())
-
-    # Heuristic matching the paper-era upstream behavior:
-    # if data appears to be tanh-like, shift to [0,1], then clamp.
-    if x_min < 0.0:
-        x = (x + 1.0) / 2.0
-
-    return torch.clamp(x, 0.0, 1.0)
+    mode_l = str(mode).lower().strip()
+    if mode_l in {"tanh", "m11"}:
+        return tanh_to_unit(x)
+    if mode_l in {"unit", "01"}:
+        return clamp_unit(x)
+    raise ValueError(f"Unsupported generator_output_range='{mode}'. Use 'tanh' or 'unit'.")
 
 
 def _match_input_shape(x: torch.Tensor, input_shape: tuple[int, int, int]) -> torch.Tensor:
@@ -101,6 +103,11 @@ class BlackboxRipper(AttackRunner):
         self.generator_name = str(config.get("generator_name") or config.get("gan_backbone") or "cifar_sngan")
         self.generator_checkpoint = config.get("generator_checkpoint") or config.get("generator_ckpt")
         self.generator_strict_load = bool(config.get("generator_strict_load", True))
+
+        # Scaling unification (DFME-style): oracle inputs are [0,1].
+        # Upstream generators often output tanh-scaled [-1,1]. We default to treating
+        # generator outputs as tanh-scaled and explicitly convert to [0,1].
+        self.generator_output_range = str(config.get("generator_output_range", "tanh"))
 
         # Evolutionary search hyperparameters (upstream defaults).
         self.population_size = int(config.get("population_size", 30))
@@ -343,7 +350,8 @@ class BlackboxRipper(AttackRunner):
 
             with torch.no_grad():
                 x_raw = self.generator(population)
-                x = _clamp_to_unit_range(x_raw)
+                # Benchmark scaling unification: convert generator outputs to [0,1] deterministically.
+                x = _to_benchmark_unit_range(x_raw, mode=self.generator_output_range)
                 x = _match_input_shape(x, input_shape)
 
             oracle_out = ctx.query(
