@@ -37,6 +37,10 @@ runs/
 /data/
 !mebench/data/
 /configs/
+analysis_results/
+logs/
+checkpoints/
+/*.pdf
 papers/*.pdf
 papers/*.txt
 !papers/README.md
@@ -62,4 +66,12 @@ results/
 # Temporary
 temp/
 temp_*/
+TEMP_*/
 *repo/
+.paper_text/
+paper_text/
+NUL
+%TEMP%/
+%TMPDIR%/
+Users*AppDataLocalTemp*/
+Users*desktop*model-extraction-benchmark*/
