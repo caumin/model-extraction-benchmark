@@ -198,7 +198,8 @@ def generate_configs(
         
         AttackSpec("dfme", kind="synthetic", label_capability="soft_only"),
         AttackSpec("maze", kind="synthetic", label_capability="soft_only"),
-        AttackSpec("game", kind="synthetic", label_capability="soft_only"),
+        # NOTE: GAME is temporarily excluded from the default matrix because its
+        # TDL pretraining requires proxy labels aligned to victim classes.
         AttackSpec("blackbox_ripper", kind="synthetic", label_capability="soft_only"),
         AttackSpec(
             "dfms",
@@ -396,7 +397,7 @@ def generate_configs(
                     if attack.name == "knockoff_nets":
                         cfg["attack"]["offline_train_epochs"] = cfg["substitute"]["max_epochs"]
 
-                    if attack.name in {"blackbox_ripper", "game", "dfms"}:
+                    if attack.name in {"blackbox_ripper", "dfms"}:
                         cfg["attack"]["proxy_dataset"] = {
                             "name": setup.surrogate_name,
                             "data_mode": "surrogate",
