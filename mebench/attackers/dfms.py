@@ -257,14 +257,18 @@ class DFMSHL(AttackRunner):
             yield batch.to(device)
 
     def _oracle_hard_labels(self, ctx: BenchmarkContext, x_query: torch.Tensor) -> torch.Tensor:
-        """Query oracle and return hard top-1 labels on CPU."""
+        """Query oracle and return hard top-1 labels on x_query's device."""
 
         oracle_output = ctx.query(x_query)
         if oracle_output.kind == "hard_top1":
             y = oracle_output.y
         else:
             y = torch.argmax(oracle_output.y, dim=1)
-        return y.detach().cpu().long()
+
+        y = y.detach()
+        if y.device != x_query.device:
+            y = y.to(x_query.device)
+        return y.long()
 
     def _augment_pad_crop_hflip(self, x: torch.Tensor, *, padding: int = 4) -> torch.Tensor:
         """GPU-friendly pad+random-crop + horizontal flip (tensor-only).
@@ -507,7 +511,9 @@ class DFMSHL(AttackRunner):
 
         # Prepare fixed proxy indices (first proxy_n samples, matching official deterministic fill).
         proxy_indices = torch.arange(proxy_n, dtype=torch.long)
-        z_synth = torch.randn(synth_n, self.noise_dim, dtype=torch.float32)
+        # Sample synthetic noise on CPU (seeded) and move once to device.
+        # This avoids per-step CPU->GPU transfers while keeping the same RNG source.
+        z_synth = torch.randn(synth_n, self.noise_dim, dtype=torch.float32).to(device)
 
         # Query labels for proxy samples.
         y_proxy_list: List[torch.Tensor] = []
@@ -531,7 +537,7 @@ class DFMSHL(AttackRunner):
             take = min(oracle_bs, synth_n - synth_cursor, int(ctx.budget_remaining))
             if take <= 0:
                 break
-            z = z_synth[synth_cursor : synth_cursor + take].to(device)
+            z = z_synth[synth_cursor : synth_cursor + take]
             with torch.no_grad():
                 x = tanh_to_unit(self.generator(z))
             y = self._oracle_hard_labels(ctx, x)
@@ -547,8 +553,16 @@ class DFMSHL(AttackRunner):
         synth_labeled = int(sum(int(t.size(0)) for t in y_synth_list))
         proxy_indices = proxy_indices[:proxy_labeled]
         z_synth = z_synth[:synth_labeled]
-        y_proxy = torch.cat(y_proxy_list, dim=0) if y_proxy_list else torch.empty(0, dtype=torch.long)
-        y_synth = torch.cat(y_synth_list, dim=0) if y_synth_list else torch.empty(0, dtype=torch.long)
+        y_proxy = (
+            torch.cat(y_proxy_list, dim=0)
+            if y_proxy_list
+            else torch.empty(0, dtype=torch.long, device=device)
+        )
+        y_synth = (
+            torch.cat(y_synth_list, dim=0)
+            if y_synth_list
+            else torch.empty(0, dtype=torch.long, device=device)
+        )
 
         self.logger.info(
             "[DFMSHL] %s labeled: proxy=%d synth=%d (query_used=%d remaining=%d)",
@@ -609,17 +623,24 @@ class DFMSHL(AttackRunner):
                     p_ptr += int(sel.numel())
                     idx = proxy_indices.index_select(0, sel).to(self.proxy_data.device)
                     x_p = self.proxy_data.index_select(0, idx).to(device)
-                    y_p = y_proxy.index_select(0, sel).to(device)
+                    sel_dev = sel.to(y_proxy.device) if y_proxy.device != sel.device else sel
+                    y_p = y_proxy.index_select(0, sel_dev)
+                    if y_p.device != x_p.device:
+                        y_p = y_p.to(x_p.device)
                     x_parts.append(x_p)
                     y_parts.append(y_p)
 
                 if synth_perm is not None and synth_batch > 0 and s_ptr < synth_perm.numel():
                     sel = synth_perm[s_ptr : s_ptr + synth_batch]
                     s_ptr += int(sel.numel())
-                    z_b = z_synth.index_select(0, sel).to(device)
+                    sel_dev = sel.to(z_synth.device) if z_synth.device != sel.device else sel
+                    z_b = z_synth.index_select(0, sel_dev)
                     with torch.no_grad():
                         x_s = tanh_to_unit(self.generator(z_b))
-                    y_s = y_synth.index_select(0, sel).to(device)
+                    sel_y = sel.to(y_synth.device) if y_synth.device != sel.device else sel
+                    y_s = y_synth.index_select(0, sel_y)
+                    if y_s.device != x_s.device:
+                        y_s = y_s.to(x_s.device)
                     x_parts.append(x_s)
                     y_parts.append(y_s)
 
@@ -715,8 +736,8 @@ class DFMSHL(AttackRunner):
 
                 self.clone.train()
                 self.clone_optimizer.zero_grad(set_to_none=True)
-                logits = self.clone(x_for_student.to(device))
-                loss_s = F.cross_entropy(logits, y.to(device))
+                logits = self.clone(x_for_student)
+                loss_s = F.cross_entropy(logits, y)
                 loss_s.backward()
                 self.clone_optimizer.step()
 

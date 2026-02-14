@@ -57,6 +57,7 @@ class InverseNet(AttackRunner):
         self.hcss_max_iter = int(config.get("hcss_max_iter", 20))
 
         self.pool_dataset = None
+        self.pool_data: torch.Tensor | None = None
         self.inversion_model: nn.Module | None = None
         self.inversion_optimizer: torch.optim.Optimizer | None = None
         self.substitute: nn.Module | None = None
@@ -83,7 +84,7 @@ class InverseNet(AttackRunner):
         pbar.close()
 
     def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
-        if self.pool_dataset is None:
+        if self.pool_dataset is None and self.pool_data is None:
             self._load_pool(state)
 
         self._update_phase(state)
@@ -106,7 +107,7 @@ class InverseNet(AttackRunner):
             meta = {"phase": phase, "synthetic": True, "augmented": True}
             return QueryBatch(x=x, meta=meta)
 
-        if len(self.pool_dataset) == 0:
+        if self._pool_size() == 0:
             raise ValueError(
                 f"Query pool exhausted for {self.__class__.__name__}. "
                 f"Cannot select {k} more queries."
@@ -128,14 +129,36 @@ class InverseNet(AttackRunner):
             x_empty = torch.empty((0, *input_shape))
             return QueryBatch(x=x_empty, meta={"indices": [], "phase": phase, "status": "exhausted"})
 
-        # Batch-load selected indices (avoids per-item Python indexing).
         device = state.metadata.get("device", "cpu")
-        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
-        loader_kwargs = (
-            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
-            if pool_workers is not None
-            else pool_loader_kwargs(device)
-        )
+        x = self._gather_pool_x(indices, device=str(device))
+        meta = {"indices": indices, "phase": phase}
+        return QueryBatch(x=x, meta=meta)
+
+    def _pool_size(self) -> int:
+        if isinstance(self.pool_data, torch.Tensor):
+            return int(self.pool_data.size(0))
+        if self.pool_dataset is not None:
+            return int(len(self.pool_dataset))
+        return 0
+
+    def _gather_pool_x(self, indices: List[int], *, device: str) -> torch.Tensor:
+        if len(indices) == 0:
+            input_shape = self.state.metadata.get("input_shape", (3, 32, 32))
+            return torch.empty((0, *input_shape))
+
+        if isinstance(self.pool_data, torch.Tensor):
+            pool = self.pool_data
+            idx = torch.as_tensor(indices, dtype=torch.long, device=pool.device)
+            x = pool.index_select(0, idx)
+            if x.device != torch.device(device):
+                x = x.to(device)
+            return x
+
+        if self.pool_dataset is None:
+            raise RuntimeError("Pool dataset not loaded")
+
+        # Fallback: avoid per-step worker spawn overhead (especially on Windows).
+        loader_kwargs = pool_loader_kwargs(device, {"num_workers": 0})
         subset = Subset(self.pool_dataset, indices)
         loader = DataLoader(
             subset,
@@ -146,9 +169,7 @@ class InverseNet(AttackRunner):
         x_batches: List[torch.Tensor] = []
         for x_b, _y_b in loader:
             x_batches.append(x_b)
-        x = torch.cat(x_batches, dim=0)
-        meta = {"indices": indices, "phase": phase}
-        return QueryBatch(x=x, meta=meta)
+        return torch.cat(x_batches, dim=0)
 
     def observe(self, query_batch: QueryBatch, oracle_output: OracleOutput, state: BenchmarkState) -> None:
         self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, state)
@@ -233,8 +254,57 @@ class InverseNet(AttackRunner):
             shuffle=False,
         ).dataset
 
-        # Cache pool index list once (avoids rebuilding range(...) every step).
-        state.attack_state["all_pool_indices"] = list(range(len(self.pool_dataset)))
+        # Protocol-preserving runtime cache: preload the pool into a single tensor to
+        # avoid per-step DataLoader construction/spawn overhead (especially on Windows).
+        if bool(self.config.get("cache_pool_to_memory", True)):
+            device = str(state.metadata.get("device", "cpu"))
+            cache_batch_size = int(self.config.get("pool_cache_batch_size", 512))
+            cache_max_samples = int(self.config.get("pool_cache_max_samples", 0))
+            cache_max_samples = max(0, cache_max_samples)
+
+            pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+            loader_kwargs = (
+                pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+                if pool_workers is not None
+                else pool_loader_kwargs(device)
+            )
+            loader = DataLoader(
+                self.pool_dataset,
+                batch_size=max(1, cache_batch_size),
+                shuffle=False,
+                **loader_kwargs,
+            )
+
+            batches: List[torch.Tensor] = []
+            total = 0
+            for x_b, _y_b in tqdm(loader, desc="[InverseNet] Caching pool data", leave=False):
+                batches.append(x_b)
+                total += int(x_b.size(0))
+                if cache_max_samples and total >= cache_max_samples:
+                    break
+
+            if batches:
+                pool_x = torch.cat(batches, dim=0)
+                if cache_max_samples and int(pool_x.size(0)) > cache_max_samples:
+                    pool_x = pool_x[:cache_max_samples]
+
+                if device.startswith("cuda"):
+                    try:
+                        pool_x = pool_x.to(device)
+                    except RuntimeError:
+                        pool_x = pool_x.cpu()
+
+                self.pool_data = pool_x
+                self.logger.info(
+                    "[InverseNet] Pool cache ready: shape=%s device=%s",
+                    tuple(int(x) for x in pool_x.shape),
+                    str(pool_x.device),
+                )
+
+        pool_len = self._pool_size()
+
+        # Cache pool index list once.
+        state.attack_state["all_pool_indices"] = list(range(int(pool_len)))
         # Track used indices as a set for fast membership checks.
         state.attack_state["used_pool_set"] = set()
 
@@ -607,7 +677,8 @@ class InverseNet(AttackRunner):
         self._evaluate_current_substitute(self.substitute, device)
 
     def _select_phase_indices(self, k: int, state: BenchmarkState, phase: int) -> List[int]:
-        if len(self.pool_dataset) == 0:
+        pool_len = self._pool_size()
+        if pool_len == 0:
             return []
 
         used = state.attack_state.get("used_pool_set")
@@ -616,8 +687,8 @@ class InverseNet(AttackRunner):
             state.attack_state["used_pool_set"] = used
 
         all_indices = state.attack_state.get("all_pool_indices")
-        if not isinstance(all_indices, list) or len(all_indices) != len(self.pool_dataset):
-            all_indices = list(range(len(self.pool_dataset)))
+        if not isinstance(all_indices, list) or len(all_indices) != int(pool_len):
+            all_indices = list(range(int(pool_len)))
             state.attack_state["all_pool_indices"] = all_indices
 
         unused = [i for i in all_indices if i not in used]
@@ -678,52 +749,60 @@ class InverseNet(AttackRunner):
         # 1. Extract features (flattened images) for all centers and remaining candidates ONCE
         # Note: InverseNet uses raw image L1 distance as "feature"
         
-        # Load all candidate images into memory (batched)
-        # This is much faster than single-item access inside the loop
-        subset = torch.utils.data.Subset(self.pool_dataset, remaining)
-        device = state.metadata.get("device", "cpu")
-        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
-        loader_kwargs = (
-            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
-            if pool_workers is not None
-            else pool_loader_kwargs(device)
-        )
-        loader = DataLoader(
-            subset,
-            batch_size=256,
-            shuffle=False,
-            **loader_kwargs,
-        )
-        
-        candidates_matrix = []
-        for x_batch, _ in loader:
-            candidates_matrix.append(x_batch.view(x_batch.size(0), -1))
-        
-        if not candidates_matrix:
-            return centers[:k]
-            
-        # [N_remaining, D]
-        candidates_matrix = torch.cat(candidates_matrix, dim=0)
-        
-        # Load centers
-        center_subset = torch.utils.data.Subset(self.pool_dataset, centers)
-        center_loader = DataLoader(
-            center_subset,
-            batch_size=256,
-            shuffle=False,
-            **loader_kwargs,
-        )
-        
-        centers_matrix_list = []
-        for x_batch, _ in center_loader:
-            centers_matrix_list.append(x_batch.view(x_batch.size(0), -1))
-        
-        # [N_centers, D]
-        centers_matrix = torch.cat(centers_matrix_list, dim=0)
-        
-        # Move to GPU if available for fast distance computation
-        candidates_matrix = candidates_matrix.to(device)
-        centers_matrix = centers_matrix.to(device)
+        device = str(state.metadata.get("device", "cpu"))
+
+        if isinstance(self.pool_data, torch.Tensor):
+            pool = self.pool_data
+            pool_flat = pool.view(int(pool.size(0)), -1)
+
+            rem_idx = torch.as_tensor(remaining, dtype=torch.long, device=pool.device)
+            candidates_matrix = pool_flat.index_select(0, rem_idx)
+
+            ctr_idx = torch.as_tensor(centers, dtype=torch.long, device=pool.device)
+            centers_matrix = pool_flat.index_select(0, ctr_idx)
+        else:
+            # Fallback path: load from dataset if pool cache is disabled.
+            subset = torch.utils.data.Subset(self.pool_dataset, remaining)
+            pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+            loader_kwargs = (
+                pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+                if pool_workers is not None
+                else pool_loader_kwargs(device)
+            )
+            loader = DataLoader(
+                subset,
+                batch_size=256,
+                shuffle=False,
+                **loader_kwargs,
+            )
+
+            candidates_matrix_list: List[torch.Tensor] = []
+            for x_batch, _ in loader:
+                candidates_matrix_list.append(x_batch.view(x_batch.size(0), -1))
+
+            if not candidates_matrix_list:
+                return centers[:k]
+
+            candidates_matrix = torch.cat(candidates_matrix_list, dim=0)
+
+            center_subset = torch.utils.data.Subset(self.pool_dataset, centers)
+            center_loader = DataLoader(
+                center_subset,
+                batch_size=256,
+                shuffle=False,
+                **loader_kwargs,
+            )
+
+            centers_matrix_list: List[torch.Tensor] = []
+            for x_batch, _ in center_loader:
+                centers_matrix_list.append(x_batch.view(x_batch.size(0), -1))
+
+            centers_matrix = torch.cat(centers_matrix_list, dim=0)
+
+        if candidates_matrix.device != torch.device(device):
+            candidates_matrix = candidates_matrix.to(device)
+        if centers_matrix.device != torch.device(device):
+            centers_matrix = centers_matrix.to(device)
         
         # Initialize min_distances with current centers
         # dists: [N_remaining, N_centers]
@@ -800,45 +879,53 @@ class InverseNet(AttackRunner):
         # Tunable via attack config: hcss_batch_size.
         batch_size = min(self.batch_size, int(self.config.get("hcss_batch_size", 64)))
 
-        pool_workers = resolve_pool_num_workers(self.config, self.state.metadata.get("dataset_config", {}))
-        loader_kwargs = (
-            pool_loader_kwargs(str(device), {"num_workers": int(pool_workers)})
-            if pool_workers is not None
-            else pool_loader_kwargs(str(device))
-        )
-        
-        # [OPTIMIZATION] Use DataLoader for efficient batch retrieval (I/O Bound -> GPU Bound)
-        # Maps candidates[i] -> dataset[candidates[i]]
-        subset = Subset(self.pool_dataset, candidates)
-        loader = DataLoader(
-            subset, 
-            batch_size=batch_size, 
-            shuffle=False, 
-            **loader_kwargs
-        )
-        
-        current_idx_ptr = 0
-        
-        # Iterate through pre-fetched batches
-        for x_batch, _ in loader:
-            batch_len = x_batch.size(0)
-            
-            # Retrieve original indices corresponding to this batch
-            # Subset maintains the order of 'candidates', so we can slice directly
-            batch_indices = candidates[current_idx_ptr : current_idx_ptr + batch_len]
-            current_idx_ptr += batch_len
-            
-            x_batch = x_batch.to(device, non_blocking=str(device).startswith("cuda"))
-            
-            # DeepFool distance calculation
-            distances = self._hcss_noise_distance_batch(
-                substitute,
-                x_batch,
+        if isinstance(self.pool_data, torch.Tensor):
+            pool = self.pool_data
+            n = len(candidates)
+            for start in range(0, n, int(batch_size)):
+                end = min(start + int(batch_size), n)
+                batch_indices = candidates[start:end]
+                if not batch_indices:
+                    continue
+
+                idx = torch.as_tensor(batch_indices, dtype=torch.long, device=pool.device)
+                x_batch = pool.index_select(0, idx)
+                if x_batch.device != device:
+                    x_batch = x_batch.to(device)
+
+                distances = self._hcss_noise_distance_batch(substitute, x_batch)
+                batch_scores = ((1.0 + self.hcss_xi) * distances).detach().cpu().tolist()
+                for i, idx_val in enumerate(batch_indices):
+                    scores.append((int(idx_val), float(batch_scores[i])))
+        else:
+            pool_workers = resolve_pool_num_workers(self.config, self.state.metadata.get("dataset_config", {}))
+            loader_kwargs = (
+                pool_loader_kwargs(str(device), {"num_workers": int(pool_workers)})
+                if pool_workers is not None
+                else pool_loader_kwargs(str(device))
             )
 
-            batch_scores = ((1.0 + self.hcss_xi) * distances).detach().cpu().tolist()
-            for i, idx in enumerate(batch_indices):
-                scores.append((int(idx), float(batch_scores[i])))
+            # Fallback: DataLoader retrieval from the underlying dataset.
+            subset = Subset(self.pool_dataset, candidates)
+            loader = DataLoader(
+                subset,
+                batch_size=batch_size,
+                shuffle=False,
+                **loader_kwargs,
+            )
+
+            current_idx_ptr = 0
+            for x_batch, _ in loader:
+                batch_len = x_batch.size(0)
+                batch_indices = candidates[current_idx_ptr : current_idx_ptr + batch_len]
+                current_idx_ptr += batch_len
+
+                x_batch = x_batch.to(device, non_blocking=str(device).startswith("cuda"))
+                distances = self._hcss_noise_distance_batch(substitute, x_batch)
+
+                batch_scores = ((1.0 + self.hcss_xi) * distances).detach().cpu().tolist()
+                for i, idx_val in enumerate(batch_indices):
+                    scores.append((int(idx_val), float(batch_scores[i])))
 
         scores.sort(key=lambda x: x[1], reverse=True)
 

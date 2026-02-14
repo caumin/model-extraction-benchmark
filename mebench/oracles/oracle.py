@@ -24,10 +24,22 @@ class Oracle:
 
         self.output_mode = config.get("output_mode", "soft_prob")
         self.temperature = float(config.get("temperature", 1.0))
+        # Default behavior historically returned oracle outputs on CPU. Keep that as
+        # the default for backward compatibility and to avoid accidentally pinning
+        # large outputs (e.g., soft_prob) on GPU.
+        self.return_outputs_on_cpu = bool(config.get("return_outputs_on_cpu", True))
         self.input_shape = tuple(config.get("input_size", (3, 32, 32)))
         if len(self.input_shape) == 2:
              # Add channel if missing
              self.input_shape = (config.get("channels", 1), *self.input_shape)
+
+    @property
+    def query_count(self) -> int:
+        return int(self.state.query_count)
+
+    @property
+    def budget_remaining(self) -> int:
+        return int(self.state.budget_remaining)
 
     @torch.no_grad()
     def query(self, x_batch: torch.Tensor) -> OracleOutput:
@@ -40,9 +52,10 @@ class Oracle:
         Returns:
             OracleOutput container
         """
-        # Ensure model is on the same device
+        # Ensure inputs are on the victim device (avoid redundant .to when already there).
         device = next(self.model.parameters()).device
-        x_batch = x_batch.to(device)
+        if x_batch.device != device:
+            x_batch = x_batch.to(device)
 
         batch_size = x_batch.size(0)
 
@@ -63,10 +76,16 @@ class Oracle:
         if self.output_mode == "soft_prob":
             # Soft softmax probabilities
             probs = torch.softmax(logits, dim=1)
-            return OracleOutput(kind="soft_prob", y=probs.cpu())
+            y = probs
+            kind = "soft_prob"
         elif self.output_mode == "hard_top1":
             # Hard class label (top-1)
             labels = torch.argmax(logits, dim=1)
-            return OracleOutput(kind="hard_top1", y=labels.cpu())
+            y = labels
+            kind = "hard_top1"
         else:
             raise ValueError(f"Unsupported output mode: {self.output_mode}")
+
+        if self.return_outputs_on_cpu:
+            y = y.cpu()
+        return OracleOutput(kind=kind, y=y)

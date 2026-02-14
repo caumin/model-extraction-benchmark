@@ -200,7 +200,17 @@ def generate_configs(
         AttackSpec("maze", kind="synthetic", label_capability="soft_only"),
         AttackSpec("game", kind="synthetic", label_capability="soft_only"),
         AttackSpec("blackbox_ripper", kind="synthetic", label_capability="soft_only"),
-        AttackSpec("dfms", kind="synthetic", label_capability="hard_only"),
+        AttackSpec(
+            "dfms",
+            kind="synthetic",
+            label_capability="hard_only",
+            extra={
+                # DFMS-HL (hard-label, data-free) benefits substantially from larger
+                # batches on modern GPUs. Keep this explicit in the generated configs
+                # so runs are reproducible across machines.
+                "batch_size": 256,
+            },
+        ),
     ]
 
     if clean:
@@ -397,6 +407,12 @@ def generate_configs(
                             "input_size": [setup.size, setup.size],
                         }
                         _maybe_add_imagenet_imagefolder_keys(cfg["attack"]["proxy_dataset"])
+
+                    # DFMS-HL is hard-label-only and immediately consumes oracle labels for
+                    # GPU training. Keep oracle outputs on-device to avoid unnecessary
+                    # CPU round-trips while preserving the 1-query=1-image contract.
+                    if attack.name == "dfms":
+                        cfg["victim"]["return_outputs_on_cpu"] = False
 
                     if attack.name == "blackbox_ripper":
                         if setup.victim_dataset == "CIFAR10":
