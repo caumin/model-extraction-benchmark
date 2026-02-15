@@ -78,17 +78,52 @@ class InverseNet(AttackRunner):
         while ctx.budget_remaining > 0:
             step_size = self._default_step_size(ctx)
             query_batch = self._select_query_batch(step_size, self.state)
+            if int(query_batch.x.size(0)) == 0:
+                break
             oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
             self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
         pbar.close()
 
+        # Paper-faithful training schedule:
+        # - Train the initial substitute once after Phase 1 (K1).
+        # - Retrain the substitute once after Phase 3 (K3).
+        if not self.train_phase_1 and len(self.state.attack_state.get("query_data_x", [])) > 0:
+            self._train_substitute_from_queries(self.state)
+            if self.substitute is not None:
+                self.train_phase_1 = True
+                self.state.attack_state["substitute"] = self.substitute
+                self._evaluate_current_substitute(self.substitute, device)
+
+        if not self.train_phase_3 and len(self.state.attack_state.get("retrain_x", [])) > 0:
+            self._retrain_substitute_from_inverse_queries(self.state)
+            if self.substitute is not None:
+                self.train_phase_3 = True
+                self.state.attack_state["substitute"] = self.substitute
+                self._evaluate_current_substitute(self.substitute, device)
+
     def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
         if self.pool_dataset is None and self.pool_data is None:
             self._load_pool(state)
 
+        total_budget = self._resolve_total_budget(state)
+        phase = self._phase_for_query_count(state.query_count, total_budget)
+        remaining_phase = self._remaining_in_phase(phase, state.query_count, total_budget)
+        k = min(int(k), int(remaining_phase))
+        if k <= 0:
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            x_empty = torch.empty((0, *input_shape))
+            return QueryBatch(x=x_empty, meta={"indices": [], "phase": phase, "status": "phase_exhausted"})
+
         self._update_phase(state)
-        phase = state.attack_state["phase"]
+
+        # Paper: build an initial substitute model after Phase 1 (K1) and use it
+        # to score Phase 2 (K2) samples by confidence (HCSS).
+        if phase >= 2 and not self.train_phase_1:
+            self._train_substitute_from_queries(state)
+            if self.substitute is not None:
+                self.train_phase_1 = True
+                state.attack_state["substitute"] = self.substitute
 
         if phase == 3:
             self._ensure_inversion_trained_for_phase3(state)
@@ -181,6 +216,9 @@ class InverseNet(AttackRunner):
         oracle_output: OracleOutput,
         state: BenchmarkState,
     ) -> None:
+        meta_phase = meta.get("phase") if isinstance(meta, dict) else None
+        phase = int(meta_phase) if meta_phase is not None else int(state.attack_state.get("phase", 1))
+
         if oracle_output.kind == "soft_prob":
             victim_probs = oracle_output.y.detach().cpu()
             query_targets = victim_probs
@@ -189,29 +227,24 @@ class InverseNet(AttackRunner):
             victim_probs = F.one_hot(victim_labels, num_classes=self.num_classes).float()
             query_targets = victim_labels
 
-        self._update_phase(state)
-        phase = state.attack_state["phase"]
-
-        # Phase 3 trains online on current batches; keeping full history is unnecessary.
-        if phase in (1, 2):
+        # Phase 1 (K1): collect labeled coreset samples for initial substitute.
+        if phase == 1:
             state.attack_state["query_data_x"].append(x_query.detach().cpu())
             state.attack_state["query_data_y"].append(query_targets)
 
-        if phase == 2 and not self.train_phase_1:
-            self._train_substitute_from_queries(state)
-            self.train_phase_1 = True
-
+        # Phase 2 (K2): collect (x, trunc1(FV(x))) pairs for training inversion model.
         if phase == 2:
             state.attack_state["inversion_x"].append(x_query.detach().cpu())
             trunc = self._truncate_logits(victim_probs)
             state.attack_state["inversion_y"].append(trunc)
 
+        # Phase 3 (K3): query victim on inversed/augmented samples, then retrain once at the end.
         if phase == 3:
-            if oracle_output.kind == "soft_prob":
-                targets = oracle_output.y
-            else:
-                targets = oracle_output.y.long()
-            self._train_substitute_on_batch(x_query, targets, state)
+            state.attack_state["retrain_x"].append(x_query.detach().cpu())
+            state.attack_state["retrain_y"].append(query_targets)
+
+        # Keep phase metadata up to date for selection/caching purposes.
+        self._update_phase(state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["query_data_x"] = []
@@ -220,6 +253,9 @@ class InverseNet(AttackRunner):
         state.attack_state["val_query_data_y"] = []
         state.attack_state["inversion_x"] = []
         state.attack_state["inversion_y"] = []
+        # Phase-3 (K3) labeled inverse queries for final retraining.
+        state.attack_state["retrain_x"] = []
+        state.attack_state["retrain_y"] = []
         state.attack_state["phase"] = 1
         state.attack_state["substitute"] = None
         state.attack_state["coreset_centers"] = []
@@ -231,6 +267,56 @@ class InverseNet(AttackRunner):
         state.attack_state["hcss_cache"] = None
         state.attack_state["hcss_cache_cursor"] = 0
         state.attack_state["hcss_cache_sub_id"] = None
+
+    def _resolve_total_budget(self, state: BenchmarkState) -> int:
+        total_budget = int(
+            state.metadata.get("max_budget")
+            or self.config.get("max_budget")
+            or self.config.get("total_budget")
+            or 0
+        )
+        if total_budget <= 0:
+            return 10_000
+        return total_budget
+
+    def _phase_boundaries(self, total_budget: int) -> tuple[int, int, int]:
+        """Return (phase1_end, phase2_end, total_budget).
+
+        Phase budgets follow the paper split K1:K2:K3 = 0.45:0.45:0.1.
+        We implement this with integer budgets where Phase 3 receives the remainder
+        to ensure K1+K2+K3 == total_budget.
+        """
+
+        ratios = list(self.phase_ratios) if isinstance(self.phase_ratios, list) else [0.45, 0.45, 0.1]
+        while len(ratios) < 3:
+            ratios.append(0.0)
+
+        p1 = max(0, int(float(ratios[0]) * int(total_budget)))
+        p2 = max(0, int(float(ratios[1]) * int(total_budget)))
+        if p1 + p2 > int(total_budget):
+            p2 = max(0, int(total_budget) - p1)
+
+        phase1_end = p1
+        phase2_end = p1 + p2
+        return int(phase1_end), int(phase2_end), int(total_budget)
+
+    def _phase_for_query_count(self, query_count: int, total_budget: int) -> int:
+        phase1_end, phase2_end, _ = self._phase_boundaries(total_budget)
+        q = int(query_count)
+        if q < int(phase1_end):
+            return 1
+        if q < int(phase2_end):
+            return 2
+        return 3
+
+    def _remaining_in_phase(self, phase: int, query_count: int, total_budget: int) -> int:
+        phase1_end, phase2_end, total = self._phase_boundaries(total_budget)
+        q = int(query_count)
+        if int(phase) == 1:
+            return max(0, int(phase1_end) - q)
+        if int(phase) == 2:
+            return max(0, int(phase2_end) - q)
+        return max(0, int(total) - q)
 
     def _get_dataset_config(self, state: BenchmarkState) -> dict:
         dataset_config = self.config.get("attack", {}).get("dataset")
@@ -310,15 +396,13 @@ class InverseNet(AttackRunner):
 
     def _update_phase(self, state: BenchmarkState) -> None:
         prev_phase = state.attack_state.get("phase")
-        total_budget = int(state.metadata.get("max_budget", 0))
-        if total_budget <= 0:
-            total_budget = int(self.config.get("total_budget", 10000))
+        total_budget = self._resolve_total_budget(state)
+        phase1_end, phase2_end, _total = self._phase_boundaries(total_budget)
 
-        phase1 = int(self.phase_ratios[0] * total_budget)
-        phase2 = int(self.phase_ratios[1] * total_budget)
-        if state.query_count < phase1:
+        q = int(state.query_count)
+        if q < int(phase1_end):
             state.attack_state["phase"] = 1
-        elif state.query_count < phase1 + phase2:
+        elif q < int(phase2_end):
             state.attack_state["phase"] = 2
         else:
             state.attack_state["phase"] = 3
@@ -515,19 +599,11 @@ class InverseNet(AttackRunner):
                         scale=(0.8, 1.0),
                         ratio=(0.9, 1.1),
                     ),
-                    transforms.RandomHorizontalFlip(p=0.5),
                     transforms.RandomRotation(degrees=15),
                     transforms.RandomAffine(
                         degrees=0,
-                        translate=(0.1, 0.1),
                         shear=10,
                         scale=(0.9, 1.1),
-                    ),
-                    transforms.ColorJitter(
-                        brightness=0.2,
-                        contrast=0.2,
-                        saturation=0.2,
-                        hue=0.1,
                     ),
                     transforms.RandomApply([transforms.GaussianBlur(3)], p=0.2),
                     transforms.RandomApply([GaussianNoise(mean=0.0, std=0.05)], p=0.3),
@@ -557,7 +633,6 @@ class InverseNet(AttackRunner):
         return x_mix
 
     def _train_substitute_from_queries(self, state: BenchmarkState) -> None:
-        self._ensure_fixed_validation_holdout(state)
         query_x = state.attack_state["query_data_x"]
         query_y = state.attack_state["query_data_y"]
         val_query_x = state.attack_state.get("val_query_data_x", [])
@@ -675,6 +750,130 @@ class InverseNet(AttackRunner):
         state.attack_state["substitute"] = self.substitute
         self.logger.info("InverseNet substitute trained from queries.")
         self._evaluate_current_substitute(self.substitute, device)
+
+    def _retrain_substitute_from_inverse_queries(self, state: BenchmarkState) -> None:
+        """Paper Phase 4: retrain the initial substitute with inversed data queries.
+
+        InverseNet queries the victim in three phases (K1, K2, K3). Phase 3 (K3)
+        uses inversed/augmented samples; their labeled responses are then used to
+        retrain the initial substitute.
+
+        This implementation follows the paper's "train twice" schedule:
+        - one training pass after Phase 1 (K1)
+        - one retraining pass after Phase 3 (K3)
+        """
+
+        inv_x = state.attack_state.get("retrain_x", [])
+        inv_y = state.attack_state.get("retrain_y", [])
+        if len(inv_x) == 0 or len(inv_y) == 0:
+            return
+
+        # Ensure an initial substitute exists.
+        if self.substitute is None:
+            self._train_substitute_from_queries(state)
+        if self.substitute is None:
+            return
+
+        query_x = state.attack_state.get("query_data_x", [])
+        query_y = state.attack_state.get("query_data_y", [])
+
+        x_batches: List[torch.Tensor] = []
+        y_batches: List[torch.Tensor] = []
+        x_batches.extend([x.detach().cpu() for x in query_x])
+        y_batches.extend([y.detach().cpu() for y in query_y])
+        x_batches.extend([x.detach().cpu() for x in inv_x])
+        y_batches.extend([y.detach().cpu() for y in inv_y])
+        if not x_batches or not y_batches:
+            return
+
+        x_all = torch.cat(x_batches, dim=0)
+        y_all = torch.cat(y_batches, dim=0)
+        dataset = torch.utils.data.TensorDataset(x_all, y_all)
+
+        total_size = int(len(dataset))
+        val_size = max(1, int(0.2 * total_size))
+        train_size = total_size - val_size
+        if train_size < 2:
+            return
+
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            dataset,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42),
+        )
+
+        sub_config = state.metadata.get("substitute_config", {})
+        train_batch_size = int(
+            sub_config.get("batch_size")
+            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+        )
+        device = state.metadata.get("device", "cpu")
+        train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
+        val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
+
+        loader = DataLoader(
+            train_dataset,
+            batch_size=train_batch_size,
+            shuffle=True,
+            **pool_loader_kwargs(device, {"num_workers": int(train_workers)}),
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=train_batch_size,
+            shuffle=False,
+            **pool_loader_kwargs(device, {"num_workers": int(val_workers)}),
+        )
+
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if targets.ndim == 1 or (targets.ndim == 2 and targets.size(1) == 1):
+                return F.cross_entropy(outputs, targets.long().view(-1))
+            log_probs = F.log_softmax(outputs, dim=1)
+            return F.kl_div(log_probs, targets, reduction="batchmean")
+
+        def eval_fn(model_local: nn.Module, loader_local: DataLoader) -> float:
+            model_local.eval()
+            total_loss = 0.0
+            total_count = 0
+            with torch.no_grad():
+                for x_val_b, y_val_b in loader_local:
+                    x_val_b = x_val_b.to(device)
+                    y_val_b = y_val_b.to(device)
+                    outputs = model_local(x_val_b)
+                    if y_val_b.ndim == 1 or (y_val_b.ndim == 2 and y_val_b.size(1) == 1):
+                        loss = F.cross_entropy(outputs, y_val_b.long().view(-1))
+                    else:
+                        loss = F.kl_div(
+                            F.log_softmax(outputs, dim=1),
+                            y_val_b,
+                            reduction="batchmean",
+                        )
+                    total_loss += float(loss.item()) * int(x_val_b.size(0))
+                    total_count += int(x_val_b.size(0))
+            return total_loss / max(1, total_count)
+
+        train_config = dict(sub_config)
+        max_epochs = int(sub_config.get("max_epochs", self.substitute_epochs))
+        patience_epochs = int(sub_config.get("patience", 20))
+        train_config["max_epochs"] = max_epochs
+        train_config["patience"] = patience_epochs
+        trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
+        steps_per_epoch = max(1, int(math.ceil(train_size / max(1, train_batch_size))))
+        request = TrainRequest(
+            model=self.substitute,
+            train_loader=loader,
+            val_loader=val_loader,
+            eval_fn=eval_fn,
+            loss_fn=loss_fn,
+            max_steps=int(max_epochs) * steps_per_epoch,
+            validate_every=steps_per_epoch,
+            patience=int(patience_epochs) * steps_per_epoch,
+            early_stop_mode="min",
+            load_best=True,
+        )
+        trainer.train(request)
+
+        state.attack_state["substitute"] = self.substitute
+        self.logger.info("InverseNet substitute retrained with inversed dataset.")
 
     def _select_phase_indices(self, k: int, state: BenchmarkState, phase: int) -> List[int]:
         pool_len = self._pool_size()
