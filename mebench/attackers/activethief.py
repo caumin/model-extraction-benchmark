@@ -331,7 +331,15 @@ class ActiveThief(AttackRunner):
                 **val_loader_kwargs,
             )
         
+        output_mode = str(self.config.get("output_mode", "soft_prob"))
+
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if output_mode == "soft_prob":
+                targets = targets.to(device)
+                targets = torch.clamp(targets, min=1e-10)
+                targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                log_probs = F.log_softmax(outputs, dim=1)
+                return F.kl_div(log_probs, targets, reduction="batchmean")
             return F.cross_entropy(outputs, targets.long())
 
         # Validation evaluation function
@@ -343,7 +351,12 @@ class ActiveThief(AttackRunner):
                 for x, y in loader:
                     x, y = x.to(device), y.to(device)
                     outputs = model(x)
-                    loss = F.cross_entropy(outputs, y.long())
+                    if output_mode == "soft_prob":
+                        y = torch.clamp(y, min=1e-10)
+                        y = y / y.sum(dim=1, keepdim=True).clamp_min(1e-12)
+                        loss = F.kl_div(F.log_softmax(outputs, dim=1), y, reduction="batchmean")
+                    else:
+                        loss = F.cross_entropy(outputs, y.long())
                     total_loss += loss.item() * x.size(0)
                     total_count += x.size(0)
             return total_loss / total_count if total_count > 0 else float('inf')
@@ -358,6 +371,11 @@ class ActiveThief(AttackRunner):
         sub_config_with_tqdm["use_tqdm"] = True
         
         trainer = SubstituteTrainer(sub_config_with_tqdm, device=device, logger=self.logger)
+        batch_size = max(1, int(train_batch_size))
+        train_size = int(len(train_dataset))
+        steps_per_epoch = max(1, int(math.ceil(train_size / batch_size)))
+        max_epochs = int(sub_config.get("max_epochs", 200))
+        patience_epochs = int(sub_config.get("patience", 20))
         request = TrainRequest(
             model=self.substitute,
             train_loader=labeled_loader,
@@ -365,6 +383,9 @@ class ActiveThief(AttackRunner):
             eval_fn=eval_fn,
             loss_fn=loss_fn,
             load_best=True,
+            max_steps=max_epochs * steps_per_epoch,
+            validate_every=steps_per_epoch,
+            patience=patience_epochs * steps_per_epoch,
             early_stop_mode="min", # minimizing validation loss
         )
         trainer.train(request)
@@ -862,18 +883,23 @@ class ActiveThief(AttackRunner):
         if not indices:
             return
 
+        # Cache queried tensors + oracle outputs.
+        # - soft_prob: store full probability vectors for KL distillation
+        # - hard_top1: store class indices for CE training
         if oracle_output.kind == "soft_prob":
-            labels = oracle_output.y.argmax(dim=1)
+            probs = oracle_output.y.detach().cpu().float()
+            hard_labels = probs.argmax(dim=1)
+            y_cpu = probs
         else:
-            labels = oracle_output.y
+            hard_labels = oracle_output.y.detach().cpu().long()
+            y_cpu = hard_labels
 
-        for idx, label in zip(indices, labels):
+        for idx, label in zip(indices, hard_labels):
             self.observed_labels[int(idx)] = int(label.item())
 
-        # Cache queried tensors + labels. Validation holdout is stored separately.
+        # Cache queried tensors + targets. Validation holdout is stored separately.
         # Store as batches to keep append overhead low.
         x_cpu = query_batch.x.detach().cpu()
-        y_cpu = labels.detach().cpu().long()
         if bool(query_batch.meta.get("is_validation", False)):
             state.attack_state.setdefault("val_query_data_x", []).append(x_cpu)
             state.attack_state.setdefault("val_query_data_y", []).append(y_cpu)
