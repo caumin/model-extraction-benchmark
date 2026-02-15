@@ -868,7 +868,7 @@ class ActiveThief(AttackRunner):
                 )
                 self._evaluate_current_substitute(self.substitute, device)
 
-            state.attack_state["round"] = int(round_id) + 1
+            # Round is already incremented exactly once in _finalize_query_batch().
 
     def observe(
         self, 
