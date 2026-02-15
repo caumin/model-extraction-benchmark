@@ -548,7 +548,8 @@ class ActiveThief(AttackRunner):
         """Select samples using DeepFool Active Learning."""
         device = state.metadata.get("device", "cpu")
         pin_memory = str(device).startswith("cuda")
-        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        attack_cfg = getattr(self, "config", {})
+        pool_workers = resolve_pool_num_workers(attack_cfg, state.metadata.get("dataset_config", {}))
         loader_kwargs = (
             pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
             if pool_workers is not None
@@ -595,11 +596,12 @@ class ActiveThief(AttackRunner):
         """DFAL pre-filtering + K-center selection."""
         device = state.metadata.get("device", "cpu")
         pin_memory = str(device).startswith("cuda")
-        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        attack_cfg = getattr(self, "config", {})
+        pool_workers = resolve_pool_num_workers(attack_cfg, state.metadata.get("dataset_config", {}))
         loader_kwargs = (
             pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
             if pool_workers is not None
-            else pool_loader_kwargs(device, self.config)
+            else pool_loader_kwargs(device, attack_cfg)
         )
         # Pre-filter with DFAL to get rho candidates
         base_rho = self.dfal_rho
@@ -707,6 +709,14 @@ class ActiveThief(AttackRunner):
             )
 
         device = state.metadata.get("device", "cpu")
+        pool_workers = resolve_pool_num_workers(
+            self.config, state.metadata.get("dataset_config", {})
+        )
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device, self.config)
+        )
 
         if self.strategy == "random":
             selected_local = np.random.choice(
