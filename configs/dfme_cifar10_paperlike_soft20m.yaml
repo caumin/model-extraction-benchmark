@@ -15,6 +15,7 @@ victim:
   checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
   output_mode: soft_prob
   temperature: 1.0
+  return_outputs_on_cpu: false
 
 dataset:
   name: CIFAR10

@@ -409,10 +409,11 @@ def generate_configs(
                         }
                         _maybe_add_imagenet_imagefolder_keys(cfg["attack"]["proxy_dataset"])
 
-                    # DFMS-HL is hard-label-only and immediately consumes oracle labels for
-                    # GPU training. Keep oracle outputs on-device to avoid unnecessary
-                    # CPU round-trips while preserving the 1-query=1-image contract.
-                    if attack.name == "dfms":
+                    # DFME/DFMS consume oracle outputs immediately inside GPU training
+                    # loops. Keep oracle outputs on-device to avoid unnecessary
+                    # GPU->CPU->GPU transfers while preserving the 1-query=1-image
+                    # contract.
+                    if attack.name in {"dfms", "dfme"}:
                         cfg["victim"]["return_outputs_on_cpu"] = False
 
                     if attack.name == "blackbox_ripper":

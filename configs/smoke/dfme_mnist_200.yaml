@@ -17,6 +17,7 @@ victim:
   normalization: null
   output_mode: soft_prob
   temperature: 1.0
+  return_outputs_on_cpu: false
 dataset:
   name: MNIST
   data_mode: data_free
