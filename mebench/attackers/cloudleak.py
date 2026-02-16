@@ -338,8 +338,11 @@ class CloudLeak(AttackRunner):
             max_thres = 10.0 / 255.0
         self.epsilon = float(max_thres)
 
-        self.num_rounds = int(config.get("num_rounds", 10))
-        self.initial_pool_size = int(config.get("initial_pool_size", 0))
+        self.num_rounds = int(config.get("iterations", config.get("num_rounds", config.get("rounds", 10))))
+        initial_seed_size = config.get("initial_seed_size")
+        if initial_seed_size is None:
+            initial_seed_size = config.get("initial_pool_size")
+        self.initial_seed_size = int(initial_seed_size) if initial_seed_size is not None else None
         # Paper selection scores the available pool; for benchmark fairness and
         # determinism, we always score the full remaining pool rather than an
         # arbitrary candidate subset.
@@ -378,29 +381,24 @@ class CloudLeak(AttackRunner):
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
-        device = self.state.metadata.get("device", "cpu")
 
         self._ensure_pool_dataset(self.state)
 
-        total_budget = int(
-            self.state.metadata.get("max_budget")
-            or self.config.get("max_budget", ctx.budget_remaining)
-        )
-        round_size = max(1, int(math.ceil(total_budget / max(self.num_rounds, 1))))
-        if self.initial_pool_size <= 0:
-            self.initial_pool_size = max(1, int(0.1 * total_budget))
+        self._bootstrap_seed_and_validation_sets(ctx, self.state)
 
-        pbar = self._create_progress_bar(total_budget, "[CloudLeak] Extracting")
+        active_budget = int(ctx.budget_remaining)
+        if active_budget <= 0:
+            return
+
+        round_size = max(1, int(math.ceil(active_budget / max(self.num_rounds, 1))))
+
+        pbar = self._create_progress_bar(active_budget, "[CloudLeak] Extracting")
         while ctx.budget_remaining > 0:
             pool_indices = self.state.attack_state.get("pool_indices", [])
             if not pool_indices:
                 break
 
-            current_queries = total_budget - ctx.budget_remaining
-            if current_queries == 0:
-                step_size = min(self.initial_pool_size, ctx.budget_remaining, len(pool_indices))
-            else:
-                step_size = min(round_size, ctx.budget_remaining, len(pool_indices))
+            step_size = min(round_size, ctx.budget_remaining, len(pool_indices))
 
             if step_size <= 0:
                 break
@@ -437,6 +435,10 @@ class CloudLeak(AttackRunner):
         state.attack_state.setdefault("query_data_y", [])
         state.attack_state.setdefault("val_query_data_x", [])
         state.attack_state.setdefault("val_query_data_y", [])
+        state.attack_state.setdefault("seed_indices", [])
+        state.attack_state.setdefault("val_indices", [])
+        state.attack_state.setdefault("initial_seed_queried", False)
+        state.attack_state.setdefault("validation_built", False)
         state.attack_state.setdefault("synthetic_indices", [])
         state.attack_state.setdefault("substitute", None)
         state.attack_state.setdefault("round", 0)
@@ -461,6 +463,103 @@ class CloudLeak(AttackRunner):
             state.attack_state["pool_indices"] = [
                 i for i in pool_indices if 0 <= i < len(self.pool_dataset)
             ]
+
+    def _bootstrap_seed_and_validation_sets(self, ctx: BenchmarkContext, state: BenchmarkState) -> None:
+        total_budget = int(
+            state.metadata.get("max_budget")
+            or self.config.get("max_budget", ctx.budget_remaining)
+            or ctx.budget_remaining
+        )
+        seed_target, val_target = self._resolve_seed_and_validation_targets(
+            total_budget=total_budget,
+            default_seed_ratio=0.1,
+            default_validation_ratio=0.2,
+        )
+
+        if self.initial_seed_size is not None:
+            seed_target = int(self.initial_seed_size)
+        else:
+            self.initial_seed_size = int(seed_target)
+
+        device = state.metadata.get("device", "cpu")
+        pool_workers = resolve_pool_num_workers(self.config, state.metadata.get("dataset_config", {}))
+        loader_kwargs = (
+            pool_loader_kwargs(device, {"num_workers": int(pool_workers)})
+            if pool_workers is not None
+            else pool_loader_kwargs(device)
+        )
+
+        if not bool(state.attack_state.get("validation_built", False)) and int(val_target) > 0:
+            pool_indices = state.attack_state.get("pool_indices", [])
+            val_k = min(int(val_target), int(ctx.budget_remaining), len(pool_indices))
+            if val_k > 0:
+                val_indices = np.random.choice(pool_indices, size=val_k, replace=False).tolist()
+                selected_set = set(int(i) for i in val_indices)
+                state.attack_state["pool_indices"] = [i for i in pool_indices if i not in selected_set]
+                state.attack_state["val_indices"] = [int(i) for i in val_indices]
+
+                subset = Subset(self.pool_dataset, state.attack_state["val_indices"])
+                loader = DataLoader(
+                    subset,
+                    batch_size=min(self.batch_size, len(state.attack_state["val_indices"])),
+                    shuffle=False,
+                    **loader_kwargs,
+                )
+                ptr = 0
+                for x_batch, _ in loader:
+                    batch_indices = state.attack_state["val_indices"][ptr : ptr + int(x_batch.size(0))]
+                    ptr += int(x_batch.size(0))
+                    query_batch = QueryBatch(
+                        x=x_batch,
+                        meta={
+                            "indices": batch_indices,
+                            "synthetic": False,
+                            "is_validation": True,
+                            "defer_train": True,
+                        },
+                    )
+                    oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+                    self.observe(query_batch, oracle_output, state)
+            state.attack_state["validation_built"] = True
+
+        queried_seed = False
+        if not bool(state.attack_state.get("initial_seed_queried", False)) and int(seed_target) > 0:
+            pool_indices = state.attack_state.get("pool_indices", [])
+            seed_k = min(int(seed_target), int(ctx.budget_remaining), len(pool_indices))
+            if seed_k > 0:
+                seed_indices = np.random.choice(pool_indices, size=seed_k, replace=False).tolist()
+                selected_set = set(int(i) for i in seed_indices)
+                state.attack_state["pool_indices"] = [i for i in pool_indices if i not in selected_set]
+                state.attack_state["seed_indices"] = [int(i) for i in seed_indices]
+
+                subset = Subset(self.pool_dataset, state.attack_state["seed_indices"])
+                loader = DataLoader(
+                    subset,
+                    batch_size=min(self.batch_size, len(state.attack_state["seed_indices"])),
+                    shuffle=False,
+                    **loader_kwargs,
+                )
+                ptr = 0
+                for x_batch, _ in loader:
+                    batch_indices = state.attack_state["seed_indices"][ptr : ptr + int(x_batch.size(0))]
+                    ptr += int(x_batch.size(0))
+                    query_batch = QueryBatch(
+                        x=x_batch,
+                        meta={
+                            "indices": batch_indices,
+                            "synthetic": False,
+                            "is_validation": False,
+                            "is_seed": True,
+                            "defer_train": True,
+                        },
+                    )
+                    oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+                    self.observe(query_batch, oracle_output, state)
+                    queried_seed = True
+            state.attack_state["initial_seed_queried"] = True
+
+        if queried_seed:
+            self.train_substitute(state)
 
     def _ensure_substitute(self, state: BenchmarkState) -> nn.Module:
         substitute = state.attack_state.get("substitute")
@@ -888,17 +987,28 @@ class CloudLeak(AttackRunner):
         oracle_output: OracleOutput,
         state: BenchmarkState,
     ) -> None:
-        state.attack_state["query_data_x"].append(query_batch.x.cpu())
-        state.attack_state["query_data_y"].append(oracle_output.y.cpu())
+        meta = query_batch.meta or {}
+        x_cpu = query_batch.x.detach().cpu()
+        y_cpu = oracle_output.y.detach().cpu()
 
-        if query_batch.meta.get("synthetic", False):
-            indices = query_batch.meta.get("indices", [])
+        if bool(meta.get("is_validation", False)):
+            state.attack_state["val_query_data_x"].append(x_cpu)
+            state.attack_state["val_query_data_y"].append(y_cpu)
+            return
+
+        state.attack_state["query_data_x"].append(x_cpu)
+        state.attack_state["query_data_y"].append(y_cpu)
+
+        if meta.get("synthetic", False):
+            indices = meta.get("indices", [])
             state.attack_state["synthetic_indices"].extend(indices)
+
+        if bool(meta.get("defer_train", False)):
+            return
 
         self.train_substitute(state)
 
     def train_substitute(self, state: BenchmarkState) -> None:
-        self._ensure_fixed_validation_holdout(state)
         query_data_x = state.attack_state.get("query_data_x", [])
         query_data_y = state.attack_state.get("query_data_y", [])
         val_query_x = state.attack_state.get("val_query_data_x", [])
@@ -927,6 +1037,8 @@ class CloudLeak(AttackRunner):
             total_size = len(dataset)
             val_size = max(1, int(0.2 * total_size))
             train_size = total_size - val_size
+            if train_size < 1:
+                return
 
             train_subset, val_subset = torch.utils.data.random_split(
                 dataset,

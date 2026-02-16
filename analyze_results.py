@@ -2,12 +2,12 @@ import json
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import os
 
 def analyze_results(root_dir="runs", output_dir="analysis_results"):
     print(f"Loading results from {root_dir}...")
     root = Path(root_dir)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    preferred_tracks = ["track_b_unified", "track_b", "track_a"]
     
     final_results = []
     
@@ -19,7 +19,6 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
         if len(parts) < 3: continue
         
         set_id = parts[0]
-        seed_part = parts[-1]
         name_parts = parts[1:-1]
         attack_name = "_".join(name_parts)
         
@@ -36,6 +35,10 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
         # Iterate Seeds
         for seed_dir in latest_run.iterdir():
             if not seed_dir.is_dir() or not seed_dir.name.startswith("seed_"): continue
+            try:
+                seed_value = int(seed_dir.name.replace("seed_", ""))
+            except ValueError:
+                continue
             
             summary_path = seed_dir / "summary.json"
             if not summary_path.exists(): continue
@@ -50,9 +53,8 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
             # Find max budget
             max_cp = max(int(cp) for cp in checkpoints.keys())
             tracks = checkpoints[str(max_cp)]
-            
-            # Prefer track_b
-            track_to_use = "track_b" if "track_b" in tracks else "track_a"
+
+            track_to_use = next((t for t in preferred_tracks if t in tracks), None)
             if track_to_use not in tracks: continue
             
             metrics = tracks[track_to_use]
@@ -60,10 +62,11 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
             final_results.append({
                 "Set": set_id,
                 "Attack": attack_name.upper(),
-                "Seed": int(seed_part.replace("seed", "")),
+                "Seed": seed_value,
+                "Track": track_to_use,
                 "Budget": max_cp, # [ADDED] Track budget
-                "Final_Accuracy": metrics["acc_gt"],
-                "Final_Agreement": metrics["agreement"]
+                "Final_Accuracy": metrics.get("acc_gt", np.nan),
+                "Final_Agreement": metrics.get("agreement", np.nan),
             })
 
     if not final_results:
@@ -72,6 +75,23 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
 
     df = pd.DataFrame(final_results)
     df.to_csv(f"{output_dir}/final_metrics_raw.csv", index=False)
+
+    # Keep a single track per (Set, Attack, Budget):
+    # prefer track_b_unified, then track_b, then track_a.
+    track_rank = {name: i for i, name in enumerate(preferred_tracks)}
+    selected_groups = []
+    for (set_id, attack, budget), group in df.groupby(["Set", "Attack", "Budget"]):
+        tracks_available = sorted(group["Track"].unique(), key=lambda t: track_rank.get(t, 999))
+        selected_track = tracks_available[0]
+        if len(tracks_available) > 1:
+            print(
+                f"[WARN] Mixed tracks for {set_id}/{attack}/{budget}: {tracks_available} -> using {selected_track}"
+            )
+        selected_groups.append(group[group["Track"] == selected_track])
+
+    if selected_groups:
+        df = pd.concat(selected_groups, ignore_index=True)
+    df.to_csv(f"{output_dir}/final_metrics_selected.csv", index=False)
     
     # 2. Aggregate Mean/Std (Safe Explicit Method)
     # Avoid MultiIndex hell by iterating groups explicitly
@@ -79,6 +99,7 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
     
     table_rows = []
     for (set_id, attack, budget), group in grouped:
+        track_label = group["Track"].iloc[0]
         acc_mean = group["Final_Accuracy"].mean()
         acc_std = group["Final_Accuracy"].std()
         agr_mean = group["Final_Agreement"].mean()
@@ -97,6 +118,7 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
             "Set": str(set_id),
             "Attack": str(attack),
             "Budget": int(budget), # Keep budget for filtering
+            "Track": str(track_label),
             "Accuracy": acc_str,
             "Agreement": agr_str
         })
