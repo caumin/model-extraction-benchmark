@@ -7,7 +7,7 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
     print(f"Loading results from {root_dir}...")
     root = Path(root_dir)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    preferred_tracks = ["track_b_unified", "track_b", "track_a"]
+    preferred_tracks = ["track_b", "track_b_unified", "track_a"]
     
     final_results = []
     
@@ -77,7 +77,7 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
     df.to_csv(f"{output_dir}/final_metrics_raw.csv", index=False)
 
     # Keep a single track per (Set, Attack, Budget):
-    # prefer track_b_unified, then track_b, then track_a.
+    # prefer track_b, then track_b_unified, then track_a.
     track_rank = {name: i for i, name in enumerate(preferred_tracks)}
     selected_groups = []
     for (set_id, attack, budget), group in df.groupby(["Set", "Attack", "Budget"]):

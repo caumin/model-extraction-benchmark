@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
 from mebench.core.state import BenchmarkState
 from mebench.core.types import OracleOutput
-from mebench.core.query_storage import QueryStorage
 from mebench.core.logging import ArtifactLogger
 from mebench.oracles.oracle import Oracle
 
@@ -22,15 +21,11 @@ class BenchmarkContext:
         oracle: Oracle,
         logger: Optional[ArtifactLogger] = None,
         config: Optional[Dict[str, Any]] = None,
-        query_storage: Optional[QueryStorage] = None,
-        record_queries: bool = False,
     ) -> None:
         self.state = state
         self.oracle = oracle
         self.logger = logger
         self.config = config or {}
-        self.query_storage = query_storage
-        self.record_queries = record_queries
 
         checkpoints = self.config.get("budget", {}).get("checkpoints", [])
         self.checkpoints = sorted(int(c) for c in checkpoints)
@@ -88,11 +83,6 @@ class BenchmarkContext:
                 print(
                     f"[Query Progress] Used: {self.state.query_count} / Remaining: {self.state.budget_remaining}"
                 )
-
-        if self.record_queries:
-            if self.query_storage is None:
-                raise RuntimeError("record_queries=True requires query_storage.")
-            self.query_storage.add_batch(x, oracle_output.y)
 
         self._maybe_checkpoint()
         return oracle_output
