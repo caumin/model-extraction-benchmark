@@ -105,7 +105,6 @@ def generate_configs(
     substitute_num_workers: int,
     substitute_train_num_workers: Optional[int],
     substitute_val_num_workers: Optional[int],
-    include_paper_mode: bool,
 ) -> int:
     setups = [
         Setup(
@@ -214,10 +213,6 @@ def generate_configs(
             },
         ),
     ]
-
-    # Paper reproduction profiles are generated as additional CIFAR-10 configs
-    # after the default matrix loop so existing SET-A/SET-B behavior remains
-    # unchanged.
 
     if clean:
         _clean_yaml_dir(out_dir)
@@ -435,230 +430,271 @@ def generate_configs(
                     out_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
                     count += 1
 
-    if include_paper_mode:
-        cifar10_setup = next((s for s in setups if s.set_id == "SET-B1"), None)
-        if cifar10_setup is None:
-            raise ValueError("Paper mode requires CIFAR-10 SET-B1 setup")
+    return count
 
-        def _paper_substitute_config(
-            *,
-            arch: str,
-            seed: int,
-            optimizer_lr: float,
-            width_mult: int = 1,
-            scheduler_name: str = "multistep",
-        ) -> Dict[str, Any]:
-            cfg = {
-                "arch": str(arch),
-                "init_seed": 1234 + int(seed),
-                "batch_size": substitute_batch_size,
-                "num_workers": int(substitute_num_workers),
-                "train_num_workers": int(resolved_sub_train_workers),
-                "val_num_workers": int(resolved_sub_val_workers),
-                "trackA": {"batch_size": substitute_batch_size, "steps_coeff_c": 0.2},
-                "optimizer": {
-                    "name": "sgd",
-                    "lr": float(optimizer_lr),
-                    "momentum": 0.9,
-                    "weight_decay": 5e-4,
-                },
-                "max_epochs": unified_substitute_max_epochs,
-                "patience": unified_substitute_patience,
+
+def generate_paperlike_configs(
+    out_dir: Path,
+    device: str,
+    seeds: List[int],
+    clean: bool,
+    pool_num_workers: int,
+    substitute_num_workers: int,
+    substitute_train_num_workers: Optional[int],
+    substitute_val_num_workers: Optional[int],
+) -> int:
+    cifar10_setup = Setup(
+        set_id="SET-B1",
+        victim_dataset="CIFAR10",
+        victim_arch="resnet18",
+        surrogate_name="ImageNet",
+        substitute_arch="resnet18",
+        channels=3,
+        size=32,
+        num_classes=10,
+    )
+
+    if clean:
+        _clean_yaml_dir(out_dir)
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    protocol_version = "1.3"
+    substitute_batch_size = 128
+    unified_substitute_max_epochs = 200
+    unified_substitute_patience = 20
+
+    resolved_sub_train_workers = (
+        int(substitute_train_num_workers)
+        if substitute_train_num_workers is not None
+        else int(substitute_num_workers)
+    )
+    resolved_sub_val_workers = (
+        int(substitute_val_num_workers)
+        if substitute_val_num_workers is not None
+        else int(substitute_num_workers)
+    )
+
+    def _paper_substitute_config(
+        *,
+        arch: str,
+        seed: int,
+        optimizer_lr: float,
+        width_mult: int = 1,
+        scheduler_name: str = "multistep",
+    ) -> Dict[str, Any]:
+        cfg = {
+            "arch": str(arch),
+            "init_seed": 1234 + int(seed),
+            "batch_size": substitute_batch_size,
+            "num_workers": int(substitute_num_workers),
+            "train_num_workers": int(resolved_sub_train_workers),
+            "val_num_workers": int(resolved_sub_val_workers),
+            "trackA": {"batch_size": substitute_batch_size, "steps_coeff_c": 0.2},
+            "optimizer": {
+                "name": "sgd",
+                "lr": float(optimizer_lr),
+                "momentum": 0.9,
+                "weight_decay": 5e-4,
+            },
+            "max_epochs": unified_substitute_max_epochs,
+            "patience": unified_substitute_patience,
+        }
+        if int(width_mult) != 1:
+            cfg["width_mult"] = int(width_mult)
+
+        if scheduler_name == "cosine":
+            cfg["scheduler"] = {"name": "cosine", "t_max_epochs": unified_substitute_max_epochs}
+        else:
+            cfg["scheduler"] = {
+                "name": "multistep",
+                "milestones_ratio": [0.5, 0.75],
+                "gamma": 0.1,
             }
-            if int(width_mult) != 1:
-                cfg["width_mult"] = int(width_mult)
+        return cfg
 
-            if scheduler_name == "cosine":
-                cfg["scheduler"] = {"name": "cosine", "t_max_epochs": unified_substitute_max_epochs}
-            else:
-                cfg["scheduler"] = {
-                    "name": "multistep",
-                    "milestones_ratio": [0.5, 0.75],
-                    "gamma": 0.1,
-                }
-            return cfg
+    def _paper_base_config(
+        *,
+        run_name: str,
+        seed: int,
+        victim_arch: str,
+        victim_output_mode: str,
+        max_budget: int,
+        attack_cfg: Dict[str, Any],
+        substitute_cfg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        cfg: Dict[str, Any] = {
+            "run": {"name": run_name, "seeds": [int(seed)], "device": device},
+            "benchmark": {"protocol_version": protocol_version},
+            "victim": {
+                "victim_id": f"cifar10_{victim_arch}",
+                "arch": str(victim_arch),
+                "channels": cifar10_setup.channels,
+                "num_classes": cifar10_setup.num_classes,
+                "input_size": [cifar10_setup.size, cifar10_setup.size],
+                "checkpoint_ref": f"runs/victims/cifar10_{victim_arch}_seed0.pt",
+                "normalization": None,
+                "output_mode": victim_output_mode,
+                "temperature": 1.0,
+            },
+            "dataset": {
+                "name": cifar10_setup.victim_dataset,
+                "data_mode": "data_free",
+                "surrogate_name": cifar10_setup.surrogate_name,
+                "num_workers": int(pool_num_workers),
+                "train_split": True,
+                "channels": cifar10_setup.channels,
+                "input_size": [cifar10_setup.size, cifar10_setup.size],
+            },
+            "attack": dict(attack_cfg),
+            "substitute": dict(substitute_cfg),
+            "budget": {"max_budget": int(max_budget), "checkpoints": _checkpoints_for_budget(int(max_budget))},
+            "cache": {
+                "enabled": True,
+                "policy": "temporary",
+                "delete_on_finish": True,
+            },
+        }
+        return cfg
 
-        def _paper_base_config(
-            *,
-            run_name: str,
-            seed: int,
-            victim_arch: str,
-            victim_output_mode: str,
-            max_budget: int,
-            attack_cfg: Dict[str, Any],
-            substitute_cfg: Dict[str, Any],
-        ) -> Dict[str, Any]:
-            cfg: Dict[str, Any] = {
-                "run": {"name": run_name, "seeds": [int(seed)], "device": device},
-                "benchmark": {"protocol_version": protocol_version},
-                "victim": {
-                    "victim_id": f"cifar10_{victim_arch}",
-                    "arch": str(victim_arch),
-                    "channels": cifar10_setup.channels,
-                    "num_classes": cifar10_setup.num_classes,
-                    "input_size": [cifar10_setup.size, cifar10_setup.size],
-                    "checkpoint_ref": f"runs/victims/cifar10_{victim_arch}_seed0.pt",
-                    "normalization": None,
-                    "output_mode": victim_output_mode,
-                    "temperature": 1.0,
-                },
-                "dataset": {
-                    "name": cifar10_setup.victim_dataset,
-                    "data_mode": "data_free",
-                    "surrogate_name": cifar10_setup.surrogate_name,
-                    "num_workers": int(pool_num_workers),
-                    "train_split": True,
-                    "channels": cifar10_setup.channels,
-                    "input_size": [cifar10_setup.size, cifar10_setup.size],
-                },
-                "attack": dict(attack_cfg),
-                "substitute": dict(substitute_cfg),
-                "budget": {"max_budget": int(max_budget), "checkpoints": _checkpoints_for_budget(int(max_budget))},
-                "cache": {
-                    "enabled": True,
-                    "policy": "temporary",
-                    "delete_on_finish": True,
-                },
+    count = 0
+    for seed in seeds:
+        # MAZE paper-like profile (CIFAR-10):
+        # - victim: ResNet-18 (reuse existing CIFAR-10 victim checkpoints)
+        # - clone: WideResNet-22
+        # - budget: 30M
+        # - B=128, NG=1, NC=5, NR=10, m=10
+        maze_budget = 30_000_000
+        maze_run_name = f"{cifar10_setup.set_id}_maze_paper_soft_{_budget_suffix(maze_budget)}_seed{seed}"
+        maze_attack = {
+            "name": "maze",
+            "output_mode": "soft_prob",
+            "max_budget": int(maze_budget),
+            "pool_num_workers": int(pool_num_workers),
+            "batch_size": 128,
+            "n_g_steps": 1,
+            "n_c_steps": 5,
+            "n_r_steps": 10,
+            "grad_approx_m": 10,
+            "grad_approx_epsilon": 1e-3,
+            "generator_lr": 1e-4,
+            "generator_momentum": 0.0,
+            "lr_schedule": "cosine",
+        }
+        maze_substitute = _paper_substitute_config(
+            arch="wideresnet22",
+            width_mult=2,
+            seed=int(seed),
+            optimizer_lr=0.1,
+            scheduler_name="cosine",
+        )
+        maze_cfg = _paper_base_config(
+            run_name=maze_run_name,
+            seed=int(seed),
+            victim_arch="resnet18",
+            victim_output_mode="soft_prob",
+            max_budget=int(maze_budget),
+            attack_cfg=maze_attack,
+            substitute_cfg=maze_substitute,
+        )
+        (out_dir / f"{maze_run_name}.yaml").write_text(
+            yaml.safe_dump(maze_cfg, sort_keys=False),
+            encoding="utf-8",
+        )
+        count += 1
+
+        # DFMS-HL paper-like profile (CIFAR-10 hard-label):
+        # - budget: 8M
+        # - proxy variants: CIFAR100(40 classes), CIFAR100(10 classes)
+        # - compare setting with ResNet-34 victim and ResNet-18 clone
+        dfms_budget = 8_000_000
+        dfms_profiles = [
+            {
+                "variant": "c100_40c_resnet18",
+                "victim_arch": "resnet18",
+                "substitute_arch": "resnet18",
+                "surrogate_class_subset_size": 40,
+            },
+            {
+                "variant": "c100_10c_resnet18",
+                "victim_arch": "resnet18",
+                "substitute_arch": "resnet18",
+                "surrogate_class_subset_size": 10,
+            },
+            {
+                "variant": "c100_40c_resnet34",
+                "victim_arch": "resnet34",
+                "substitute_arch": "resnet18",
+                "surrogate_class_subset_size": 40,
+            },
+        ]
+
+        for profile in dfms_profiles:
+            run_name = (
+                f"{cifar10_setup.set_id}_dfms_paper_{profile['variant']}_hard_"
+                f"{_budget_suffix(dfms_budget)}_seed{seed}"
+            )
+            proxy_cfg = {
+                "name": "CIFAR10",
+                "data_mode": "surrogate",
+                "surrogate_name": "CIFAR100",
+                "num_workers": int(pool_num_workers),
+                "train_split": True,
+                "channels": cifar10_setup.channels,
+                "input_size": [cifar10_setup.size, cifar10_setup.size],
+                "surrogate_class_subset_size": int(profile["surrogate_class_subset_size"]),
+                "surrogate_class_subset_seed": 42,
+                "surrogate_max_samples": 50_000,
+                "surrogate_subset_seed": 42,
             }
-            return cfg
-
-        for seed in seeds:
-            # MAZE paper-profile (CIFAR-10):
-            # - victim: ResNet-18 (reuse existing CIFAR-10 victim checkpoints)
-            # - clone: WideResNet-22
-            # - budget: 30M
-            # - B=128, NG=1, NC=5, NR=10, m=10
-            maze_budget = 30_000_000
-            maze_run_name = f"{cifar10_setup.set_id}_maze_paper_soft_{_budget_suffix(maze_budget)}_seed{seed}"
-            maze_attack = {
-                "name": "maze",
-                "output_mode": "soft_prob",
-                "max_budget": int(maze_budget),
+            dfms_attack = {
+                "name": "dfms",
+                "output_mode": "hard_top1",
+                "max_budget": int(dfms_budget),
                 "pool_num_workers": int(pool_num_workers),
-                "batch_size": 128,
-                "n_g_steps": 1,
-                "n_c_steps": 5,
-                "n_r_steps": 10,
-                "grad_approx_m": 10,
-                "grad_approx_epsilon": 1e-3,
-                "generator_lr": 1e-4,
-                "generator_momentum": 0.0,
-                "lr_schedule": "cosine",
+                "batch_size": 64,
+                "oracle_batch_size": 64,
+                "use_official_stages": True,
+                "dcgan_epochs": 200,
+                "student_init_epochs": 200,
+                "degan_epochs": 100,
+                "student_degan_epochs": 200,
+                "alternate_epochs": 800,
+                "student_init_lr": 0.1,
+                "student_alt_lr": 0.01,
+                "clone_lr": 0.01,
+                "generator_lr": 2e-4,
+                "discriminator_lr": 2e-4,
+                "student_batch_size": 128,
+                "proxy_data_ratio": 1.0,
+                "dcgan_data_ratio": 0.8,
+                "div_gan_data_ratio": 0.8,
+                "student_pad_crop": True,
+                "alternate_pad_crop": False,
+                "proxy_dataset": proxy_cfg,
             }
-            maze_substitute = _paper_substitute_config(
-                arch="wideresnet22",
-                width_mult=2,
+            dfms_substitute = _paper_substitute_config(
+                arch=str(profile["substitute_arch"]),
                 seed=int(seed),
-                optimizer_lr=0.1,
-                scheduler_name="cosine",
+                optimizer_lr=0.01,
+                scheduler_name="multistep",
             )
-            maze_cfg = _paper_base_config(
-                run_name=maze_run_name,
+            dfms_cfg = _paper_base_config(
+                run_name=run_name,
                 seed=int(seed),
-                victim_arch="resnet18",
-                victim_output_mode="soft_prob",
-                max_budget=int(maze_budget),
-                attack_cfg=maze_attack,
-                substitute_cfg=maze_substitute,
+                victim_arch=str(profile["victim_arch"]),
+                victim_output_mode="hard_top1",
+                max_budget=int(dfms_budget),
+                attack_cfg=dfms_attack,
+                substitute_cfg=dfms_substitute,
             )
-            (out_dir / f"{maze_run_name}.yaml").write_text(
-                yaml.safe_dump(maze_cfg, sort_keys=False),
+            dfms_cfg["victim"]["return_outputs_on_cpu"] = False
+
+            (out_dir / f"{run_name}.yaml").write_text(
+                yaml.safe_dump(dfms_cfg, sort_keys=False),
                 encoding="utf-8",
             )
             count += 1
-
-            # DFMS-HL paper-profile (CIFAR-10 hard-label):
-            # - budget: 8M
-            # - proxy variants: CIFAR100(40 classes), CIFAR100(10 classes)
-            # - compare setting with ResNet-34 victim and ResNet-18 clone
-            dfms_budget = 8_000_000
-            dfms_profiles = [
-                {
-                    "variant": "c100_40c_resnet18",
-                    "victim_arch": "resnet18",
-                    "substitute_arch": "resnet18",
-                    "surrogate_class_subset_size": 40,
-                },
-                {
-                    "variant": "c100_10c_resnet18",
-                    "victim_arch": "resnet18",
-                    "substitute_arch": "resnet18",
-                    "surrogate_class_subset_size": 10,
-                },
-                {
-                    "variant": "c100_40c_resnet34",
-                    "victim_arch": "resnet34",
-                    "substitute_arch": "resnet18",
-                    "surrogate_class_subset_size": 40,
-                },
-            ]
-
-            for profile in dfms_profiles:
-                run_name = (
-                    f"{cifar10_setup.set_id}_dfms_paper_{profile['variant']}_hard_"
-                    f"{_budget_suffix(dfms_budget)}_seed{seed}"
-                )
-                proxy_cfg = {
-                    "name": "CIFAR10",
-                    "data_mode": "surrogate",
-                    "surrogate_name": "CIFAR100",
-                    "num_workers": int(pool_num_workers),
-                    "train_split": True,
-                    "channels": cifar10_setup.channels,
-                    "input_size": [cifar10_setup.size, cifar10_setup.size],
-                    "surrogate_class_subset_size": int(profile["surrogate_class_subset_size"]),
-                    "surrogate_class_subset_seed": 42,
-                    "surrogate_max_samples": 50_000,
-                    "surrogate_subset_seed": 42,
-                }
-                dfms_attack = {
-                    "name": "dfms",
-                    "output_mode": "hard_top1",
-                    "max_budget": int(dfms_budget),
-                    "pool_num_workers": int(pool_num_workers),
-                    "batch_size": 64,
-                    "oracle_batch_size": 64,
-                    "use_official_stages": True,
-                    "dcgan_epochs": 200,
-                    "student_init_epochs": 200,
-                    "degan_epochs": 100,
-                    "student_degan_epochs": 200,
-                    "alternate_epochs": 800,
-                    "student_init_lr": 0.1,
-                    "student_alt_lr": 0.01,
-                    "clone_lr": 0.01,
-                    "generator_lr": 2e-4,
-                    "discriminator_lr": 2e-4,
-                    "student_batch_size": 128,
-                    "proxy_data_ratio": 1.0,
-                    "dcgan_data_ratio": 0.8,
-                    "div_gan_data_ratio": 0.8,
-                    "student_pad_crop": True,
-                    "alternate_pad_crop": False,
-                    "proxy_dataset": proxy_cfg,
-                }
-                dfms_substitute = _paper_substitute_config(
-                    arch=str(profile["substitute_arch"]),
-                    seed=int(seed),
-                    optimizer_lr=0.01,
-                    scheduler_name="multistep",
-                )
-                dfms_cfg = _paper_base_config(
-                    run_name=run_name,
-                    seed=int(seed),
-                    victim_arch=str(profile["victim_arch"]),
-                    victim_output_mode="hard_top1",
-                    max_budget=int(dfms_budget),
-                    attack_cfg=dfms_attack,
-                    substitute_cfg=dfms_substitute,
-                )
-                dfms_cfg["victim"]["return_outputs_on_cpu"] = False
-
-                (out_dir / f"{run_name}.yaml").write_text(
-                    yaml.safe_dump(dfms_cfg, sort_keys=False),
-                    encoding="utf-8",
-                )
-                count += 1
 
     return count
 
@@ -704,11 +740,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         default=None,
         help="Override substitute val loader workers (defaults to --substitute-num-workers)",
     )
-    parser.add_argument(
-        "--include-paper-mode",
-        action="store_true",
-        help="Generate additional paper-profile variants for MAZE/DFMS (without replacing defaults)",
-    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     out_dir = Path(args.out)
@@ -732,7 +763,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             if args.substitute_val_num_workers is not None
             else None
         ),
-        include_paper_mode=bool(args.include_paper_mode),
     )
     print(f"Generated {count} configs in {out_dir}")
     return 0
