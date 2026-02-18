@@ -219,13 +219,12 @@ class InverseNet(AttackRunner):
         meta_phase = meta.get("phase") if isinstance(meta, dict) else None
         phase = int(meta_phase) if meta_phase is not None else int(state.attack_state.get("phase", 1))
 
-        if oracle_output.kind == "soft_prob":
-            victim_probs = oracle_output.y.detach().cpu()
-            query_targets = victim_probs
-        else:
-            victim_labels = oracle_output.y.detach().cpu().long()
-            victim_probs = F.one_hot(victim_labels, num_classes=self.num_classes).float()
-            query_targets = victim_labels
+        if oracle_output.kind != "hard_top1":
+            raise ValueError("InverseNet requires hard_top1 oracle outputs.")
+
+        victim_labels = oracle_output.y.detach().cpu().long()
+        victim_probs = F.one_hot(victim_labels, num_classes=self.num_classes).float()
+        query_targets = victim_labels
 
         # Phase 1 (K1): collect labeled coreset samples for initial substitute.
         if phase == 1:
@@ -635,8 +634,6 @@ class InverseNet(AttackRunner):
     def _train_substitute_from_queries(self, state: BenchmarkState) -> None:
         query_x = state.attack_state["query_data_x"]
         query_y = state.attack_state["query_data_y"]
-        val_query_x = state.attack_state.get("val_query_data_x", [])
-        val_query_y = state.attack_state.get("val_query_data_y", [])
         if len(query_x) == 0:
             return
 
@@ -651,22 +648,10 @@ class InverseNet(AttackRunner):
         )
 
         train_dataset = dataset
-        if len(val_query_x) > 0 and len(val_query_y) > 0:
-            x_val = torch.cat(val_query_x, dim=0)
-            y_val = torch.cat(val_query_y, dim=0)
-            val_dataset = torch.utils.data.TensorDataset(x_val, y_val)
-            train_size = len(train_dataset)
-        else:
-            total_size = len(dataset)
-            val_size = max(1, int(0.2 * total_size))
-            train_size = total_size - val_size
-            if train_size < 2:
-                return
-            train_dataset, val_dataset = torch.utils.data.random_split(
-                dataset,
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(42),
-            )
+        val_dataset = dataset
+        train_size = len(train_dataset)
+        if train_size < 2:
+            return
 
         device = state.metadata.get("device", "cpu")
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
@@ -774,33 +759,15 @@ class InverseNet(AttackRunner):
         if self.substitute is None:
             return
 
-        query_x = state.attack_state.get("query_data_x", [])
-        query_y = state.attack_state.get("query_data_y", [])
-
-        x_batches: List[torch.Tensor] = []
-        y_batches: List[torch.Tensor] = []
-        x_batches.extend([x.detach().cpu() for x in query_x])
-        y_batches.extend([y.detach().cpu() for y in query_y])
-        x_batches.extend([x.detach().cpu() for x in inv_x])
-        y_batches.extend([y.detach().cpu() for y in inv_y])
-        if not x_batches or not y_batches:
-            return
-
-        x_all = torch.cat(x_batches, dim=0)
-        y_all = torch.cat(y_batches, dim=0)
+        x_all = torch.cat([x.detach().cpu() for x in inv_x], dim=0)
+        y_all = torch.cat([y.detach().cpu() for y in inv_y], dim=0)
         dataset = torch.utils.data.TensorDataset(x_all, y_all)
 
-        total_size = int(len(dataset))
-        val_size = max(1, int(0.2 * total_size))
-        train_size = total_size - val_size
+        train_size = int(len(dataset))
         if train_size < 2:
             return
-
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42),
-        )
+        train_dataset = dataset
+        val_dataset = dataset
 
         sub_config = state.metadata.get("substitute_config", {})
         train_batch_size = int(
