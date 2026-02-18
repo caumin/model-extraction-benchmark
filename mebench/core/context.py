@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 
@@ -21,11 +21,13 @@ class BenchmarkContext:
         oracle: Oracle,
         logger: Optional[ArtifactLogger] = None,
         config: Optional[Dict[str, Any]] = None,
+        checkpoint_callback: Optional[Callable[[int], None]] = None,
     ) -> None:
         self.state = state
         self.oracle = oracle
         self.logger = logger
         self.config = config or {}
+        self._checkpoint_callback = checkpoint_callback
 
         checkpoints = self.config.get("budget", {}).get("checkpoints", [])
         self.checkpoints = sorted(int(c) for c in checkpoints)
@@ -103,6 +105,8 @@ class BenchmarkContext:
 
     def on_checkpoint(self, query_count: int) -> None:
         self.log_event("checkpoint_reached", {"checkpoint": int(query_count)})
+        if self._checkpoint_callback is not None:
+            self._checkpoint_callback(int(query_count))
 
     def _maybe_checkpoint(self) -> None:
         if not self.checkpoints:

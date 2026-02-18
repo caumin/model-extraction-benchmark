@@ -130,6 +130,8 @@ def run_experiment(
 
         # Load victim model from checkpoint or placeholder
         victim = load_victim_from_config(config["victim"], device)
+        victim_ref = str(config.get("victim", {}).get("checkpoint_ref") or "")
+        is_placeholder_victim = victim_ref == "" or victim_ref == "/path/to/ckpt.pt"
 
         # Optional: verify victim accuracy on the public test set.
         # Disabled by default to avoid accidental dataset downloads in CI/unit tests.
@@ -157,11 +159,41 @@ def run_experiment(
         # Initialize attack
         attack = create_runner(config["attack"]["name"], config, state)
 
+        evaluated_track_b_checkpoints = set()
+
+        def _evaluate_track_b_once(query_count: int) -> None:
+            if is_placeholder_victim:
+                return
+
+            q = int(query_count)
+            if q in evaluated_track_b_checkpoints:
+                return
+
+            substitute_at_checkpoint = state.attack_state.get("substitute")
+            if substitute_at_checkpoint is None:
+                return
+
+            # Ensure victim is attached for metric computation.
+            if attack.victim is None:
+                attack.victim = victim
+
+            attack._evaluate_current_substitute(
+                substitute_at_checkpoint,
+                device,
+                track="track_b",
+                query_count=q,
+            )
+            evaluated_track_b_checkpoints.add(q)
+
+        data_mode = str(config.get("dataset", {}).get("data_mode", "")).lower()
+        should_eval_track_b_on_checkpoint = data_mode == "data_free"
+
         ctx = BenchmarkContext(
             state=state,
             oracle=oracle,
             logger=logger,
             config=config,
+            checkpoint_callback=(_evaluate_track_b_once if should_eval_track_b_on_checkpoint else None),
         )
         
         # [ADDED] Inject context into attack runner for metric logging
@@ -171,15 +203,14 @@ def run_experiment(
         attack.run(ctx)
 
         # FINAL EVALUATION for Track B
-        # Skip evaluation for placeholder victims used by unit tests.
-        victim_ref = str(config.get("victim", {}).get("checkpoint_ref") or "")
-        is_placeholder_victim = victim_ref == "" or victim_ref == "/path/to/ckpt.pt"
         substitute = state.attack_state.get("substitute")
         if substitute is not None and not is_placeholder_victim:
-            # Ensure victim is set in case run() finished early or skipped it
-            if attack.victim is None:
-                attack.victim = victim
-            attack._evaluate_current_substitute(substitute, device, track="track_b")
+            reached_checkpoints = [
+                int(cp) for cp in state.attack_state.get("checkpoint_reached", [])
+            ]
+            for checkpoint in reached_checkpoints:
+                _evaluate_track_b_once(int(checkpoint))
+            _evaluate_track_b_once(state.query_count)
 
         print("\nAttack run complete!")
 
