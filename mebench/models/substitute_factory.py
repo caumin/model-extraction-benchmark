@@ -91,10 +91,12 @@ class ResNet(nn.Module):
         width_mult: int = 1,
         input_channels: int = 3,
         dropout_prob: float = 0.0,
+        layers: Optional[tuple[int, int, int, int]] = None,
     ) -> None:
         super().__init__()
         self.width_mult = int(width_mult)
         self.dropout_prob = float(dropout_prob)
+        block_layers = layers or (2, 2, 2, 2)
 
         if self.width_mult <= 0:
             raise ValueError(f"width_mult must be >= 1, got {self.width_mult}")
@@ -106,10 +108,10 @@ class ResNet(nn.Module):
         self.bn1 = nn.BatchNorm2d(stem_width)
         self.relu = nn.ReLU(inplace=True)
 
-        self.layer1 = self._make_layer(64 * self.width_mult, blocks=2, stride=1)
-        self.layer2 = self._make_layer(128 * self.width_mult, blocks=2, stride=2)
-        self.layer3 = self._make_layer(256 * self.width_mult, blocks=2, stride=2)
-        self.layer4 = self._make_layer(512 * self.width_mult, blocks=2, stride=2)
+        self.layer1 = self._make_layer(64 * self.width_mult, blocks=int(block_layers[0]), stride=1)
+        self.layer2 = self._make_layer(128 * self.width_mult, blocks=int(block_layers[1]), stride=2)
+        self.layer3 = self._make_layer(256 * self.width_mult, blocks=int(block_layers[2]), stride=2)
+        self.layer4 = self._make_layer(512 * self.width_mult, blocks=int(block_layers[3]), stride=2)
 
         self.dropout = nn.Dropout2d(self.dropout_prob) if self.dropout_prob > 0 else nn.Identity()
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
@@ -154,6 +156,178 @@ class ResNet(nn.Module):
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.fc(x)
+        return x
+
+
+class ResNet20CIFAR(nn.Module):
+    """CIFAR-style ResNet-20 (6n+2 with n=3)."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 3,
+        width_mult: int = 1,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        base = 16 * int(width_mult)
+        self.inplanes = base
+        self.dropout = nn.Dropout2d(float(dropout_prob)) if float(dropout_prob) > 0 else nn.Identity()
+
+        self.conv1 = _conv3x3(int(input_channels), base, stride=1)
+        self.bn1 = nn.BatchNorm2d(base)
+        self.relu = nn.ReLU(inplace=True)
+
+        self.layer1 = self._make_layer(base, blocks=3, stride=1)
+        self.layer2 = self._make_layer(base * 2, blocks=3, stride=2)
+        self.layer3 = self._make_layer(base * 4, blocks=3, stride=2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(base * 4, int(num_classes))
+
+    def _make_layer(self, planes: int, blocks: int, stride: int) -> nn.Module:
+        downsample = None
+        if stride != 1 or self.inplanes != planes:
+            downsample = nn.Sequential(
+                _conv1x1(self.inplanes, planes, stride=stride),
+                nn.BatchNorm2d(planes),
+            )
+
+        layers = [BasicBlock(self.inplanes, planes, stride=stride, downsample=downsample)]
+        self.inplanes = planes
+        for _ in range(1, int(blocks)):
+            layers.append(BasicBlock(self.inplanes, planes, stride=1, downsample=None))
+        return nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+
+        x = self.layer1(x)
+        x = self.dropout(x)
+        x = self.layer2(x)
+        x = self.dropout(x)
+        x = self.layer3(x)
+        x = self.dropout(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+
+
+class WideBasicBlock(nn.Module):
+    """WideResNet basic block for CIFAR-style networks."""
+
+    def __init__(self, in_planes: int, out_planes: int, stride: int, dropout_prob: float) -> None:
+        super().__init__()
+        self.bn1 = nn.BatchNorm2d(in_planes)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv1 = _conv3x3(in_planes, out_planes, stride=stride)
+        self.bn2 = nn.BatchNorm2d(out_planes)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout2d(float(dropout_prob)) if float(dropout_prob) > 0 else nn.Identity()
+        self.conv2 = _conv3x3(out_planes, out_planes, stride=1)
+        self.shortcut = (
+            _conv1x1(in_planes, out_planes, stride=stride)
+            if (stride != 1 or in_planes != out_planes)
+            else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.relu1(self.bn1(x))
+        out = self.conv1(out)
+        out = self.relu2(self.bn2(out))
+        out = self.dropout(out)
+        out = self.conv2(out)
+        return out + self.shortcut(x)
+
+
+class WideResNet22CIFAR(nn.Module):
+    """WideResNet-22 for CIFAR-style inputs (depth=22 => n=3)."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 3,
+        width_mult: int = 2,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.n = 3
+        self.k = int(width_mult)
+        if self.k <= 0:
+            raise ValueError(f"wideresnet22 width_mult must be >= 1, got {self.k}")
+
+        widths = [16, 16 * self.k, 32 * self.k, 64 * self.k]
+        self.in_planes = widths[0]
+
+        self.conv1 = _conv3x3(int(input_channels), widths[0], stride=1)
+        self.block1 = self._make_group(widths[1], stride=1, dropout_prob=float(dropout_prob))
+        self.block2 = self._make_group(widths[2], stride=2, dropout_prob=float(dropout_prob))
+        self.block3 = self._make_group(widths[3], stride=2, dropout_prob=float(dropout_prob))
+        self.bn = nn.BatchNorm2d(widths[3])
+        self.relu = nn.ReLU(inplace=True)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(widths[3], int(num_classes))
+
+    def _make_group(self, out_planes: int, stride: int, dropout_prob: float) -> nn.Module:
+        layers = [WideBasicBlock(self.in_planes, out_planes, stride=stride, dropout_prob=dropout_prob)]
+        self.in_planes = out_planes
+        for _ in range(1, int(self.n)):
+            layers.append(WideBasicBlock(self.in_planes, out_planes, stride=1, dropout_prob=dropout_prob))
+        return nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.relu(self.bn(x))
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+
+
+class AlexNetHalf(nn.Module):
+    """AlexNet-half style model for CIFAR-sized inputs."""
+
+    def __init__(self, num_classes: int, input_channels: int = 3, dropout_prob: float = 0.5) -> None:
+        super().__init__()
+        p = float(dropout_prob)
+        self.features = nn.Sequential(
+            nn.Conv2d(int(input_channels), 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(32, 96, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(96, 192, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(192, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((4, 4))
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=p),
+            nn.Linear(128 * 4 * 4, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=p),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, int(num_classes)),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
         return x
 
 
@@ -346,7 +520,31 @@ def create_substitute(
             num_classes=num_classes,
             input_channels=input_channels,
             width_mult=width_mult,
-            dropout_prob=dropout_prob
+            dropout_prob=dropout_prob,
+            layers=(2, 2, 2, 2),
+        )
+    elif arch == "resnet34":
+        _require_torchvision_3ch_input("resnet34", input_channels)
+        return ResNet(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
+            layers=(3, 4, 6, 3),
+        )
+    elif arch == "resnet20":
+        return ResNet20CIFAR(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
+        )
+    elif arch in {"wideresnet22", "wrn22", "wideresnet-22"}:
+        return WideResNet22CIFAR(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
         )
     elif arch == "alexnet":
         _require_torchvision_3ch_input("alexnet", input_channels)
@@ -355,6 +553,12 @@ def create_substitute(
         if float(dropout_prob) != 0.0:
             raise ValueError("Torchvision alexnet does not support dropout_prob override; use dropout_prob=0.0")
         return models.alexnet(weights=None, num_classes=int(num_classes))
+    elif arch in {"alexnet_half", "alexnet-half"}:
+        return AlexNetHalf(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            dropout_prob=(dropout_prob if float(dropout_prob) > 0 else 0.5),
+        )
     elif arch == "resnet18-8x":
         raise ValueError("resnet18-8x is not supported in torchvision mode; use resnet18")
     elif arch == "lenet":
@@ -385,8 +589,24 @@ def get_model_info(arch: str) -> Dict[str, Any]:
             "num_params": 11181642,  # torchvision resnet18 (num_classes=10)
             "default_width": 1,
         },
+        "resnet34": {
+            "num_params": 21289802,
+            "default_width": 1,
+        },
+        "resnet20": {
+            "num_params": 272474,
+            "default_width": 1,
+        },
+        "wideresnet22": {
+            "num_params": 0,  # depends on width_mult
+            "default_width": 2,
+        },
         "alexnet": {
             "num_params": 57044810,  # torchvision alexnet (num_classes=10)
+            "default_width": 1,
+        },
+        "alexnet_half": {
+            "num_params": 0,
             "default_width": 1,
         },
         "lenet": {

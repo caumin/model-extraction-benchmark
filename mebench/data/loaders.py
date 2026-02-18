@@ -194,6 +194,8 @@ class SurrogateDataset(Dataset):
         max_samples: int = 0,
         subset_seed: int = 42,
         output_channels: Optional[int] = None,
+        class_subset_size: int = 0,
+        class_subset_seed: int = 42,
     ):
         """Initialize surrogate dataset.
 
@@ -258,6 +260,37 @@ class SurrogateDataset(Dataset):
                 download=True,
                 transform=transform,
             )
+        elif surrogate_name == "CIFAR100":
+            tf = []
+            if resize is not None:
+                tf.append(transforms.Resize(resize))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
+            full_dataset = torchvision.datasets.CIFAR100(
+                root="./data",
+                train=train_split,
+                download=True,
+                transform=transform,
+            )
+
+            ds: Dataset = full_dataset
+            subset_k = int(class_subset_size)
+            if subset_k > 0:
+                if subset_k > 100:
+                    raise ValueError(f"CIFAR100 class_subset_size must be <= 100, got {subset_k}")
+                g = torch.Generator().manual_seed(int(class_subset_seed))
+                chosen_classes = torch.randperm(100, generator=g)[:subset_k].tolist()
+                chosen_set = set(int(c) for c in chosen_classes)
+                targets = full_dataset.targets
+                keep_indices = [i for i, t in enumerate(targets) if int(t) in chosen_set]
+                ds = Subset(full_dataset, keep_indices)
+
+            max_n = int(max_samples)
+            if max_n > 0 and len(ds) > max_n:
+                g = torch.Generator().manual_seed(int(subset_seed))
+                indices = torch.randperm(len(ds), generator=g)[:max_n].tolist()
+                ds = Subset(ds, indices)
+            self.dataset = ds
         elif surrogate_name == "GTSRB":
             size = resize if resize is not None else (32, 32)
             transform = transforms.Compose([
@@ -431,6 +464,8 @@ def create_dataloader(
             max_samples=int(config.get("surrogate_max_samples", 0)),
             subset_seed=int(config.get("surrogate_subset_seed", 42)),
             output_channels=output_channels,
+            class_subset_size=int(config.get("surrogate_class_subset_size", 0)),
+            class_subset_seed=int(config.get("surrogate_class_subset_seed", 42)),
         )
     elif data_mode == "seed":
         dataset = SeedDataset(

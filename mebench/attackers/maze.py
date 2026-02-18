@@ -1,6 +1,7 @@
 """MAZE (Model Stealing via Zeroth-Order Gradient Estimation) attack implementation."""
 
 from typing import Dict, Any, List, Tuple, Optional
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,9 +35,14 @@ class MAZE(AttackRunner):
         self.n_c = int(config.get("n_c_steps", 5))
         self.n_r = int(config.get("n_r_steps", 10))
         self.noise_dim = int(config.get("noise_dim", 100))
+        self.lr_schedule = str(config.get("lr_schedule", "multistep")).lower()
+        if self.lr_schedule not in {"multistep", "cosine"}:
+            raise ValueError(f"MAZE lr_schedule must be 'multistep' or 'cosine', got {self.lr_schedule!r}")
         
         self.generator = None
         self.clone = None
+        self.g_scheduler = None
+        self.c_scheduler = None
         self.replay_x = []
         self.replay_y = []
         
@@ -83,30 +89,42 @@ class MAZE(AttackRunner):
             momentum=float(opt_config.get("momentum", 0.9)),
             weight_decay=float(opt_config.get("weight_decay", 5e-4))
         )
+
+        if self.lr_schedule == "cosine":
+            max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
+            queries_per_iter = max(
+                1,
+                int(self.batch_size) * int(self.n_g * (self.grad_approx_m + 1) + self.n_c),
+            )
+            approx_iters = max(1, int(math.ceil(max_budget / float(queries_per_iter))))
+            self.g_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.g_opt, T_max=approx_iters)
+            self.c_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.c_opt, T_max=approx_iters)
         
     def run(self, ctx: BenchmarkContext) -> None:
         device = self.state.metadata.get("device", "cpu")
         # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         pbar = self._create_progress_bar(ctx.budget_remaining, "[MAZE] Extracting")
         
-        # [UNIFIED] MultiStepLR Scheduler (10%, 30%, 50% of budget)
-        max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
-        milestones = [int(max_budget * p) for p in [0.1, 0.3, 0.5]]
-        gamma = 0.3 # Standard decay factor
-        self.milestones = sorted(milestones)
-        self.current_milestone_idx = 0
+        # Default benchmark scheduler: query milestones.
+        if self.lr_schedule == "multistep":
+            max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
+            milestones = [int(max_budget * p) for p in [0.1, 0.3, 0.5]]
+            gamma = 0.3 # Standard decay factor
+            self.milestones = sorted(milestones)
+            self.current_milestone_idx = 0
 
         while ctx.budget_remaining > 0:
             # Check for LR decay
-            current_queries = self.state.query_count
-            if self.current_milestone_idx < len(self.milestones):
-                if current_queries >= self.milestones[self.current_milestone_idx]:
-                    for param_group in self.g_opt.param_groups:
-                        param_group['lr'] *= gamma
-                    for param_group in self.c_opt.param_groups:
-                        param_group['lr'] *= gamma
-                    self.logger.info(f"[MAZE] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})")
-                    self.current_milestone_idx += 1
+            if self.lr_schedule == "multistep":
+                current_queries = self.state.query_count
+                if self.current_milestone_idx < len(self.milestones):
+                    if current_queries >= self.milestones[self.current_milestone_idx]:
+                        for param_group in self.g_opt.param_groups:
+                            param_group['lr'] *= gamma
+                        for param_group in self.c_opt.param_groups:
+                            param_group['lr'] *= gamma
+                        self.logger.info(f"[MAZE] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})")
+                        self.current_milestone_idx += 1
 
             total_queries = 1 + self.grad_approx_m
             max_g_batch = min(self.batch_size, ctx.budget_remaining // total_queries)
@@ -205,6 +223,12 @@ class MAZE(AttackRunner):
                     y_c_r = F.log_softmax(self.clone(self._normalize(x_r.to(device))), dim=1)
                     F.kl_div(y_c_r, y_r.to(device), reduction='batchmean').backward()
                     self.c_opt.step()
+
+            if self.lr_schedule == "cosine":
+                if self.g_scheduler is not None:
+                    self.g_scheduler.step()
+                if self.c_scheduler is not None:
+                    self.c_scheduler.step()
 
         self.state.attack_state["substitute"] = self.clone
         pbar.close()
