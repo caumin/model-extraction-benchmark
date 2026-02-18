@@ -49,7 +49,7 @@ def test_generate_configs_with_paper_mode_emits_paper_variants(tmp_path: Path) -
     maze_cfg = yaml.safe_load(maze_cfg_path.read_text(encoding="utf-8"))
     dfms_cfg = yaml.safe_load(dfms_cfg_path.read_text(encoding="utf-8"))
 
-    assert maze_cfg["victim"]["arch"] == "resnet20"
+    assert maze_cfg["victim"]["arch"] == "resnet18"
     assert maze_cfg["substitute"]["arch"] == "wideresnet22"
     assert int(maze_cfg["attack"]["max_budget"]) == 30_000_000
     assert maze_cfg["attack"]["n_g_steps"] == 1

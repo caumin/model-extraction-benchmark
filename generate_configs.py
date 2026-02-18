@@ -524,7 +524,7 @@ def generate_configs(
 
         for seed in seeds:
             # MAZE paper-profile (CIFAR-10):
-            # - victim: ResNet-20
+            # - victim: ResNet-18 (reuse existing CIFAR-10 victim checkpoints)
             # - clone: WideResNet-22
             # - budget: 30M
             # - B=128, NG=1, NC=5, NR=10, m=10
@@ -555,7 +555,7 @@ def generate_configs(
             maze_cfg = _paper_base_config(
                 run_name=maze_run_name,
                 seed=int(seed),
-                victim_arch="resnet20",
+                victim_arch="resnet18",
                 victim_output_mode="soft_prob",
                 max_budget=int(maze_budget),
                 attack_cfg=maze_attack,
