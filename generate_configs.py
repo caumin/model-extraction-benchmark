@@ -443,6 +443,17 @@ def generate_paperlike_configs(
     substitute_train_num_workers: Optional[int],
     substitute_val_num_workers: Optional[int],
 ) -> int:
+    mnist_setup = Setup(
+        set_id="SET-A1",
+        victim_dataset="MNIST",
+        victim_arch="classifier",
+        surrogate_name="EMNIST",
+        substitute_arch="cnn32",
+        channels=1,
+        size=28,
+        num_classes=10,
+    )
+
     cifar10_setup = Setup(
         set_id="SET-B1",
         victim_dataset="CIFAR10",
@@ -559,6 +570,76 @@ def generate_paperlike_configs(
 
     count = 0
     for seed in seeds:
+        # InverseNet paper-like profile (MNIST hard-label):
+        # - victim: Classifier
+        # - query pool: EMNIST Letters
+        # - substitute: CNN32
+        # - budget: 30k
+        # - K1:K2:K3 = 0.45:0.45:0.1
+        inversenet_budget = 30_000
+        inversenet_run_name = (
+            f"{mnist_setup.set_id}_inversenet_paper_hard_{_budget_suffix(inversenet_budget)}_seed{seed}"
+        )
+        inversenet_attack = {
+            "name": "inversenet",
+            "output_mode": "hard_top1",
+            "max_budget": int(inversenet_budget),
+            "pool_num_workers": int(pool_num_workers),
+            "batch_size": 128,
+            "phase_ratios": [0.45, 0.45, 0.1],
+            "truncation_k": 1,
+            "coreset_seed": 20,
+            "hcss_xi": 0.02,
+            "hcss_max_iter": 20,
+        }
+        inversenet_substitute = _paper_substitute_config(
+            arch="cnn32",
+            seed=int(seed),
+            optimizer_lr=0.01,
+            scheduler_name="multistep",
+        )
+        inversenet_cfg: Dict[str, Any] = {
+            "run": {"name": inversenet_run_name, "seeds": [int(seed)], "device": device},
+            "benchmark": {"protocol_version": protocol_version},
+            "victim": {
+                "victim_id": "mnist_classifier",
+                "arch": "classifier",
+                "channels": mnist_setup.channels,
+                "num_classes": mnist_setup.num_classes,
+                "input_size": [mnist_setup.size, mnist_setup.size],
+                "checkpoint_ref": "runs/victims/mnist_classifier_seed0.pt",
+                "normalization": None,
+                "output_mode": "hard_top1",
+                "temperature": 1.0,
+            },
+            "dataset": {
+                "name": mnist_setup.victim_dataset,
+                "data_mode": "surrogate",
+                "surrogate_name": mnist_setup.surrogate_name,
+                "surrogate_split": "letters",
+                "num_workers": int(pool_num_workers),
+                "train_split": True,
+                "channels": mnist_setup.channels,
+                "input_size": [mnist_setup.size, mnist_setup.size],
+            },
+            "attack": inversenet_attack,
+            "substitute": inversenet_substitute,
+            "budget": {
+                "max_budget": int(inversenet_budget),
+                "checkpoints": [1_000, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000],
+            },
+            "cache": {
+                "enabled": True,
+                "policy": "temporary",
+                "delete_on_finish": True,
+            },
+        }
+        (out_dir / f"{inversenet_run_name}.yaml").write_text(
+            yaml.safe_dump(inversenet_cfg, sort_keys=False),
+            encoding="utf-8",
+        )
+        count += 1
+
         # MAZE paper-like profile (CIFAR-10):
         # - victim: ResNet-20 (paper setting)
         # - clone: WideResNet-22

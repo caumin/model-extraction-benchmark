@@ -331,6 +331,145 @@ class AlexNetHalf(nn.Module):
         return x
 
 
+class ClassifierNet(nn.Module):
+    """InverseNet paper-style victim backbone (4 conv blocks + 2 FC)."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 1,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        p = float(dropout_prob)
+        channels = [32, 64, 128, 256]
+
+        layers = []
+        in_ch = int(input_channels)
+        for out_ch in channels:
+            layers.extend(
+                [
+                    nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                    nn.BatchNorm2d(out_ch),
+                    nn.ReLU(inplace=True),
+                    nn.MaxPool2d(kernel_size=2, stride=2),
+                ]
+            )
+            if p > 0:
+                layers.append(nn.Dropout2d(p))
+            in_ch = out_ch
+
+        self.features = nn.Sequential(*layers)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc1 = nn.Linear(channels[-1], 256)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(p) if p > 0 else nn.Identity()
+        self.fc2 = nn.Linear(256, int(num_classes))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+
+class CNN32Net(nn.Module):
+    """InverseNet paper-style CNN32 substitute."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 1,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        p = float(dropout_prob)
+
+        def block(in_ch: int, out_ch: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2, stride=2),
+                nn.Dropout2d(p) if p > 0 else nn.Identity(),
+            )
+
+        self.features = nn.Sequential(
+            block(int(input_channels), 64),
+            block(64, 128),
+            block(128, 256),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc1 = nn.Linear(256, 256)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(p) if p > 0 else nn.Identity()
+        self.fc2 = nn.Linear(256, int(num_classes))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+
+class CNN42Net(nn.Module):
+    """InverseNet paper-style CNN42 substitute."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 1,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        p = float(dropout_prob)
+
+        def block(in_ch: int, out_ch: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2, stride=2),
+                nn.Dropout2d(p) if p > 0 else nn.Identity(),
+            )
+
+        self.features = nn.Sequential(
+            block(int(input_channels), 64),
+            block(64, 128),
+            block(128, 256),
+            block(256, 512),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc1 = nn.Linear(512, 512)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(p) if p > 0 else nn.Identity()
+        self.fc2 = nn.Linear(512, int(num_classes))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+
 class LeNet(nn.Module):
     """Simple LeNet for small datasets."""
 
@@ -559,6 +698,24 @@ def create_substitute(
             input_channels=input_channels,
             dropout_prob=(dropout_prob if float(dropout_prob) > 0 else 0.5),
         )
+    elif arch == "classifier":
+        return ClassifierNet(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            dropout_prob=dropout_prob,
+        )
+    elif arch == "cnn32":
+        return CNN32Net(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            dropout_prob=dropout_prob,
+        )
+    elif arch == "cnn42":
+        return CNN42Net(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            dropout_prob=dropout_prob,
+        )
     elif arch == "resnet18-8x":
         raise ValueError("resnet18-8x is not supported in torchvision mode; use resnet18")
     elif arch == "lenet":
@@ -606,6 +763,18 @@ def get_model_info(arch: str) -> Dict[str, Any]:
             "default_width": 1,
         },
         "alexnet_half": {
+            "num_params": 0,
+            "default_width": 1,
+        },
+        "classifier": {
+            "num_params": 0,
+            "default_width": 1,
+        },
+        "cnn32": {
+            "num_params": 0,
+            "default_width": 1,
+        },
+        "cnn42": {
             "num_params": 0,
             "default_width": 1,
         },

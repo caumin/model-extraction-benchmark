@@ -33,6 +33,7 @@ class SeedDataset(Dataset):
         *,
         output_size: Optional[Tuple[int, int]] = None,
         output_channels: Optional[int] = None,
+        emnist_split: str = "balanced",
     ):
         """Initialize seed dataset.
 
@@ -84,7 +85,7 @@ class SeedDataset(Dataset):
             transform = transforms.Compose(tf)
             full_dataset = torchvision.datasets.EMNIST(
                 root="./data",
-                split="balanced",
+                split=str(emnist_split),
                 train=train_split,
                 download=True,
                 transform=transform,
@@ -196,6 +197,7 @@ class SurrogateDataset(Dataset):
         output_channels: Optional[int] = None,
         class_subset_size: int = 0,
         class_subset_seed: int = 42,
+        emnist_split: str = "balanced",
     ):
         """Initialize surrogate dataset.
 
@@ -229,7 +231,7 @@ class SurrogateDataset(Dataset):
             transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.EMNIST(
                 root="./data",
-                split="balanced",
+                split=str(emnist_split),
                 train=train_split,
                 download=True,
                 transform=transform,
@@ -466,14 +468,17 @@ def create_dataloader(
             output_channels=output_channels,
             class_subset_size=int(config.get("surrogate_class_subset_size", 0)),
             class_subset_seed=int(config.get("surrogate_class_subset_seed", 42)),
+            emnist_split=str(config.get("surrogate_split", config.get("emnist_split", "balanced"))),
         )
     elif data_mode == "seed":
         dataset = SeedDataset(
             name=name,
             seed_size=config.get("seed_size", 100),
             train_split=config.get("train_split", True),
+            seed_split=str(config.get("seed_split", "balanced")),
             output_size=desired_resize,
             output_channels=output_channels,
+            emnist_split=str(config.get("emnist_split", "balanced")),
         )
     else:
         raise ValueError(f"Unknown data_mode: {data_mode}")

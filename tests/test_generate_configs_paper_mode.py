@@ -50,18 +50,30 @@ def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) ->
     out_dir = tmp_path / "cfg"
     count = _generate_paperlike(out_dir)
 
-    assert count == 4
+    assert count == 5
 
+    inversenet_cfg_path = out_dir / "SET-A1_inversenet_paper_hard_30k_seed0.yaml"
     maze_cfg_path = out_dir / "SET-B1_maze_paper_soft_30m_seed0.yaml"
     dfms_cfg_path = out_dir / "SET-B1_dfms_paper_c100_40c_resnet18_hard_8m_seed0.yaml"
+    assert inversenet_cfg_path.exists()
     assert maze_cfg_path.exists()
     assert dfms_cfg_path.exists()
     assert (out_dir / "SET-B1_dfms_paper_c100_10c_resnet18_hard_8m_seed0.yaml").exists()
     assert (out_dir / "SET-B1_dfms_paper_c100_40c_resnet34_hard_8m_seed0.yaml").exists()
     assert not (out_dir / "SET-B1_maze_soft_30m_seed0.yaml").exists()
 
+    inversenet_cfg = yaml.safe_load(inversenet_cfg_path.read_text(encoding="utf-8"))
     maze_cfg = yaml.safe_load(maze_cfg_path.read_text(encoding="utf-8"))
     dfms_cfg = yaml.safe_load(dfms_cfg_path.read_text(encoding="utf-8"))
+
+    assert inversenet_cfg["victim"]["arch"] == "classifier"
+    assert inversenet_cfg["substitute"]["arch"] == "cnn32"
+    assert inversenet_cfg["dataset"]["surrogate_name"] == "EMNIST"
+    assert inversenet_cfg["dataset"]["surrogate_split"] == "letters"
+    assert inversenet_cfg["attack"]["output_mode"] == "hard_top1"
+    assert int(inversenet_cfg["attack"]["max_budget"]) == 30_000
+    assert inversenet_cfg["attack"]["phase_ratios"] == [0.45, 0.45, 0.1]
+    assert int(inversenet_cfg["attack"]["truncation_k"]) == 1
 
     assert maze_cfg["victim"]["arch"] == "resnet20"
     assert maze_cfg["substitute"]["arch"] == "wideresnet22"

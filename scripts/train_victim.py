@@ -252,6 +252,20 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
             scheduler="none",
         )
 
+    if dataset == "MNIST" and arch == "classifier":
+        return VictimTrainRecipe(
+            dataset=dataset,
+            arch=arch,
+            epochs=30,
+            batch_size=128,
+            optimizer="adam",
+            lr=1e-3,
+            momentum=0.9,
+            weight_decay=0.0,
+            scheduler="none",
+            dropout_prob=0.2,
+        )
+
     if dataset == "CIFAR10" and arch == "resnet18":
         return VictimTrainRecipe(
             dataset=dataset,
@@ -326,7 +340,7 @@ def train() -> None:
         "--arch",
         type=str,
         required=True,
-        choices=["lenet_mnist", "resnet18", "resnet20", "activethief_cnn"],
+        choices=["lenet_mnist", "classifier", "resnet18", "resnet20", "activethief_cnn"],
         help="Victim architecture (must match config victim.arch)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Training seed for victim checkpoint")
@@ -385,9 +399,9 @@ def train() -> None:
     )
     args = parser.parse_args()
 
-    # Benchmark defaults: MNIST uses LeNet-5, CIFAR10 uses ResNet18/ResNet20/ActiveThief CNN.
-    if args.dataset == "MNIST" and args.arch != "lenet_mnist":
-        raise ValueError("For MNIST victim training, use --arch lenet_mnist")
+    # Benchmark defaults: MNIST uses LeNet-5 or Classifier; CIFAR10 uses ResNet18/ResNet20/ActiveThief CNN.
+    if args.dataset == "MNIST" and args.arch not in {"lenet_mnist", "classifier"}:
+        raise ValueError("For MNIST victim training, use --arch lenet_mnist or --arch classifier")
     if args.dataset == "CIFAR10" and args.arch not in {"resnet18", "resnet20", "activethief_cnn"}:
         raise ValueError("For CIFAR10 victim training, use --arch resnet18, --arch resnet20, or --arch activethief_cnn")
 
