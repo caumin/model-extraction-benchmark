@@ -143,7 +143,7 @@ class MAZE(AttackRunner):
                 # Base output for estimation
                 x_base = self.generator(z)
                 x_base_01 = torch.clamp((x_base + 1.0) / 2.0, 0.0, 1.0)
-                y_c_base = F.softmax(self.clone(self._normalize(x_base)), dim=1)
+                y_c_base = self._clone_probs_eval(x_base)
                 
                 # Objective LG: -KL(yT || yC) to maximize disagreement
                 # loss_base depends on victim output; computed after batching oracle queries below.
@@ -164,8 +164,10 @@ class MAZE(AttackRunner):
                     u_list.append(u)
 
                 # Batch oracle queries: base + perturbed (same total images queried).
-                x_query = torch.cat([x_base_01] + x_pert_01_list, dim=0)
-                y_t_all = ctx.query(x_query).y.to(device)
+                x_query = torch.cat([x_base_01] + x_pert_01_list, dim=0).detach()
+                y_t_all = ctx.query(x_query).y
+                if y_t_all.device != x_base.device:
+                    y_t_all = y_t_all.to(x_base.device)
                 y_t_base = y_t_all[:batch]
                 y_t_pert_all = y_t_all[batch:].view(self.grad_approx_m, batch, -1)
 
@@ -174,7 +176,7 @@ class MAZE(AttackRunner):
                 for j in range(self.grad_approx_m):
                     u = u_list[j]
                     x_pert = torch.clamp(x_base + self.epsilon * u, -1.0, 1.0)
-                    y_c_pert = F.softmax(self.clone(self._normalize(x_pert)), dim=1)
+                    y_c_pert = self._clone_probs_eval(x_pert)
                     y_t_pert = y_t_pert_all[j]
                     loss_pert = -F.kl_div(torch.log(y_c_pert + 1e-10), y_t_pert, reduction='none').sum(dim=1)
                     grad_est_x += (d / self.grad_approx_m) * ((loss_pert - loss_base).view(-1, 1, 1, 1) / self.epsilon) * u
@@ -193,7 +195,9 @@ class MAZE(AttackRunner):
                 self.generator.eval(); self.clone.train()
                 z = torch.randn(batch, self.noise_dim, device=device)
                 x_gen = self.generator(z).detach()
-                y_t = ctx.query(torch.clamp((x_gen + 1.0) / 2.0, 0.0, 1.0)).y.to(device)
+                y_t = ctx.query(torch.clamp((x_gen + 1.0) / 2.0, 0.0, 1.0)).y
+                if y_t.device != x_gen.device:
+                    y_t = y_t.to(x_gen.device)
 
                 # Avoid BatchNorm crashes on tiny final batches (e.g., batch=1)
                 # while still consuming the remaining query budget.
@@ -248,6 +252,13 @@ class MAZE(AttackRunner):
         x_01 = (x + 1.0) / 2.0
         # In this benchmark, standard normalization is removed/identity as per AGENTS.md
         return x_01
+
+    def _clone_probs_eval(self, x: torch.Tensor) -> torch.Tensor:
+        """Clone inference for generator-phase zeroth-order estimation."""
+        x_in = self._normalize(x).contiguous()
+        with torch.no_grad():
+            logits = self.clone(x_in)
+        return F.softmax(logits.float(), dim=1)
 
     def _append_replay(self, x: torch.Tensor, y: torch.Tensor):
         self.replay_x.append(x.cpu())
