@@ -4,6 +4,7 @@
 |---|---|---|---|
 | Attack | DFMS-HL | `attack.name` | `dfms` |
 | Oracle output | hard label only | `victim.output_mode` / `attack.output_mode` | `hard_top1` |
+| Victim input scaling (strict mode) | `[-1,1]` | `victim.input_scale_mode` / `input_scale_mode` | `tanh` in full+smoke+victim train/eval configs |
 | Query budget (paper mode in repo) | CIFAR10: 8M | `budget.max_budget` | `8000000` in `experiment.yaml` |
 | Query budget (smoke) | low-resource validation | `budget.max_budget` | `2000` in `experiment_smoke.yaml` |
 | Official stage pipeline | enabled | `attack.use_official_stages` | `true` |

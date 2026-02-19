@@ -119,9 +119,9 @@ reported_results:
       track: track_b
       tolerance_pp: 1.0
 assumptions:
-  - item: victim architecture profile
-    reason: local default full config uses resnet18 victim checkpoint for runnable consistency
-    impact_check: strict comparison should use paper's resnet34 victim profile for top-table target
+  - item: strictness gating on full-budget execution
+    reason: architecture mapping is aligned for the selected target; strict verdict still requires completing 8M-query full run and checking target tolerance
+    impact_check: comparison remains incomplete/fail until full run artifacts are generated
 evidence_index:
   - item_path: attack.oracle_access.type
     pdf_page: 15284

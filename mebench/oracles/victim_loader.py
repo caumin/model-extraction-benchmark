@@ -6,6 +6,33 @@ import torch
 import torch.nn as nn
 
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.scaling import normalize_input_scale
+
+
+class _InputScaleWrapper(nn.Module):
+    """Apply configured input scaling before victim forward pass."""
+
+    def __init__(self, model: nn.Module, input_scale_mode: str) -> None:
+        super().__init__()
+        self.model = model
+        self.input_scale_mode = str(input_scale_mode)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_scaled = normalize_input_scale(x, self.input_scale_mode)
+        return self.model(x_scaled)
+
+
+def _wrap_victim_input_scale(model: nn.Module, input_scale_mode: str, device: str) -> nn.Module:
+    mode = str(input_scale_mode).strip().lower()
+    if mode in {"unit", "0_1", "01"}:
+        model.to(device)
+        model.eval()
+        return model
+
+    wrapped = _InputScaleWrapper(model, mode)
+    wrapped.to(device)
+    wrapped.eval()
+    return wrapped
 
 
 def load_victim_checkpoint(
@@ -15,6 +42,7 @@ def load_victim_checkpoint(
     input_channels: int = 3,
     width_mult: int = 1,
     dropout_prob: float = 0.0,
+    input_scale_mode: str = "unit",
     device: str = "cpu",
     strict: bool = True,
 ) -> nn.Module:
@@ -75,12 +103,14 @@ def load_victim_checkpoint(
     # Load state dict into model
     model.load_state_dict(state_dict, strict=strict)
 
-    # Move to target device and set to eval mode
-    model.to(device)
-    model.eval()
+    # Move to target device, apply optional input scale wrapper, and set eval mode.
+    wrapped_model = _wrap_victim_input_scale(model, input_scale_mode, device)
 
-    print(f"Loaded victim model from {checkpoint_path} to {device}")
-    return model
+    print(
+        f"Loaded victim model from {checkpoint_path} to {device} "
+        f"(input_scale_mode={str(input_scale_mode).lower()})"
+    )
+    return wrapped_model
 
 
 def load_victim_from_config(
@@ -116,6 +146,7 @@ def load_victim_from_config(
             input_channels=victim_config.get("channels", 3),
             width_mult=int(victim_config.get("width_mult", 1)),
             dropout_prob=float(victim_config.get("dropout_prob", 0.0)),
+            input_scale_mode=str(victim_config.get("input_scale_mode", "unit")),
             device=device,
         )
     else:
@@ -128,6 +159,8 @@ def load_victim_from_config(
             width_mult=int(victim_config.get("width_mult", 1)),
             dropout_prob=float(victim_config.get("dropout_prob", 0.0)),
         )
-        model.to(device)
-        model.eval()
-        return model
+        return _wrap_victim_input_scale(
+            model,
+            str(victim_config.get("input_scale_mode", "unit")),
+            device,
+        )

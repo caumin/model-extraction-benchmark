@@ -29,12 +29,10 @@ PRIORITY = [
 ]
 
 STAGES_BY_PAPER = {
-    # trains shared CIFAR10 victim once
+    # strict per-paper victim training/eval
     "2021_truong_dfme": "victim_train,victim_eval,attack,collect,compare",
-    # reuse CIFAR10 victim checkpoint from DFME stage
-    "2021_kariyappa_maze": "attack,collect,compare",
-    "2022_sanyal_dfms": "attack,collect,compare",
-    # separate MNIST victim
+    "2021_kariyappa_maze": "victim_train,victim_eval,attack,collect,compare",
+    "2022_sanyal_dfms": "victim_train,victim_eval,attack,collect,compare",
     "2021_gong_inversenet": "victim_train,victim_eval,attack,collect,compare",
 }
 
@@ -116,6 +114,7 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke-epochs", type=int, default=2)
+    parser.add_argument("--smoke-batch-size", type=int, default=64)
     parser.add_argument(
         "--heartbeat-sec",
         type=int,
@@ -144,6 +143,8 @@ def main() -> None:
             args.device,
             "--smoke-epochs",
             str(int(args.smoke_epochs)),
+            "--smoke-batch-size",
+            str(int(args.smoke_batch_size)),
             "--stages",
             stages,
         ]

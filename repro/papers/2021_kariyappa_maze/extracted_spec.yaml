@@ -156,9 +156,9 @@ reported_results:
       track: track_b
       tolerance_pp: 1.0
 assumptions:
-  - item: victim architecture mapping in local benchmark
-    reason: local reproducible victim profile uses resnet18 checkpoint by default
-    impact_check: mark as non-strict unless resnet20 victim profile is used in full run
+  - item: strictness gating on full-budget execution
+    reason: architecture mapping is aligned; strict verdict still requires completing 30M-query full run and checking target tolerance
+    impact_check: comparison remains incomplete/fail until full run artifacts are generated
 evidence_index:
   - item_path: attack.hyperparameters.batch_size
     pdf_page: 13819

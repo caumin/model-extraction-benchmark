@@ -2,8 +2,9 @@ seed: 0
 batch_size: 256
 num_workers: 0
 victim:
-  arch: resnet18
-  checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
+  arch: resnet34
+  width_mult: 8
+  checkpoint_ref: runs/victims/cifar10_resnet34_w8_seed0.pt
   channels: 3
   num_classes: 10
   input_size: [32, 32]

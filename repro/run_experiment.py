@@ -417,6 +417,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         ]
         if args.profile == "smoke" and args.smoke_epochs is not None:
             cmd.extend(["--epochs", str(int(args.smoke_epochs))])
+        if args.profile == "smoke" and args.smoke_batch_size is not None:
+            cmd.extend(["--batch-size", str(int(args.smoke_batch_size))])
         _run_command(cmd, log_path, args.dry_run)
 
     if "victim_eval" in stages:
@@ -487,6 +489,12 @@ def main() -> None:
         type=int,
         default=2,
         help="Epoch override used only when profile=smoke",
+    )
+    p_run.add_argument(
+        "--smoke-batch-size",
+        type=int,
+        default=64,
+        help="Batch-size override used only when profile=smoke victim training",
     )
 
     args = parser.parse_args()

@@ -1,12 +1,12 @@
 dataset: CIFAR10
-arch: resnet18
+arch: resnet20
 seed: 0
-victim_id: cifar10_resnet18
-out: runs/victims/cifar10_resnet18_seed0.pt
+victim_id: cifar10_resnet20
+out: runs/victims/cifar10_resnet20_seed0.pt
 save_metadata: true
 train:
   epochs: 200
-  batch_size: 256
+  batch_size: 128
   scheduler: cosine
   dropout_prob: 0.0
   num_workers: 0
@@ -14,4 +14,4 @@ train:
     name: sgd
     lr: 0.1
     momentum: 0.9
-    weight_decay: 0.0001
+    weight_decay: 0.0005

@@ -66,6 +66,9 @@ def main() -> None:
     dropout_prob = float(
         _cfg_get(victim_cfg, "dropout_prob", default=_cfg_get(cfg, "dropout_prob", default=0.0))
     )
+    input_scale_mode = str(
+        _cfg_get(victim_cfg, "input_scale_mode", default=_cfg_get(cfg, "input_scale_mode", default="unit"))
+    ).lower()
     dataset_name = str(_cfg_get(dataset_cfg, "name", default=_cfg_get(cfg, "dataset", default="CIFAR10")))
     batch_size = int(_cfg_get(cfg, "batch_size", default=128))
     num_workers = int(_cfg_get(cfg, "num_workers", default=0))
@@ -83,6 +86,7 @@ def main() -> None:
         input_channels=channels,
         width_mult=width_mult,
         dropout_prob=dropout_prob,
+        input_scale_mode=input_scale_mode,
         device=device,
     )
     test_loader = get_test_dataloader(
@@ -102,6 +106,7 @@ def main() -> None:
         "checkpoint": checkpoint,
         "num_classes": num_classes,
         "channels": channels,
+        "input_scale_mode": input_scale_mode,
         "batch_size": batch_size,
         "num_workers": num_workers,
         "device": device,

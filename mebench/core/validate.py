@@ -112,6 +112,14 @@ def validate_config(config: Dict[str, Any]) -> None:
     if config["victim"]["temperature"] != 1.0:
         raise ValueError("Default oracle requires T=1.0 in v1.0")
 
+    # Optional victim input scaling mode for strict-paper reproduction profiles.
+    input_scale_mode = str(config.get("victim", {}).get("input_scale_mode", "unit")).lower()
+    valid_scale_modes = {"unit", "0_1", "01", "tanh", "neg1_1", "-1_1", "-11"}
+    if input_scale_mode not in valid_scale_modes:
+        raise ValueError(
+            f"victim.input_scale_mode must be one of {sorted(valid_scale_modes)}, got {input_scale_mode!r}"
+        )
+
     # Check budget checkpoints
     checkpoints = config["budget"]["checkpoints"]
     max_budget = config["budget"]["max_budget"]

@@ -55,16 +55,25 @@ python repro/run_experiment.py run --paper-id 2020_pal_activethief --profile ful
 python repro/run_priority_queue.py --profile smoke --device cuda:0
 ```
 
+PowerShell sequential runner (recommended if you want live `tqdm`/progress-bar rendering):
+
+```powershell
+./repro/run_priority_queue.ps1 -RunProfile smoke -Device cuda:0 -SmokeEpochs 2 -SmokeBatchSize 32
+```
+
 Queue behavior:
 
-- DFME stage trains/evaluates shared CIFAR10 victim checkpoint.
-- MAZE/DFMS stages reuse that checkpoint and run `attack,collect,compare` only.
-- InverseNet stage trains its own MNIST victim checkpoint.
+- Each paper runs its own `victim_train,victim_eval,attack,collect,compare` stages.
+- This avoids cross-paper victim checkpoint reuse and keeps architecture parity stricter.
 
 Remote/high-resource full run:
 
 ```bash
 python repro/run_priority_queue.py --profile full --device cuda:0
+```
+
+```powershell
+./repro/run_priority_queue.ps1 -RunProfile full -Device cuda:0 -SmokeEpochs 2 -SmokeBatchSize 32
 ```
 
 ## Stages
@@ -98,9 +107,15 @@ Per run, pipeline writes/updates:
 
 ## Notes for Low GPU
 
-- Start with `--profile smoke` and small epochs (`--smoke-epochs`).
+- Start with `--profile smoke` and tune both `--smoke-epochs` and `--smoke-batch-size`.
 - Keep `num_workers` low in configs to reduce CPU/RAM pressure.
 - Run `collect,compare` stages independently after long jobs finish.
+
+Example (OOM-safe smoke):
+
+```bash
+python repro/run_priority_queue.py --profile smoke --device cuda:0 --smoke-epochs 2 --smoke-batch-size 32
+```
 
 ## Known blocker example
 

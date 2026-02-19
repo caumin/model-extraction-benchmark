@@ -33,3 +33,19 @@ def unit_to_tanh(x: torch.Tensor) -> torch.Tensor:
     """Convert [0, 1] to [-1, 1] (no clamp)."""
 
     return x * 2.0 - 1.0
+
+
+def normalize_input_scale(x: torch.Tensor, mode: str = "unit") -> torch.Tensor:
+    """Normalize model input scale according to mode.
+
+    Modes:
+    - "unit": keep canonical [0, 1] scale (with clamp).
+    - "tanh": convert canonical [0, 1] to [-1, 1].
+    """
+
+    mode_norm = str(mode).strip().lower()
+    if mode_norm in {"unit", "0_1", "01"}:
+        return clamp_unit(x)
+    if mode_norm in {"tanh", "neg1_1", "-1_1", "-11"}:
+        return unit_to_tanh(clamp_unit(x))
+    raise ValueError(f"Unsupported input scale mode: {mode!r}")

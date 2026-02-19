@@ -34,6 +34,7 @@ if str(project_root) not in sys.path:
 
 from mebench.core.seed import set_seed
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.scaling import normalize_input_scale
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class VictimTrainRecipe:
     momentum: float
     weight_decay: float
     scheduler: str
+    width_mult: int = 1
     label_smoothing: float = 0.0
     dropout_prob: float = 0.0
 
@@ -183,7 +185,12 @@ def _accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
 
 
 @torch.no_grad()
-def _evaluate(model: nn.Module, loader: DataLoader, device: str) -> Tuple[float, float]:
+def _evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: str,
+    input_scale_mode: str = "unit",
+) -> Tuple[float, float]:
     model.eval()
     criterion = nn.CrossEntropyLoss()
     total_loss = 0.0
@@ -193,6 +200,7 @@ def _evaluate(model: nn.Module, loader: DataLoader, device: str) -> Tuple[float,
     for x, y in loader:
         x = x.to(device)
         y = y.to(device)
+        x = normalize_input_scale(x, input_scale_mode)
         logits = model(x)
         loss = criterion(logits, y)
         total_loss += float(loss.item()) * int(y.size(0))
@@ -210,6 +218,7 @@ def _train_one_epoch(
     optimizer: optim.Optimizer,
     device: str,
     label_smoothing: float = 0.0,
+    input_scale_mode: str = "unit",
 ) -> Tuple[float, float]:
     model.train()
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
@@ -220,6 +229,7 @@ def _train_one_epoch(
     for x, y in loader:
         x = x.to(device)
         y = y.to(device)
+        x = normalize_input_scale(x, input_scale_mode)
 
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
@@ -278,6 +288,22 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
             momentum=0.9,
             weight_decay=1e-4,
             scheduler="cosine",
+            width_mult=1,
+            label_smoothing=0.1,
+        )
+
+    if dataset == "CIFAR10" and arch == "resnet34":
+        return VictimTrainRecipe(
+            dataset=dataset,
+            arch=arch,
+            epochs=200,
+            batch_size=256,
+            optimizer="sgd",
+            lr=0.1,
+            momentum=0.9,
+            weight_decay=1e-4,
+            scheduler="cosine",
+            width_mult=1,
             label_smoothing=0.1,
         )
 
@@ -292,6 +318,7 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
             momentum=0.9,
             weight_decay=5e-4,
             scheduler="cosine",
+            width_mult=1,
             label_smoothing=0.0,
         )
 
@@ -306,6 +333,7 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
             momentum=0.9,
             weight_decay=1e-3,
             scheduler="multistep",
+            width_mult=1,
             label_smoothing=0.0,
             dropout_prob=0.2,
         )
@@ -323,6 +351,7 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
         momentum=0.9,
         weight_decay=5e-4,
         scheduler="multistep",
+        width_mult=1,
         label_smoothing=0.0,
         dropout_prob=0.0,
     )
@@ -362,8 +391,14 @@ def train() -> None:
         "--arch",
         type=str,
         required=False,
-        choices=["lenet_mnist", "classifier", "resnet18", "resnet20", "activethief_cnn"],
+        choices=["lenet_mnist", "classifier", "resnet18", "resnet20", "resnet34", "activethief_cnn"],
         help="Victim architecture (must match config victim.arch)",
+    )
+    parser.add_argument(
+        "--width-mult",
+        type=int,
+        default=None,
+        help="Override width multiplier (for resnet variants)",
     )
     parser.add_argument("--seed", type=int, default=None, help="Training seed for victim checkpoint")
     parser.add_argument(
@@ -407,6 +442,13 @@ def train() -> None:
         default=None,
         help="Override model dropout probability (default: recipe default)",
     )
+    parser.add_argument(
+        "--input-scale-mode",
+        type=str,
+        default=None,
+        choices=["unit", "tanh"],
+        help="Input scale mode before victim forward pass",
+    )
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument(
         "--out",
@@ -444,8 +486,10 @@ def train() -> None:
     # Benchmark defaults: MNIST uses LeNet-5 or Classifier; CIFAR10 uses ResNet18/ResNet20/ActiveThief CNN.
     if dataset == "MNIST" and arch not in {"lenet_mnist", "classifier"}:
         raise ValueError("For MNIST victim training, use --arch lenet_mnist or --arch classifier")
-    if dataset == "CIFAR10" and arch not in {"resnet18", "resnet20", "activethief_cnn"}:
-        raise ValueError("For CIFAR10 victim training, use --arch resnet18, --arch resnet20, or --arch activethief_cnn")
+    if dataset == "CIFAR10" and arch not in {"resnet18", "resnet20", "resnet34", "activethief_cnn"}:
+        raise ValueError(
+            "For CIFAR10 victim training, use --arch resnet18, --arch resnet20, --arch resnet34, or --arch activethief_cnn"
+        )
 
     recipe = _default_recipe(dataset, arch)
     epochs = int(args.epochs) if args.epochs is not None else int(_cfg_get(train_cfg, "epochs", default=recipe.epochs))
@@ -475,12 +519,22 @@ def train() -> None:
         if args.scheduler is not None
         else str(_cfg_get(train_cfg, "scheduler", default=recipe.scheduler))
     )
+    width_mult = (
+        int(args.width_mult)
+        if args.width_mult is not None
+        else int(_cfg_get(cfg, "width_mult", default=recipe.width_mult))
+    )
     label_smoothing = recipe.label_smoothing
     dropout_prob = (
         float(args.dropout_prob)
         if args.dropout_prob is not None
         else float(_cfg_get(train_cfg, "dropout_prob", default=recipe.dropout_prob))
     )
+    input_scale_mode = str(
+        args.input_scale_mode
+        if args.input_scale_mode is not None
+        else _cfg_get(cfg, "input_scale_mode", default="unit")
+    ).lower()
 
     device = _default_device(args.device)
     print(f"[INFO] Device: {device}")
@@ -525,7 +579,7 @@ def train() -> None:
         arch=arch,
         num_classes=num_classes,
         input_channels=input_channels,
-        width_mult=1,
+        width_mult=width_mult,
         dropout_prob=dropout_prob,
     ).to(device)
 
@@ -548,12 +602,14 @@ def train() -> None:
                 "seed": int(seed),
                 "epochs": int(epochs),
                 "batch_size": int(batch_size),
+                "width_mult": int(width_mult),
                 "optimizer": optimizer_name,
                 "lr": float(lr),
                 "momentum": float(momentum),
                 "weight_decay": float(weight_decay),
                 "scheduler": scheduler_name,
                 "dropout_prob": float(dropout_prob),
+                "input_scale_mode": str(input_scale_mode),
                 "num_workers": int(num_workers),
                 "out": str(out_path),
             },
@@ -566,9 +622,19 @@ def train() -> None:
     best_state = None
     for epoch in range(1, epochs + 1):
         train_loss, train_acc = _train_one_epoch(
-            model, train_loader, optimizer, device, label_smoothing=label_smoothing
+            model,
+            train_loader,
+            optimizer,
+            device,
+            label_smoothing=label_smoothing,
+            input_scale_mode=input_scale_mode,
         )
-        test_loss, test_acc = _evaluate(model, test_loader, device)
+        test_loss, test_acc = _evaluate(
+            model,
+            test_loader,
+            device,
+            input_scale_mode=input_scale_mode,
+        )
 
         if scheduler is not None:
             scheduler.step()
@@ -601,6 +667,7 @@ def train() -> None:
             "seed": int(seed),
             "best_epoch": int(best_epoch),
             "best_acc": float(best_acc),
+            "input_scale_mode": str(input_scale_mode),
             "recipe": asdict(
                 VictimTrainRecipe(
                     dataset=dataset,
@@ -612,6 +679,7 @@ def train() -> None:
                     momentum=float(momentum),
                     weight_decay=float(weight_decay),
                     scheduler=scheduler_name,
+                    width_mult=int(width_mult),
                     label_smoothing=label_smoothing,
                     dropout_prob=float(dropout_prob),
                 )

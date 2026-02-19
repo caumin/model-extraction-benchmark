@@ -120,9 +120,9 @@ reported_results:
       track: track_b
       tolerance_pp: 1.0
 assumptions:
-  - item: victim architecture mapping in local benchmark
-    reason: local victim checkpoints currently use resnet18/resnet20 profiles
-    impact_check: report as non-strict reproduction until resnet34-8x victim is available
+  - item: strictness gating on full-budget execution
+    reason: architecture mapping is aligned; strict verdict still requires completing 20M-query full run and checking target tolerance
+    impact_check: comparison remains incomplete/fail until full run artifacts are generated
 evidence_index:
   - item_path: attack.query_budget.cifar10
     pdf_page: 4776
