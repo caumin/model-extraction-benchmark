@@ -26,6 +26,7 @@ import torch.optim as optim
 import yaml
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+from tqdm import tqdm
 
 # Add project root to path to allow importing mebench when run as a script.
 project_root = Path(__file__).resolve().parent.parent
@@ -190,6 +191,8 @@ def _evaluate(
     loader: DataLoader,
     device: str,
     input_scale_mode: str = "unit",
+    show_progress: bool = False,
+    progress_desc: str = "eval",
 ) -> Tuple[float, float]:
     model.eval()
     criterion = nn.CrossEntropyLoss()
@@ -197,7 +200,14 @@ def _evaluate(
     total_correct = 0
     total = 0
 
-    for x, y in loader:
+    iterator = tqdm(
+        loader,
+        desc=str(progress_desc),
+        leave=False,
+        dynamic_ncols=True,
+        disable=not bool(show_progress),
+    )
+    for x, y in iterator:
         x = x.to(device)
         y = y.to(device)
         x = normalize_input_scale(x, input_scale_mode)
@@ -219,6 +229,8 @@ def _train_one_epoch(
     device: str,
     label_smoothing: float = 0.0,
     input_scale_mode: str = "unit",
+    show_progress: bool = True,
+    progress_desc: str = "train",
 ) -> Tuple[float, float]:
     model.train()
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
@@ -226,7 +238,14 @@ def _train_one_epoch(
     total_correct = 0
     total = 0
 
-    for x, y in loader:
+    iterator = tqdm(
+        loader,
+        desc=str(progress_desc),
+        leave=False,
+        dynamic_ncols=True,
+        disable=not bool(show_progress),
+    )
+    for x, y in iterator:
         x = x.to(device)
         y = y.to(device)
         x = normalize_input_scale(x, input_scale_mode)
@@ -240,6 +259,11 @@ def _train_one_epoch(
         total_loss += float(loss.item()) * int(y.size(0))
         total_correct += int((torch.argmax(logits, dim=1) == y).sum().item())
         total += int(y.size(0))
+        if bool(show_progress):
+            iterator.set_postfix(
+                loss=f"{float(loss.item()):.4f}",
+                acc=f"{(float(total_correct) / float(max(1, total))) * 100.0:.2f}%",
+            )
 
     if total == 0:
         return 0.0, 0.0
@@ -449,6 +473,11 @@ def train() -> None:
         choices=["unit", "tanh"],
         help="Input scale mode before victim forward pass",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable tqdm batch progress bars",
+    )
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument(
         "--out",
@@ -621,6 +650,7 @@ def train() -> None:
     best_epoch = -1
     best_state = None
     for epoch in range(1, epochs + 1):
+        show_progress = not bool(args.no_progress)
         train_loss, train_acc = _train_one_epoch(
             model,
             train_loader,
@@ -628,12 +658,16 @@ def train() -> None:
             device,
             label_smoothing=label_smoothing,
             input_scale_mode=input_scale_mode,
+            show_progress=show_progress,
+            progress_desc=f"train {epoch}/{epochs}",
         )
         test_loss, test_acc = _evaluate(
             model,
             test_loader,
             device,
             input_scale_mode=input_scale_mode,
+            show_progress=show_progress,
+            progress_desc=f"eval  {epoch}/{epochs}",
         )
 
         if scheduler is not None:
