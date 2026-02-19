@@ -91,6 +91,21 @@ bash run_matrix.sh
 python aggregate_matrix.py
 ```
 
+Official launcher scripts are in `scripts/launch/`.
+Root-level `run_*.sh`/`run_*.ps1` files are compatibility wrappers.
+
+### 3. Smoke Run (Recommended First)
+
+```bash
+bash run_smoke.sh cuda:0
+```
+
+### 4. Reproduction Pipeline (Per Paper)
+
+```bash
+python repro/run_experiment.py --paper 2020_pal_activethief --profile smoke --device cuda:0
+```
+
 Notes:
 - Pool-based attacks depend on the surrogate dataset, so they are generated per SET.
 - Data-free (synthetic) attacks do not depend on the surrogate; configs are generated once per victim.
@@ -108,17 +123,33 @@ model-extraction-benchmark/
 │   ├── oracles/             # Victim model wrappers
 │   └── eval/                # Metrics & Evaluators
 ├── configs/                 # YAML Configuration files
-│   ├── matrix/              # Generated full-benchmark configs
-│   └── debug/               # Minimal configs for testing
+│   ├── matrix/              # Generated full-benchmark configs (runtime-generated)
+│   ├── smoke/               # Minimal smoke configs (tracked)
+│   └── paper_mode/          # Paper-mode generated configs
+├── scripts/
+│   ├── launch/              # Official launcher scripts
+│   └── *.py                 # Utility scripts (victim train/eval, checkpoints)
 ├── docs/                    # Documentation
 │   ├── reference/           # Implementation details & notes
 │   ├── technical_reports/   # Analysis & experiment reports
 │   └── archive/             # Archived design documents
+├── repro/                   # Paper reproduction workflows
+├── papers/
+│   ├── *.pdf                # Reference paper PDFs
+│   ├── paper_text/          # Local text extracts (canonical location)
+│   └── index.csv            # Paper metadata/provenance index
+├── archive/                 # Archived legacy/uncertain files
 ├── runs/                    # Experiment outputs (metrics, logs)
 ├── data/                    # Datasets (CIFAR, MNIST, etc.)
-├── papers/                  # Reference papers (PDFs)
 └── tests/                   # Contract validation tests
 ```
+
+## Data and Paper Licensing Notes
+
+- `data/`, `runs/`, logs, checkpoints, and temporary experiment outputs are local/runtime artifacts and are not intended for Git tracking.
+- Generated matrix/paper-mode configs are runtime artifacts by default and are git-ignored.
+- Paper full-text redistribution may be restricted by publisher terms. Keep local text extracts in `papers/paper_text/` only when usage rights are confirmed.
+- When redistribution rights are unclear, store metadata and retrieval provenance (see `papers/index.csv`) instead of shipping full text.
 
 ---
 

@@ -90,6 +90,21 @@ bash run_matrix.sh
 python aggregate_matrix.py
 ```
 
+공식 런처 스크립트는 `scripts/launch/`에 정리되어 있습니다.
+루트의 `run_*.sh`/`run_*.ps1` 파일은 하위 호환을 위한 wrapper입니다.
+
+### 3. 스모크 실행 (권장 시작점)
+
+```bash
+bash run_smoke.sh cuda:0
+```
+
+### 4. 논문별 재현 파이프라인 실행
+
+```bash
+python repro/run_experiment.py --paper 2020_pal_activethief --profile smoke --device cuda:0
+```
+
 참고:
 - Pool 기반 공격은 surrogate 데이터셋에 의존하므로 SET별로 생성됩니다.
 - Data-free(합성) 공격은 surrogate에 의존하지 않으므로 victim별 1회만 생성됩니다.
@@ -107,13 +122,30 @@ model-extraction-benchmark/
 │   ├── oracles/             # 피해 모델(Victim) 래퍼
 │   └── eval/                # 메트릭 및 평가 로직
 ├── configs/                 # YAML 설정 파일
-│   ├── matrix/              # 생성된 전체 벤치마크 설정
-│   └── debug/               # 테스트용 최소 설정
+│   ├── matrix/              # 생성된 전체 벤치마크 설정 (런타임 생성)
+│   ├── smoke/               # 추적되는 최소 스모크 설정
+│   └── paper_mode/          # 논문 모드 생성 설정
+├── scripts/
+│   ├── launch/              # 공식 실행 런처
+│   └── *.py                 # 유틸리티 스크립트(피해 모델 train/eval 등)
+├── docs/                    # 문서
+├── repro/                   # 논문 재현 워크플로우
+├── papers/
+│   ├── *.pdf                # 참고 논문 PDF
+│   ├── paper_text/          # 로컬 텍스트 추출물(표준 위치)
+│   └── index.csv            # 논문 메타데이터/출처 인덱스
+├── archive/                 # 보류/레거시 파일 아카이브
 ├── runs/                    # 실험 결과물 (메트릭, 로그)
 ├── data/                    # 데이터셋 (CIFAR, MNIST 등)
-├── papers/                  # 참고 논문 (PDF)
 └── tests/                   # 계약 검증 테스트 코드
 ```
+
+## 데이터 및 논문 라이선스 주의사항
+
+- `data/`, `runs/`, 로그, 체크포인트, 임시 실험 산출물은 로컬/런타임 아티팩트이며 기본적으로 Git 추적 대상이 아닙니다.
+- 생성되는 matrix/paper_mode 설정 파일은 런타임 산출물로 간주하며 기본적으로 gitignore 처리됩니다.
+- 논문 full-text 재배포는 출판사 정책에 의해 제한될 수 있으므로, 권한이 확인된 경우에만 `papers/paper_text/`에 보관하세요.
+- 재배포 권한이 불명확하면 full-text 대신 메타데이터와 출처 정보(`papers/index.csv`)를 유지하는 방식을 권장합니다.
 
 ---
 
