@@ -1,0 +1,14 @@
+seed: 0
+batch_size: 256
+num_workers: 0
+victim:
+  arch: resnet18
+  checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
+  channels: 3
+  num_classes: 10
+  input_size: [32, 32]
+dataset:
+  name: CIFAR10
+output:
+  json: repro/papers/2021_kariyappa_maze/results/victim_eval.json
+  csv: repro/papers/2021_kariyappa_maze/results/victim_eval.csv

@@ -1,0 +1,28 @@
+attack:
+  name: maze
+  output_mode: soft_prob
+  max_budget: 30000000
+  batch_size: 128
+  n_g_steps: 1
+  n_c_steps: 5
+  n_r_steps: 10
+  grad_approx_m: 10
+  grad_approx_epsilon: 0.001
+  generator_lr: 0.0001
+  generator_momentum: 0.0
+  lr_schedule: cosine
+
+substitute:
+  arch: wideresnet22
+  width_mult: 2
+  init_seed: 1234
+  batch_size: 128
+  optimizer:
+    name: sgd
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 0.0005
+
+budget:
+  max_budget: 30000000
+  checkpoints: [1000, 10000, 100000, 1000000, 10000000, 20000000, 30000000]

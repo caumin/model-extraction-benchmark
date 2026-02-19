@@ -1,0 +1,16 @@
+paper:
+  paper_id: 2021_wang_blackbox_dissector
+  title: ""
+  authors: []
+  year: 2021
+  venue: ""
+pdf:
+  path: /papers/blackbox-dissector.pdf
+  sha256: ce99534ad31fdb5622a51fcdde6cd5887132ffc3436a8074fb06eeea3ee537c1
+datasets: []
+victim: {}
+attack: {}
+evaluation: {}
+reported_results: {tables: [], figures: []}
+assumptions: []
+evidence_index: []

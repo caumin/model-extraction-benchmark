@@ -1,0 +1,16 @@
+paper:
+  paper_id: 2021_truong_dfme
+  title: ""
+  authors: []
+  year: 2021
+  venue: ""
+pdf:
+  path: /papers/DFME.pdf
+  sha256: 91bbaa1f6ed1c68364582ba42bf3296034a0166075a98fc7c3fb99be32319e10
+datasets: []
+victim: {}
+attack: {}
+evaluation: {}
+reported_results: {tables: [], figures: []}
+assumptions: []
+evidence_index: []

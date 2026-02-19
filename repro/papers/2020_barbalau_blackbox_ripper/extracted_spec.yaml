@@ -1,0 +1,16 @@
+paper:
+  paper_id: 2020_barbalau_blackbox_ripper
+  title: ""
+  authors: []
+  year: 2020
+  venue: ""
+pdf:
+  path: /papers/blackbox-ripper.pdf
+  sha256: 104761010f82eb4396423faa373d7e29ea3ecaae88a749417798ee9c8f8e813b
+datasets: []
+victim: {}
+attack: {}
+evaluation: {}
+reported_results: {tables: [], figures: []}
+assumptions: []
+evidence_index: []

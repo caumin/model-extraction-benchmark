@@ -1,0 +1,16 @@
+paper:
+  paper_id: 2022_xie_game
+  title: ""
+  authors: []
+  year: 2022
+  venue: ""
+pdf:
+  path: /papers/GAME.pdf
+  sha256: c63d55714b898b3ce929b34dbfda1994de7ad43d65366545dbe4d9311009587e
+datasets: []
+victim: {}
+attack: {}
+evaluation: {}
+reported_results: {tables: [], figures: []}
+assumptions: []
+evidence_index: []

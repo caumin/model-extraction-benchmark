@@ -1,0 +1,57 @@
+run:
+  name: repro_2021_kariyappa_maze_smoke2k_seed0
+  seeds: [0]
+  device: cuda:0
+
+benchmark:
+  protocol_version: "1.2"
+
+victim:
+  victim_id: cifar10_resnet18
+  arch: resnet18
+  channels: 3
+  num_classes: 10
+  input_size: [32, 32]
+  checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
+  output_mode: soft_prob
+  temperature: 1.0
+
+dataset:
+  name: CIFAR10
+  data_mode: data_free
+  channels: 3
+  input_size: [32, 32]
+
+attack:
+  name: maze
+  output_mode: soft_prob
+  max_budget: 2000
+  batch_size: 32
+  n_g_steps: 1
+  n_c_steps: 1
+  n_r_steps: 1
+  grad_approx_m: 1
+  grad_approx_epsilon: 0.001
+  generator_lr: 0.0001
+  generator_momentum: 0.0
+  lr_schedule: multistep
+
+substitute:
+  arch: resnet18
+  width_mult: 1
+  init_seed: 1234
+  batch_size: 32
+  optimizer:
+    name: sgd
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.0005
+
+budget:
+  max_budget: 2000
+  checkpoints: [200, 600, 1000, 1400, 1800, 2000]
+
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true

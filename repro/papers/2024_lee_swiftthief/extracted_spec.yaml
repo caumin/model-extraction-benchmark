@@ -1,0 +1,16 @@
+paper:
+  paper_id: 2024_lee_swiftthief
+  title: ""
+  authors: []
+  year: 2024
+  venue: ""
+pdf:
+  path: /papers/swiftthief.pdf
+  sha256: b5c3113c29e4b88b3f49d1e837bcbfd516b2e023c3ea1706ed218e4b0085a171
+datasets: []
+victim: {}
+attack: {}
+evaluation: {}
+reported_results: {tables: [], figures: []}
+assumptions: []
+evidence_index: []

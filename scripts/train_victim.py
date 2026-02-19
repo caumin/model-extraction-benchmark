@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import yaml
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
@@ -327,23 +328,44 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
     )
 
 
+def _load_yaml_config(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Expected mapping at YAML root: {path}")
+    return cfg
+
+
+def _cfg_get(config: dict, *keys, default=None):
+    for key in keys:
+        if key in config:
+            return config[key]
+    return default
+
+
 def train() -> None:
     parser = argparse.ArgumentParser(description="Train a victim model checkpoint for mebench")
     parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional YAML config path for victim training",
+    )
+    parser.add_argument(
         "--dataset",
         type=str,
-        required=True,
+        required=False,
         choices=["MNIST", "CIFAR10"],
         help="Victim dataset",
     )
     parser.add_argument(
         "--arch",
         type=str,
-        required=True,
+        required=False,
         choices=["lenet_mnist", "classifier", "resnet18", "resnet20", "activethief_cnn"],
         help="Victim architecture (must match config victim.arch)",
     )
-    parser.add_argument("--seed", type=int, default=0, help="Training seed for victim checkpoint")
+    parser.add_argument("--seed", type=int, default=None, help="Training seed for victim checkpoint")
     parser.add_argument(
         "--device",
         type=str,
@@ -385,7 +407,7 @@ def train() -> None:
         default=None,
         help="Override model dropout probability (default: recipe default)",
     )
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument(
         "--out",
         type=str,
@@ -395,68 +417,112 @@ def train() -> None:
     parser.add_argument(
         "--save-metadata",
         action="store_true",
+        default=None,
         help="Also write runs/victims/{victim_id}_seed{seed}.json",
     )
     args = parser.parse_args()
 
+    cfg = _load_yaml_config(args.config) if args.config is not None else {}
+    train_cfg = cfg.get("train", {}) if isinstance(cfg.get("train", {}), dict) else {}
+    opt_cfg = train_cfg.get("optimizer", {}) if isinstance(train_cfg.get("optimizer", {}), dict) else {}
+
+    dataset = args.dataset or _cfg_get(cfg, "dataset")
+    arch = args.arch or _cfg_get(cfg, "arch")
+    if dataset is None or arch is None:
+        raise ValueError("dataset and arch are required (via CLI args or YAML config)")
+
+    seed = int(args.seed) if args.seed is not None else int(_cfg_get(cfg, "seed", default=0))
+    num_workers = (
+        int(args.num_workers)
+        if args.num_workers is not None
+        else int(_cfg_get(train_cfg, "num_workers", default=0))
+    )
+
+    save_metadata_cfg = _cfg_get(cfg, "save_metadata", default=False)
+    save_metadata = bool(args.save_metadata) if args.save_metadata is not None else bool(save_metadata_cfg)
+
     # Benchmark defaults: MNIST uses LeNet-5 or Classifier; CIFAR10 uses ResNet18/ResNet20/ActiveThief CNN.
-    if args.dataset == "MNIST" and args.arch not in {"lenet_mnist", "classifier"}:
+    if dataset == "MNIST" and arch not in {"lenet_mnist", "classifier"}:
         raise ValueError("For MNIST victim training, use --arch lenet_mnist or --arch classifier")
-    if args.dataset == "CIFAR10" and args.arch not in {"resnet18", "resnet20", "activethief_cnn"}:
+    if dataset == "CIFAR10" and arch not in {"resnet18", "resnet20", "activethief_cnn"}:
         raise ValueError("For CIFAR10 victim training, use --arch resnet18, --arch resnet20, or --arch activethief_cnn")
 
-    recipe = _default_recipe(args.dataset, args.arch)
-    epochs = int(args.epochs) if args.epochs is not None else recipe.epochs
-    batch_size = int(args.batch_size) if args.batch_size is not None else recipe.batch_size
-    optimizer_name = str(args.optimizer) if args.optimizer is not None else recipe.optimizer
-    lr = float(args.lr) if args.lr is not None else recipe.lr
-    momentum = float(args.momentum) if args.momentum is not None else recipe.momentum
-    weight_decay = float(args.weight_decay) if args.weight_decay is not None else recipe.weight_decay
-    scheduler_name = str(args.scheduler) if args.scheduler is not None else recipe.scheduler
+    recipe = _default_recipe(dataset, arch)
+    epochs = int(args.epochs) if args.epochs is not None else int(_cfg_get(train_cfg, "epochs", default=recipe.epochs))
+    batch_size = (
+        int(args.batch_size)
+        if args.batch_size is not None
+        else int(_cfg_get(train_cfg, "batch_size", default=recipe.batch_size))
+    )
+    optimizer_name = (
+        str(args.optimizer)
+        if args.optimizer is not None
+        else str(_cfg_get(opt_cfg, "name", default=recipe.optimizer))
+    )
+    lr = float(args.lr) if args.lr is not None else float(_cfg_get(opt_cfg, "lr", default=recipe.lr))
+    momentum = (
+        float(args.momentum)
+        if args.momentum is not None
+        else float(_cfg_get(opt_cfg, "momentum", default=recipe.momentum))
+    )
+    weight_decay = (
+        float(args.weight_decay)
+        if args.weight_decay is not None
+        else float(_cfg_get(opt_cfg, "weight_decay", default=recipe.weight_decay))
+    )
+    scheduler_name = (
+        str(args.scheduler)
+        if args.scheduler is not None
+        else str(_cfg_get(train_cfg, "scheduler", default=recipe.scheduler))
+    )
     label_smoothing = recipe.label_smoothing
-    dropout_prob = float(args.dropout_prob) if args.dropout_prob is not None else float(recipe.dropout_prob)
+    dropout_prob = (
+        float(args.dropout_prob)
+        if args.dropout_prob is not None
+        else float(_cfg_get(train_cfg, "dropout_prob", default=recipe.dropout_prob))
+    )
 
     device = _default_device(args.device)
     print(f"[INFO] Device: {device}")
 
-    set_seed(int(args.seed))
+    set_seed(int(seed))
 
-    victim_id = _infer_victim_id(args.dataset, args.arch)
+    victim_id = str(_cfg_get(cfg, "victim_id", default=_infer_victim_id(dataset, arch)))
     out_dir = project_root / "runs" / "victims"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = Path(args.out) if args.out is not None else out_dir / f"{victim_id}_seed{args.seed}.pt"
+    out_path = Path(args.out) if args.out is not None else Path(_cfg_get(cfg, "out", default=out_dir / f"{victim_id}_seed{seed}.pt"))
 
     # Preserve previous checkpoints (handy when iterating on recipes).
     _backup_if_exists(out_path)
 
     data_root = project_root / "data"
-    train_dataset = _load_dataset(args.dataset, arch=args.arch, train=True, data_root=data_root)
-    test_dataset = _load_dataset(args.dataset, arch=args.arch, train=False, data_root=data_root)
+    train_dataset = _load_dataset(dataset, arch=arch, train=True, data_root=data_root)
+    test_dataset = _load_dataset(dataset, arch=arch, train=False, data_root=data_root)
 
     loader_gen = torch.Generator()
-    loader_gen.manual_seed(int(args.seed))
+    loader_gen.manual_seed(int(seed))
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=int(args.num_workers),
+        num_workers=int(num_workers),
         pin_memory=(device.startswith("cuda")),
         generator=loader_gen,
-        worker_init_fn=_worker_init_fn(int(args.seed)),
+        worker_init_fn=_worker_init_fn(int(seed)),
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=int(args.num_workers),
+        num_workers=int(num_workers),
         pin_memory=(device.startswith("cuda")),
-        worker_init_fn=_worker_init_fn(int(args.seed)),
+        worker_init_fn=_worker_init_fn(int(seed)),
     )
 
-    input_channels, num_classes = _infer_dataset_info(args.dataset, arch=args.arch)
+    input_channels, num_classes = _infer_dataset_info(dataset, arch=arch)
     model = create_substitute(
-        arch=args.arch,
+        arch=arch,
         num_classes=num_classes,
         input_channels=input_channels,
         width_mult=1,
@@ -477,9 +543,9 @@ def train() -> None:
         + json.dumps(
             {
                 "victim_id": victim_id,
-                "dataset": args.dataset,
-                "arch": args.arch,
-                "seed": int(args.seed),
+                "dataset": dataset,
+                "arch": arch,
+                "seed": int(seed),
                 "epochs": int(epochs),
                 "batch_size": int(batch_size),
                 "optimizer": optimizer_name,
@@ -488,7 +554,7 @@ def train() -> None:
                 "weight_decay": float(weight_decay),
                 "scheduler": scheduler_name,
                 "dropout_prob": float(dropout_prob),
-                "num_workers": int(args.num_workers),
+                "num_workers": int(num_workers),
                 "out": str(out_path),
             },
             sort_keys=True,
@@ -526,19 +592,19 @@ def train() -> None:
     torch.save(best_state, out_path)
     print(f"[INFO] Saved best checkpoint (epoch={best_epoch}, acc={best_acc*100:.2f}%) to: {out_path}")
 
-    if args.save_metadata:
+    if save_metadata:
         meta_path = out_path.with_suffix(out_path.suffix + ".json")
         meta = {
             "victim_id": victim_id,
-            "dataset": args.dataset,
-            "arch": args.arch,
-            "seed": int(args.seed),
+            "dataset": dataset,
+            "arch": arch,
+            "seed": int(seed),
             "best_epoch": int(best_epoch),
             "best_acc": float(best_acc),
             "recipe": asdict(
                 VictimTrainRecipe(
-                    dataset=args.dataset,
-                    arch=args.arch,
+                    dataset=dataset,
+                    arch=arch,
                     epochs=int(epochs),
                     batch_size=int(batch_size),
                     optimizer=optimizer_name,

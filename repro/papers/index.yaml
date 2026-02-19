@@ -1,0 +1,27 @@
+papers:
+  - paper_id: 2020_pal_activethief
+    pdf: papers/activethief.pdf
+  - paper_id: 2021_wang_blackbox_dissector
+    pdf: papers/blackbox-dissector.pdf
+  - paper_id: 2020_barbalau_blackbox_ripper
+    pdf: papers/blackbox-ripper.pdf
+  - paper_id: 2020_yu_cloudleak
+    pdf: papers/cloudleak.pdf
+  - paper_id: 2018_correia_silva_copycatcnn
+    pdf: papers/copycatcnn.pdf
+  - paper_id: 2021_truong_dfme
+    pdf: papers/DFME.pdf
+  - paper_id: 2022_sanyal_dfms
+    pdf: papers/DFMS.pdf
+  - paper_id: 2022_yuan_esattack
+    pdf: papers/esattack.pdf
+  - paper_id: 2022_xie_game
+    pdf: papers/GAME.pdf
+  - paper_id: 2021_gong_inversenet
+    pdf: papers/inversenet.pdf
+  - paper_id: 2019_orekondy_knockoffnets
+    pdf: papers/knockoffnets.pdf
+  - paper_id: 2021_kariyappa_maze
+    pdf: papers/MAZE.pdf
+  - paper_id: 2024_lee_swiftthief
+    pdf: papers/swiftthief.pdf

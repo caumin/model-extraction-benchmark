@@ -1,0 +1,16 @@
+paper:
+  paper_id: 2022_sanyal_dfms
+  title: ""
+  authors: []
+  year: 2022
+  venue: ""
+pdf:
+  path: /papers/DFMS.pdf
+  sha256: 14d91d50459794a926f583482d90cea7ee1e47f65a256036a41cbf40ba5bc40d
+datasets: []
+victim: {}
+attack: {}
+evaluation: {}
+reported_results: {tables: [], figures: []}
+assumptions: []
+evidence_index: []

@@ -1,0 +1,9 @@
+paper_id: 2022_sanyal_dfms
+strict_reproduction:
+  possible_locally: true
+  blockers: []
+  caveats:
+    - "Full budget (8M) and official-stage training are high-cost; prefer remote GPU execution"
+local_fallback_profile:
+  config_smoke: repro/papers/2022_sanyal_dfms/configs/experiment_smoke.yaml
+  config_full: repro/papers/2022_sanyal_dfms/configs/experiment.yaml

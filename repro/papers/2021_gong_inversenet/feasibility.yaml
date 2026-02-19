@@ -1,0 +1,9 @@
+paper_id: 2021_gong_inversenet
+strict_reproduction:
+  possible_locally: true
+  blockers: []
+  caveats:
+    - "Full budget (30K) still non-trivial; smoke profile recommended for local checks"
+local_fallback_profile:
+  config_smoke: repro/papers/2021_gong_inversenet/configs/experiment_smoke.yaml
+  config_full: repro/papers/2021_gong_inversenet/configs/experiment.yaml

@@ -1,0 +1,16 @@
+paper:
+  paper_id: 2020_yu_cloudleak
+  title: ""
+  authors: []
+  year: 2020
+  venue: ""
+pdf:
+  path: /papers/cloudleak.pdf
+  sha256: e616108a238c1112fbec8a44444bd2b84e3622fb80efe8434e3e48cc1ead5c7b
+datasets: []
+victim: {}
+attack: {}
+evaluation: {}
+reported_results: {tables: [], figures: []}
+assumptions: []
+evidence_index: []
