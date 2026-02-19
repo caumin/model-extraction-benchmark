@@ -4,6 +4,7 @@
 |---|---|---|---|
 | Attack | DFME | `attack.name` | `dfme` |
 | Oracle output | soft probabilities | `victim.output_mode` / `attack.output_mode` | `soft_prob` |
+| Victim input scaling | official checkpoint-aligned model input scale | `victim.input_scale_mode` | `tanh` |
 | Query budget (paper) | CIFAR10: 20M | `budget.max_budget` | `20000000` in `experiment.yaml` |
 | Query budget (smoke) | low-resource validation | `budget.max_budget` | `2000` in `experiment_smoke.yaml` |
 | G/S step ratio | `n_G:n_S = 1:5` | `attack.n_g_steps`, `attack.n_s_steps` | `1`, `5` (full) |
