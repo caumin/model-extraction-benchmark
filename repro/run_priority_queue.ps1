@@ -53,6 +53,7 @@ for ($i = 0; $i -lt $total; $i++) {
         "--device", $Device,
         "--smoke-epochs", "$SmokeEpochs",
         "--smoke-batch-size", "$SmokeBatchSize",
+        "--live-output",
         "--stages", $stages
     )
 

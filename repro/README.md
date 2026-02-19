@@ -61,6 +61,8 @@ PowerShell sequential runner (recommended if you want live `tqdm`/progress-bar r
 ./repro/run_priority_queue.ps1 -RunProfile smoke -Device cuda:0 -SmokeEpochs 2 -SmokeBatchSize 32
 ```
 
+`run_experiment.py` supports `--live-output` (default on) so child process output is attached to the terminal for proper progress-bar rendering.
+
 Queue behavior:
 
 - Each paper runs its own `victim_train,victim_eval,attack,collect,compare` stages.

@@ -141,7 +141,7 @@ def bootstrap_from_index(index_path: Path) -> None:
         _bootstrap_paper(paper_id, pdf)
 
 
-def _run_command(cmd: list[str], log_path: Path, dry_run: bool) -> None:
+def _run_command(cmd: list[str], log_path: Path, dry_run: bool, live_output: bool) -> None:
     shown = shlex.join(cmd)
     print(f"$ {shown}")
     with log_path.open("a", encoding="utf-8") as logf:
@@ -150,19 +150,24 @@ def _run_command(cmd: list[str], log_path: Path, dry_run: bool) -> None:
     if dry_run:
         return
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    assert proc.stdout is not None
-    with log_path.open("a", encoding="utf-8") as logf:
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            logf.write(line)
-    rc = proc.wait()
+    if live_output:
+        rc = subprocess.run(cmd, cwd=ROOT, check=False).returncode
+        with log_path.open("a", encoding="utf-8") as logf:
+            logf.write("[live-output] subprocess output streamed directly to terminal\n")
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout is not None
+        with log_path.open("a", encoding="utf-8") as logf:
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                logf.write(line)
+        rc = proc.wait()
     if rc != 0:
         raise RuntimeError(f"Command failed (exit {rc}): {shown}")
 
@@ -419,7 +424,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             cmd.extend(["--epochs", str(int(args.smoke_epochs))])
         if args.profile == "smoke" and args.smoke_batch_size is not None:
             cmd.extend(["--batch-size", str(int(args.smoke_batch_size))])
-        _run_command(cmd, log_path, args.dry_run)
+        _run_command(cmd, log_path, args.dry_run, args.live_output)
 
     if "victim_eval" in stages:
         cmd = [
@@ -430,7 +435,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             "--device",
             args.device,
         ]
-        _run_command(cmd, log_path, args.dry_run)
+        _run_command(cmd, log_path, args.dry_run, args.live_output)
 
     if "attack" in stages:
         cmd = [
@@ -443,7 +448,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             "--device",
             args.device,
         ]
-        _run_command(cmd, log_path, args.dry_run)
+        _run_command(cmd, log_path, args.dry_run, args.live_output)
 
     reproduced_rows: list[dict[str, Any]] = []
     if "collect" in stages:
@@ -495,6 +500,12 @@ def main() -> None:
         type=int,
         default=64,
         help="Batch-size override used only when profile=smoke victim training",
+    )
+    p_run.add_argument(
+        "--live-output",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Stream child process output directly to terminal (recommended for tqdm/pbar)",
     )
 
     args = parser.parse_args()

@@ -145,6 +145,7 @@ def main() -> None:
             str(int(args.smoke_epochs)),
             "--smoke-batch-size",
             str(int(args.smoke_batch_size)),
+            "--live-output",
             "--stages",
             stages,
         ]
