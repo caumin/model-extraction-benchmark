@@ -26,6 +26,7 @@ dataset:
 attack:
   name: dfms
   output_mode: hard_top1
+  internal_input_scale_mode: tanh
   max_budget: 8000000
   batch_size: 64
   oracle_batch_size: 64

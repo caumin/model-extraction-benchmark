@@ -17,7 +17,7 @@ from mebench.models.gan import DCGANGenerator, DCGANDiscriminator
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
-from mebench.utils.scaling import tanh_to_unit, clamp_unit
+from mebench.utils.scaling import tanh_to_unit, clamp_unit, unit_to_tanh
 
 
 class DFMSHL(AttackRunner):
@@ -107,6 +107,12 @@ class DFMSHL(AttackRunner):
 
         # Query chunk size for oracle labeling; budget is counted per-image.
         self.oracle_batch_size = int(config.get("oracle_batch_size", self.batch_size))
+        self.internal_input_scale_mode = str(config.get("internal_input_scale_mode", "unit")).strip().lower()
+        if self.internal_input_scale_mode not in {"unit", "tanh"}:
+            raise ValueError(
+                "DFMS-HL internal_input_scale_mode must be 'unit' or 'tanh', "
+                f"got {self.internal_input_scale_mode!r}"
+            )
 
         self.generator: nn.Module | None = None
         self.discriminator: nn.Module | None = None
@@ -120,11 +126,20 @@ class DFMSHL(AttackRunner):
 
         self._initialize_state(state)
 
-    # NOTE (Benchmark scaling unification vs DFMS.pdf):
-    # Many DFMS/DFMS-HL implementations normalize images to [-1,1] using (x-0.5)/0.5.
-    # This benchmark enforces a global contract that oracle/eval inputs are in [0,1]
-    # with no additional mean/std normalization. To keep all attacks comparable, this
-    # implementation uses [0,1] as the canonical image scale throughout the attack.
+    # NOTE (DFMS scaling modes):
+    # - Oracle queries must follow benchmark canonical [0,1] input contract.
+    # - Official DFMS scripts commonly normalize model-training paths to [-1,1].
+    # - `internal_input_scale_mode` controls clone/discriminator/model-internal scale:
+    #     * "unit": keep internal paths on [0,1]
+    #     * "tanh": convert internal paths to [-1,1]
+
+    def _unit_to_internal(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert canonical [0,1] tensors to DFMS internal model scale."""
+
+        x_unit = clamp_unit(x)
+        if self.internal_input_scale_mode == "tanh":
+            return unit_to_tanh(x_unit)
+        return x_unit
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
@@ -331,9 +346,7 @@ class DFMSHL(AttackRunner):
                 dropout_prob=dropout_prob,
             ).to(device)
 
-            # Benchmark scaling unification (DFME-style): the clone consumes [0,1] inputs.
-            # Paper/official DFMS-HL code commonly normalizes to [-1,1]; we intentionally
-            # do not, to keep scaling consistent across all attacks in this benchmark.
+            # Clone internal scale follows `internal_input_scale_mode`.
             self.clone = base_clone
 
         self.clone_optimizer = optim.SGD(
@@ -353,7 +366,7 @@ class DFMSHL(AttackRunner):
         if self.generator is None or self.discriminator is None:
             return
         self.generator_optimizer.zero_grad(set_to_none=True)
-        fake_logits = self.discriminator(clamp_unit(fake_x_01))
+        fake_logits = self.discriminator(self._unit_to_internal(fake_x_01))
         loss_g = F.binary_cross_entropy_with_logits(fake_logits, torch.ones_like(fake_logits))
         loss_g.backward()
         self.generator_optimizer.step()
@@ -367,7 +380,7 @@ class DFMSHL(AttackRunner):
             return
 
         self.generator_optimizer.zero_grad(set_to_none=True)
-        fake_logits = self.discriminator(clamp_unit(fake_x_01))
+        fake_logits = self.discriminator(self._unit_to_internal(fake_x_01))
         adv_loss = F.binary_cross_entropy_with_logits(fake_logits, torch.ones_like(fake_logits))
 
         # Diversity term uses clone as proxy gradient.
@@ -377,7 +390,7 @@ class DFMSHL(AttackRunner):
         for p in self.clone.parameters():
             p.requires_grad_(False)
         try:
-            clone_logits = self.clone(fake_x_01)
+            clone_logits = self.clone(self._unit_to_internal(fake_x_01))
         finally:
             for p, rg in zip(self.clone.parameters(), prev_requires_grad, strict=False):
                 p.requires_grad_(rg)
@@ -651,6 +664,7 @@ class DFMSHL(AttackRunner):
                 y_b = torch.cat(y_parts, dim=0).long().view(-1)
                 if use_pad_crop:
                     x_b = self._augment_pad_crop_hflip(x_b)
+                x_b = self._unit_to_internal(x_b)
 
                 self.clone_optimizer.zero_grad(set_to_none=True)
                 logits = self.clone(x_b)
@@ -736,7 +750,7 @@ class DFMSHL(AttackRunner):
 
                 self.clone.train()
                 self.clone_optimizer.zero_grad(set_to_none=True)
-                logits = self.clone(x_for_student)
+                logits = self.clone(self._unit_to_internal(x_for_student))
                 loss_s = F.cross_entropy(logits, y)
                 loss_s.backward()
                 self.clone_optimizer.step()
@@ -909,10 +923,7 @@ class DFMSHL(AttackRunner):
                 dropout_prob=dropout_prob,
             ).to(device)
 
-            # Benchmark scaling unification (DFME-style): the clone consumes [0,1] inputs.
-            # Paper/official DFMS-HL code may apply (x-0.5)/0.5 to feed [-1,1] tensors.
-            # We intentionally do not, to keep all attacks consistent under the global
-            # oracle/eval [0,1] contract.
+            # Clone internal scale follows `internal_input_scale_mode`.
             self.clone = base_clone
 
             # [UNIFIED] Config-driven optimizer construction
@@ -971,11 +982,9 @@ class DFMSHL(AttackRunner):
     def _train_discriminator(self, real_x: torch.Tensor, fake_x: torch.Tensor) -> None:
         self.discriminator_optimizer.zero_grad()
 
-        # Benchmark scaling unification (DFME-style): train D directly on [0,1].
-        # Paper/official implementations may use inputs normalized to [-1,1]. We deviate
-        # intentionally for benchmark-wide consistency across data-free attacks.
-        real_logits = self.discriminator(clamp_unit(real_x))
-        fake_logits = self.discriminator(clamp_unit(fake_x.detach()))
+        # Discriminator scale follows `internal_input_scale_mode`.
+        real_logits = self.discriminator(self._unit_to_internal(real_x))
+        fake_logits = self.discriminator(self._unit_to_internal(fake_x.detach()))
         real_labels = torch.ones_like(real_logits)
         fake_labels = torch.zeros_like(fake_logits)
         loss_real = F.binary_cross_entropy_with_logits(real_logits, real_labels)
@@ -1001,7 +1010,7 @@ class DFMSHL(AttackRunner):
         # See: temp_dfms_hl/code/train_generator/train_generator_clone.py
         #   - comment: "Update G network: maximize log(D(G(z)))" (around line 624)
         #   - errG_adv = criterion(output, label) with label=real_label (around line 663-674)
-        fake_logits = self.discriminator(clamp_unit(fake_x_gen))
+        fake_logits = self.discriminator(self._unit_to_internal(fake_x_gen))
         adv_targets = torch.ones_like(fake_logits)
         adv_loss = F.binary_cross_entropy_with_logits(fake_logits, adv_targets)
         
@@ -1013,7 +1022,7 @@ class DFMSHL(AttackRunner):
         for p in self.clone.parameters():
             p.requires_grad_(False)
         try:
-            clone_logits = self.clone(fake_x_gen)
+            clone_logits = self.clone(self._unit_to_internal(fake_x_gen))
         finally:
             for p, rg in zip(self.clone.parameters(), prev_requires_grad, strict=False):
                 p.requires_grad_(rg)
@@ -1076,7 +1085,7 @@ class DFMSHL(AttackRunner):
             batch_x = batch_x_cpu.to(device)
             batch_y = batch_y_cpu.to(device)
             self.clone_optimizer.zero_grad()
-            logits = self.clone(batch_x)
+            logits = self.clone(self._unit_to_internal(batch_x))
             loss = F.cross_entropy(logits, batch_y)
             loss.backward()
             self.clone_optimizer.step()

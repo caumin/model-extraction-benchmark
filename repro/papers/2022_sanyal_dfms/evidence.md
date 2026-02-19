@@ -42,12 +42,12 @@
   - quote: `We set λdiv to 500 for CIFAR-10 and 100 for CIFAR-100`
   - interpretation: `lambda_div config values`
 
-- item_path: `reported_results.tables[0].metrics.cifar10_resnet34_victim.dfms_hl_synthetic_acc`
+- item_path: `reported_results.tables[0].metrics.cifar10_resnet18_victim.dfms_hl_synthetic_acc`
   - pdf: `DFMS.pdf`
   - page: `15289`
   - ref: `Table 3`
-  - quote: `DFMS-HL (Ours) ... 84.51`
-  - interpretation: `paper target acc_gt=0.8451`
+  - quote: `Victim Accuracy∼93.7%, Victim Model: ResNet-18 ... DFMS-HL (Ours) ... 85.92`
+  - interpretation: `paper target acc_gt=0.8592 for ResNet-18 victim row`
 
 - item_path: `reported_results.tables[0].metrics.cifar10_resnet34_victim.dfms_sl_synthetic_acc`
   - pdf: `DFMS.pdf`

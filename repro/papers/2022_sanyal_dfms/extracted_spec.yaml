@@ -100,12 +100,11 @@ reported_results:
   tables:
     - id: Table 3
       metrics:
-        cifar10_resnet34_victim:
-          victim_acc: 0.9559
-          dfms_hl_synthetic_acc: 0.8451
-          dfms_hl_proxy40_acc: 0.9206
-          dfms_hl_proxy10_acc: 0.8553
-          dfms_sl_synthetic_acc: 0.9124
+        cifar10_resnet18_victim:
+          victim_acc: 0.9383
+          dfms_hl_synthetic_acc: 0.8592
+          dfms_hl_proxy40_acc: 0.9051
+          dfms_hl_proxy10_acc: 0.8337
   figures:
     - id: Figure 4
       metrics:
@@ -115,12 +114,12 @@ reported_results:
       condition: CIFAR10 DFMS-HL synthetic
       metric_name: acc_gt
       query_budget: 8000000
-      paper_value: 0.8451
+      paper_value: 0.8592
       track: track_b
       tolerance_pp: 1.0
 assumptions:
   - item: strictness gating on full-budget execution
-    reason: runtime victim is pinned to provided ResNet-18 checkpoint; target metric currently references the ResNet-34 table row and must be re-anchored for strict one-to-one parity
+    reason: runtime victim is pinned to provided local ResNet-18 checkpoint; strict table-level parity assumes a high-accuracy teacher comparable to the paper row
     impact_check: comparison remains incomplete/fail until full run artifacts are generated
 evidence_index:
   - item_path: attack.oracle_access.type
@@ -135,7 +134,7 @@ evidence_index:
     pdf_page: 15288
     ref: Section 3.5
     quote: we set nC as 50,000.
-  - item_path: reported_results.tables[0].metrics.cifar10_resnet34_victim.dfms_hl_synthetic_acc
+  - item_path: reported_results.tables[0].metrics.cifar10_resnet18_victim.dfms_hl_synthetic_acc
     pdf_page: 15289
     ref: Table 3
-    quote: DFMS-HL (Ours) ... 84.51
+    quote: Victim Accuracy~93.7%, Victim Model: ResNet-18 ... DFMS-HL ... 85.92

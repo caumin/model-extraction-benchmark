@@ -5,6 +5,7 @@ attack:
   batch_size: 64
   oracle_batch_size: 64
   use_official_stages: true
+  internal_input_scale_mode: tanh
   dcgan_epochs: 200
   student_init_epochs: 200
   degan_epochs: 100
