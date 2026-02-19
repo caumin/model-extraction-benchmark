@@ -38,6 +38,11 @@ class MAZE(AttackRunner):
         self.lr_schedule = str(config.get("lr_schedule", "multistep")).lower()
         if self.lr_schedule not in {"multistep", "cosine"}:
             raise ValueError(f"MAZE lr_schedule must be 'multistep' or 'cosine', got {self.lr_schedule!r}")
+        self.clone_input_scale_mode = str(config.get("clone_input_scale_mode", "unit")).strip().lower()
+        if self.clone_input_scale_mode not in {"unit", "tanh"}:
+            raise ValueError(
+                f"MAZE clone_input_scale_mode must be 'unit' or 'tanh', got {self.clone_input_scale_mode!r}"
+            )
         
         self.generator = None
         self.clone = None
@@ -45,6 +50,8 @@ class MAZE(AttackRunner):
         self.c_scheduler = None
         self.replay_x = []
         self.replay_y = []
+        self._cached_clone_x: Optional[torch.Tensor] = None
+        self._cached_clone_y: Optional[torch.Tensor] = None
         
         self._initialize_models(state)
 
@@ -62,8 +69,14 @@ class MAZE(AttackRunner):
         
         # Paper (Section 5.1): SGD optimizer with lr=1e-4 for G.
         g_lr = float(self.config.get("generator_lr", 1e-4))
-        g_momentum = float(self.config.get("generator_momentum", 0.0))
-        self.g_opt = optim.SGD(self.generator.parameters(), lr=g_lr, momentum=g_momentum)
+        g_momentum = float(self.config.get("generator_momentum", 0.9))
+        g_weight_decay = float(self.config.get("generator_weight_decay", 5e-4))
+        self.g_opt = optim.SGD(
+            self.generator.parameters(),
+            lr=g_lr,
+            momentum=g_momentum,
+            weight_decay=g_weight_decay,
+        )
         
         # Clone: honor substitute config if provided
         sub_config = state.metadata.get("substitute_config", {})
@@ -171,6 +184,11 @@ class MAZE(AttackRunner):
                 y_t_base = y_t_all[:batch]
                 y_t_pert_all = y_t_all[batch:].view(self.grad_approx_m, batch, -1)
 
+                # Reuse base generator samples for the first clone update step
+                # (aligns MAZE paper budget accounting intent with iter_clone-1 fresh queries).
+                self._cached_clone_x = x_base.detach()
+                self._cached_clone_y = y_t_base.detach()
+
                 loss_base = -F.kl_div(torch.log(y_c_base + 1e-10), y_t_base, reduction='none').sum(dim=1)
 
                 for j in range(self.grad_approx_m):
@@ -188,16 +206,23 @@ class MAZE(AttackRunner):
                 pbar.update(batch * (1 + self.grad_approx_m))
 
             # 2. Clone Update Phase (Disagreement Minimization)
-            for _ in range(self.n_c):
-                batch = min(self.batch_size, ctx.budget_remaining)
-                if batch <= 0:
-                    break
+            for c_idx in range(self.n_c):
+                use_cached = bool(c_idx == 0 and self._cached_clone_x is not None and self._cached_clone_y is not None)
+                if use_cached:
+                    x_gen = self._cached_clone_x
+                    y_t = self._cached_clone_y
+                    batch = int(x_gen.size(0))
+                else:
+                    batch = min(self.batch_size, ctx.budget_remaining)
+                    if batch <= 0:
+                        break
+                    z = torch.randn(batch, self.noise_dim, device=device)
+                    x_gen = self.generator(z).detach()
+                    y_t = ctx.query(torch.clamp((x_gen + 1.0) / 2.0, 0.0, 1.0)).y
+                    if y_t.device != x_gen.device:
+                        y_t = y_t.to(x_gen.device)
+
                 self.generator.eval(); self.clone.train()
-                z = torch.randn(batch, self.noise_dim, device=device)
-                x_gen = self.generator(z).detach()
-                y_t = ctx.query(torch.clamp((x_gen + 1.0) / 2.0, 0.0, 1.0)).y
-                if y_t.device != x_gen.device:
-                    y_t = y_t.to(x_gen.device)
 
                 # Avoid BatchNorm crashes on tiny final batches (e.g., batch=1)
                 # while still consuming the remaining query budget.
@@ -216,7 +241,11 @@ class MAZE(AttackRunner):
                 
                 # Experience Replay Storage
                 self._append_replay(x_gen, y_t)
-                pbar.update(batch)
+                if not use_cached:
+                    pbar.update(batch)
+
+            self._cached_clone_x = None
+            self._cached_clone_y = None
 
             # 3. Experience Replay Phase
             if self.replay_x:
@@ -248,10 +277,11 @@ class MAZE(AttackRunner):
         return None
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Map [-1, 1] to [0, 1] then apply standard normalization."""
+        """Prepare clone input according to configured scale mode."""
+        if self.clone_input_scale_mode == "tanh":
+            return torch.clamp(x, -1.0, 1.0)
         x_01 = (x + 1.0) / 2.0
-        # In this benchmark, standard normalization is removed/identity as per AGENTS.md
-        return x_01
+        return torch.clamp(x_01, 0.0, 1.0)
 
     def _clone_probs_eval(self, x: torch.Tensor) -> torch.Tensor:
         """Clone inference for generator-phase zeroth-order estimation."""

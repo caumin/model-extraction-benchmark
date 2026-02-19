@@ -9,6 +9,7 @@ benchmark:
 victim:
   victim_id: cifar10_resnet20
   arch: resnet20
+  input_scale_mode: tanh
   channels: 3
   num_classes: 10
   input_size: [32, 32]
@@ -25,6 +26,7 @@ dataset:
 attack:
   name: maze
   output_mode: soft_prob
+  clone_input_scale_mode: tanh
   max_budget: 30000000
   batch_size: 128
   n_g_steps: 1
@@ -33,7 +35,8 @@ attack:
   grad_approx_m: 10
   grad_approx_epsilon: 0.001
   generator_lr: 0.0001
-  generator_momentum: 0.0
+  generator_momentum: 0.9
+  generator_weight_decay: 0.0005
   lr_schedule: cosine
 
 substitute:
