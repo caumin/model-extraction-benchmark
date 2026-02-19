@@ -1,16 +1,174 @@
 paper:
   paper_id: 2021_kariyappa_maze
-  title: ""
-  authors: []
+  title: "MAZE: Data-Free Model Stealing Attack Using Zeroth-Order Gradient Estimation"
+  authors:
+    - Sanjay Kariyappa
+    - Atul Prakash
+    - Moinuddin K. Qureshi
   year: 2021
-  venue: ""
+  venue: CVPR
 pdf:
   path: /papers/MAZE.pdf
   sha256: e1ee3004e9ab91f277903035dcd2e2205e3be176c629cff91bac2ca3cc2d3c29
-datasets: []
-victim: {}
-attack: {}
-evaluation: {}
-reported_results: {tables: [], figures: []}
-assumptions: []
-evidence_index: []
+datasets:
+  - name: FashionMNIST
+    version: standard
+    task: image classification
+    num_classes: 10
+    splits:
+      train: standard train split
+      val: not specified
+      test: standard test split
+    preprocessing:
+      input_size: 28x28
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: used in MAZE evaluation table
+  - name: SVHN
+    version: standard
+    task: image classification
+    num_classes: 10
+    splits:
+      train: standard train split
+      val: not specified
+      test: standard test split
+    preprocessing:
+      input_size: 32x32
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: used in MAZE evaluation table
+  - name: GTSRB
+    version: standard
+    task: traffic sign classification
+    num_classes: 43
+    splits:
+      train: standard train split
+      val: not specified
+      test: standard test split
+    preprocessing:
+      input_size: 32x32
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: used in MAZE evaluation table
+  - name: CIFAR-10
+    version: standard
+    task: image classification
+    num_classes: 10
+    splits:
+      train: standard train split
+      val: not specified
+      test: standard test split
+    preprocessing:
+      input_size: 32x32
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: used in MAZE evaluation table
+victim:
+  framework: not specified
+  architecture:
+    name: LeNet (FashionMNIST) and ResNet-20 (others)
+    details: per Section 5.1 setup
+    pretrained: not specified
+  training:
+    loss: KL distillation objective in stealing loop
+    optimizer:
+      name: not specified
+      lr: null
+      weight_decay: null
+      momentum: null
+      betas: []
+    batch_size: null
+    epochs: null
+    scheduler: not specified
+    seed: null
+    num_runs: 1
+attack:
+  name: maze
+  oracle_access:
+    type: prob
+    temperature: null
+    rounding: null
+  query_budget:
+    fashionmnist: 5000000
+    svhn: 5000000
+    gtsrb: 30000000
+    cifar10: 30000000
+  substitute:
+    architecture: 22-layer WideResNet
+    training:
+      optimizer:
+        name: SGD
+        lr: 0.1
+      scheduler: cosine annealing
+  hyperparameters:
+    batch_size: 128
+    n_g_steps: 1
+    n_c_steps: 5
+    n_r_steps: 10
+    grad_approx_m: 10
+    grad_approx_epsilon: 0.001
+    generator_optimizer:
+      name: SGD
+      lr: 0.0001
+evaluation:
+  metrics:
+    - acc_gt
+    - normalized_clone_accuracy
+  protocol: clone accuracy on test set and normalized ratio to target model accuracy
+reported_results:
+  tables:
+    - id: Table 1
+      metrics:
+        fashionmnist:
+          target_acc: 0.9104
+          maze_acc: 0.819
+          maze_ratio: 0.90
+        svhn:
+          target_acc: 0.9525
+          maze_acc: 0.9385
+          maze_ratio: 0.99
+        gtsrb:
+          target_acc: 0.9743
+          maze_acc: 0.8831
+          maze_ratio: 0.91
+        cifar10:
+          target_acc: 0.9226
+          maze_acc: 0.8985
+          maze_ratio: 0.97
+  figures:
+    - id: Figure 3
+      metrics:
+        description: normalized clone accuracy vs query budget
+  targets:
+    - id: cifar10_main
+      condition: CIFAR10 MAZE
+      metric_name: acc_gt
+      query_budget: 30000000
+      paper_value: 0.8985
+      track: track_b
+      tolerance_pp: 1.0
+assumptions:
+  - item: victim architecture mapping in local benchmark
+    reason: local reproducible victim profile uses resnet18 checkpoint by default
+    impact_check: mark as non-strict unless resnet20 victim profile is used in full run
+evidence_index:
+  - item_path: attack.hyperparameters.batch_size
+    pdf_page: 13819
+    ref: Section 4.5 Computing the Query Cost
+    quote: We use B = 128, N_G = 1, N_C = 5, N_R = 10 and m = 10.
+  - item_path: attack.query_budget.cifar10
+    pdf_page: 13819
+    ref: Section 4.5 Computing the Query Cost
+    quote: We use a query budget of 30M for GTSRB and CIFAR-10 datasets.
+  - item_path: reported_results.tables[0].metrics.cifar10.maze_acc
+    pdf_page: 13820
+    ref: Table 1
+    quote: CIFAR-10 ... MAZE ... 89.85 (0.97x).

@@ -1,16 +1,140 @@
 paper:
   paper_id: 2021_gong_inversenet
-  title: ""
-  authors: []
+  title: "INVERSENET: Augmenting Model Extraction Attacks with Training Data Inversion"
+  authors:
+    - Xueluan Gong
+    - Yanjiao Chen
+    - Wenbin Yang
+    - Guanghao Mei
+    - Qian Wang
   year: 2021
-  venue: ""
+  venue: IJCAI
 pdf:
   path: /papers/inversenet.pdf
   sha256: 60fcb56683555fb91935b650e478710aa21d8209d70f0507d306d4e4d7b7f699
-datasets: []
-victim: {}
-attack: {}
-evaluation: {}
-reported_results: {tables: [], figures: []}
-assumptions: []
-evidence_index: []
+datasets:
+  - name: MNIST
+    version: standard
+    task: image classification
+    num_classes: 10
+    splits:
+      train: 60000
+      val: not specified
+      test: 10000
+    preprocessing:
+      input_size: 28x28
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: simulated victim dataset
+  - name: GTSRB
+    version: standard
+    task: traffic sign classification
+    num_classes: 43
+    splits:
+      train: 39209
+      val: not specified
+      test: 12630
+    preprocessing:
+      input_size: 32x32 core crop
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: simulated victim dataset
+  - name: CIFAR-10
+    version: standard
+    task: image classification
+    num_classes: 10
+    splits:
+      train: 50000
+      val: not specified
+      test: 10000
+    preprocessing:
+      input_size: 32x32
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: simulated victim dataset
+victim:
+  framework: not specified
+  architecture:
+    name: Classifier (simulated victims)
+    details: API returns top-1 label in strict setting
+    pretrained: not specified
+  training:
+    loss: not specified
+    optimizer:
+      name: not specified
+      lr: null
+      weight_decay: null
+      momentum: null
+      betas: []
+    batch_size: null
+    epochs: null
+    scheduler: not specified
+    seed: null
+    num_runs: 1
+attack:
+  name: inversenet
+  oracle_access:
+    type: label
+    temperature: null
+    rounding: top1_only
+  query_budget: 30000
+  substitute:
+    architecture: CNN32 (simulated victims)
+    training: {}
+  hyperparameters:
+    phase_ratios: [0.45, 0.45, 0.1]
+    coreset_selection: k-center greedy representative samples
+    high_confidence_selection:
+      xi: 0.02
+    inversion_model:
+      architecture: 5 transposed-convolution blocks
+      truncation_k: 1
+evaluation:
+  metrics:
+    - agreement
+    - accuracy
+  protocol: compare substitute predictions against victim on held-out test set
+reported_results:
+  tables:
+    - id: Text + Figure 4 summary
+      metrics:
+        mnist_agreement_at_10k: 0.932
+        gtsrb_agreement_at_10k: 0.861
+        cifar10_agreement_at_10k: 0.754
+        real_api_agreement_at_1k: 0.7687
+        real_api_agreement_at_5k: 0.8053
+  figures:
+    - id: Figure 4
+      metrics:
+        description: agreement and accuracy vs query budget
+  targets:
+    - id: mnist_main
+      condition: MNIST agreement @10k
+      metric_name: agreement
+      query_budget: 10000
+      paper_value: 0.932
+      track: track_b
+      tolerance_pp: 1.0
+assumptions:
+  - item: benchmark implementation alignment
+    reason: local attack implementation maps paper concepts to available config knobs
+    impact_check: strict parity depends on matching Classifier victim and CNN32 substitute profiles
+evidence_index:
+  - item_path: attack.oracle_access.rounding
+    pdf_page: 2440
+    ref: Section 2 Threat Model
+    quote: toughest case where the API only returns the class label (top-1 results)
+  - item_path: attack.hyperparameters.phase_ratios
+    pdf_page: 2443
+    ref: Section 4.1 Evaluation Results
+    quote: ratio between K1, K2, and K3 is fixed at 0.45:0.45:0.1
+  - item_path: reported_results.tables[0].metrics.cifar10_agreement_at_10k
+    pdf_page: 2443
+    ref: Impact of query budget paragraph
+    quote: CIFAR10 model yields an agreement of 75.4%

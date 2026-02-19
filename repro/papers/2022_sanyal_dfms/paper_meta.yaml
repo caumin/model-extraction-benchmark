@@ -1,9 +1,9 @@
-title: "Data-Free Model Stealing for Hard-Label Model via GAN"
+title: "Towards Data-Free Model Stealing in a Hard Label Setting"
 authors:
-  - Sreyashi Sanyal
-  - Matthew Backes
-  - Yang Zhang
-venue: arXiv
+  - Sunandini Sanyal
+  - Sravanti Addepalli
+  - R. Venkatesh Babu
+venue: CVPR
 year: 2022
 paper_id: 2022_sanyal_dfms
 pdf_file: papers/DFMS.pdf

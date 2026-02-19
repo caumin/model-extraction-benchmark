@@ -273,66 +273,87 @@ def _build_comparison_table(
     reproduced_rows: list[dict[str, Any]],
 ) -> None:
     spec = _load_yaml(paper_dir / "extracted_spec.yaml")
-    strategy = str(experiment_cfg.get("attack", {}).get("strategy", "uncertainty"))
-    strategy_key = strategy.replace("-", "_").replace("+", "_")
-
-    paper_value = None
-    target_budget = 20000
-    tables = spec.get("reported_results", {}).get("tables", [])
-    if isinstance(tables, list):
-        for table in tables:
-            if not isinstance(table, dict):
-                continue
-            metrics = table.get("metrics", {})
-            if not isinstance(metrics, dict):
-                continue
-            bucket = metrics.get("cifar10_agreement_20k")
-            if isinstance(bucket, dict):
-                paper_value = bucket.get(strategy_key)
-                if paper_value is not None:
-                    break
-
     comparison_path = paper_dir / "results" / "comparison_table.md"
-    if paper_value is None:
+    targets = spec.get("reported_results", {}).get("targets", [])
+    if not isinstance(targets, list) or len(targets) == 0:
         comparison_path.write_text(
-            (
-                "# Comparison Table\n\n"
-                "- status: INCOMPLETE\n"
-                "- reason: `reported_results.tables.metrics.cifar10_agreement_20k.<strategy>` not found in extracted_spec.yaml\n"
-            ),
+            "# Comparison Table\n\n- status: INCOMPLETE\n- reason: `reported_results.targets` is missing or empty in extracted_spec.yaml\n",
             encoding="utf-8",
         )
         return
 
-    agreement_rows = [r for r in reproduced_rows if r["metric_name"] == "agreement"]
-    at_budget = [r for r in agreement_rows if int(r["query_budget"]) == int(target_budget)]
-    if not at_budget:
-        available = sorted({int(r["query_budget"]) for r in agreement_rows})
+    table_rows: list[str] = []
+    missing_reasons: list[str] = []
+
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        condition = str(target.get("condition", target.get("id", "target")))
+        metric_name = str(target.get("metric_name", "agreement"))
+        query_budget = int(target.get("query_budget", 0))
+        paper_value = float(target.get("paper_value"))
+        track = target.get("track", None)
+        tolerance_pp = float(target.get("tolerance_pp", 1.0))
+        paper_std = target.get("paper_std", None)
+
+        matched = [
+            r
+            for r in reproduced_rows
+            if r.get("metric_name") == metric_name and int(r.get("query_budget", 0)) == query_budget
+        ]
+        if track is not None:
+            matched = [r for r in matched if str(r.get("track", "")) == str(track)]
+
+        if len(matched) == 0:
+            available = sorted(
+                {
+                    int(r.get("query_budget", 0))
+                    for r in reproduced_rows
+                    if r.get("metric_name") == metric_name
+                }
+            )
+            missing_reasons.append(
+                f"- no reproduced `{metric_name}` at query_budget={query_budget} (track={track}); available={available}"
+            )
+            continue
+
+        vals = [float(r["metric_value"]) for r in matched]
+        reproduced_mean = _safe_mean(vals)
+        reproduced_std = _safe_std(vals)
+
+        delta_abs_pp = abs((reproduced_mean - paper_value) * 100.0)
+        criterion = ""
+        if paper_std is not None:
+            paper_std_float = float(paper_std)
+            verdict = "PASS" if abs(reproduced_mean - paper_value) <= paper_std_float else "FAIL"
+            criterion = f"|delta| <= paper_std={paper_std_float:.4f}"
+        else:
+            verdict = "PASS" if delta_abs_pp <= tolerance_pp else "FAIL"
+            criterion = f"|delta_pp| <= {tolerance_pp:.2f}"
+
+        table_rows.append(
+            f"| {condition} | {metric_name} | {query_budget} | {paper_value:.4f} | {reproduced_mean:.4f} | {reproduced_std:.4f} | {delta_abs_pp:.2f} | {criterion} | {verdict} |"
+        )
+
+    if len(table_rows) == 0:
+        reason_block = "\n".join(missing_reasons) if missing_reasons else "- no valid targets matched"
         comparison_path.write_text(
-            (
-                "# Comparison Table\n\n"
-                "- status: INCOMPLETE\n"
-                f"- reason: no reproduced `agreement` at query_budget={target_budget}; available={available}\n"
-            ),
+            f"# Comparison Table\n\n- status: INCOMPLETE\n{reason_block}\n",
             encoding="utf-8",
         )
         return
-
-    vals = [float(r["metric_value"]) for r in at_budget]
-    reproduced_mean = _safe_mean(vals)
-    reproduced_std = _safe_std(vals)
-    paper_float = float(paper_value)
-
-    delta_abs_pp = abs((reproduced_mean - paper_float) * 100.0)
-    tolerance_pp = 1.0
-    verdict = "PASS" if delta_abs_pp <= tolerance_pp else "FAIL"
 
     md = (
         "# Comparison Table\n\n"
-        "| condition | paper_value | reproduced_mean | reproduced_std | delta_abs_pp | verdict |\n"
-        "|---|---:|---:|---:|---:|---|\n"
-        f"| CIFAR10 agreement @20K ({strategy}) | {paper_float:.4f} | {reproduced_mean:.4f} | {reproduced_std:.4f} | {delta_abs_pp:.2f} | {verdict} |\n"
+        "| condition | metric | query_budget | paper_value | reproduced_mean | reproduced_std | delta_abs_pp | criterion | verdict |\n"
+        "|---|---|---:|---:|---:|---:|---:|---|---|\n"
+        + "\n".join(table_rows)
+        + "\n"
     )
+
+    if len(missing_reasons) > 0:
+        md += "\n## Missing Targets\n" + "\n".join(missing_reasons) + "\n"
+
     comparison_path.write_text(md, encoding="utf-8")
 
 
