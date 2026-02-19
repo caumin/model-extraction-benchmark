@@ -604,6 +604,7 @@ def generate_paperlike_configs(
             "victim": {
                 "victim_id": "mnist_classifier",
                 "arch": "classifier",
+                "dropout_prob": 0.2,
                 "channels": mnist_setup.channels,
                 "num_classes": mnist_setup.num_classes,
                 "input_size": [mnist_setup.size, mnist_setup.size],

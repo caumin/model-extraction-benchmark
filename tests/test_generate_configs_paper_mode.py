@@ -67,6 +67,7 @@ def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) ->
     dfms_cfg = yaml.safe_load(dfms_cfg_path.read_text(encoding="utf-8"))
 
     assert inversenet_cfg["victim"]["arch"] == "classifier"
+    assert float(inversenet_cfg["victim"]["dropout_prob"]) == 0.2
     assert inversenet_cfg["substitute"]["arch"] == "cnn32"
     assert inversenet_cfg["dataset"]["surrogate_name"] == "EMNIST"
     assert inversenet_cfg["dataset"]["surrogate_split"] == "letters"

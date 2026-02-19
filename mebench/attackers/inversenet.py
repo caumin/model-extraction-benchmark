@@ -53,7 +53,6 @@ class InverseNet(AttackRunner):
         self.truncation_k = int(config.get("truncation_k", 1))
         self.coreset_seed = int(config.get("coreset_seed", 20))
         self.hcss_xi = float(config.get("hcss_xi", 0.02))
-        self.hcss_step_size = float(config.get("hcss_step_size", 0.01))
         self.hcss_max_iter = int(config.get("hcss_max_iter", 20))
 
         self.pool_dataset = None

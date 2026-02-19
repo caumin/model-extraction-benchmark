@@ -77,6 +77,31 @@ def test_load_victim_from_config_placeholder():
     assert loaded_model.training is False
 
 
+def test_load_victim_from_config_with_dropout_checkpoint():
+    """Test loading victim checkpoint that was trained with dropout-enabled arch."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = create_substitute(
+            arch="classifier",
+            num_classes=10,
+            input_channels=1,
+            dropout_prob=0.2,
+        )
+        checkpoint_path = Path(tmpdir) / "victim_classifier_dropout.pt"
+        torch.save(model.state_dict(), checkpoint_path)
+
+        config = {
+            "checkpoint_ref": str(checkpoint_path),
+            "arch": "classifier",
+            "dropout_prob": 0.2,
+            "channels": 1,
+            "num_classes": 10,
+        }
+
+        loaded_model = load_victim_from_config(config, device="cpu")
+        assert loaded_model is not None
+        assert loaded_model.training is False
+
+
 def test_load_victim_nonexistent_checkpoint():
     """Test that loading nonexistent checkpoint raises error."""
     config = {

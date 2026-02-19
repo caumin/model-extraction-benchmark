@@ -13,6 +13,8 @@ def load_victim_checkpoint(
     arch: str,
     num_classes: int,
     input_channels: int = 3,
+    width_mult: int = 1,
+    dropout_prob: float = 0.0,
     device: str = "cpu",
     strict: bool = True,
 ) -> nn.Module:
@@ -66,6 +68,8 @@ def load_victim_checkpoint(
         arch=arch,
         num_classes=num_classes,
         input_channels=input_channels,
+        width_mult=width_mult,
+        dropout_prob=dropout_prob,
     )
 
     # Load state dict into model
@@ -110,6 +114,8 @@ def load_victim_from_config(
             arch=victim_config.get("arch", "resnet18"),
             num_classes=num_classes,
             input_channels=victim_config.get("channels", 3),
+            width_mult=int(victim_config.get("width_mult", 1)),
+            dropout_prob=float(victim_config.get("dropout_prob", 0.0)),
             device=device,
         )
     else:
@@ -119,6 +125,8 @@ def load_victim_from_config(
             arch=victim_config.get("arch", "resnet18"),
             num_classes=num_classes,
             input_channels=victim_config.get("channels", 3),
+            width_mult=int(victim_config.get("width_mult", 1)),
+            dropout_prob=float(victim_config.get("dropout_prob", 0.0)),
         )
         model.to(device)
         model.eval()
