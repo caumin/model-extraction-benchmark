@@ -120,7 +120,7 @@ reported_results:
       tolerance_pp: 1.0
 assumptions:
   - item: strictness gating on full-budget execution
-    reason: architecture mapping is aligned for the selected target; strict verdict still requires completing 8M-query full run and checking target tolerance
+    reason: runtime victim is pinned to provided ResNet-18 checkpoint; target metric currently references the ResNet-34 table row and must be re-anchored for strict one-to-one parity
     impact_check: comparison remains incomplete/fail until full run artifacts are generated
 evidence_index:
   - item_path: attack.oracle_access.type

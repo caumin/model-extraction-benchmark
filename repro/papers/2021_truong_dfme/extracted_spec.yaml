@@ -121,7 +121,7 @@ reported_results:
       tolerance_pp: 1.0
 assumptions:
   - item: strictness gating on full-budget execution
-    reason: architecture mapping is aligned; strict verdict still requires completing 20M-query full run and checking target tolerance
+    reason: victim now uses vendored official checkpoint; strict verdict still requires completing 20M-query full run and checking target tolerance
     impact_check: comparison remains incomplete/fail until full run artifacts are generated
 evidence_index:
   - item_path: attack.query_budget.cifar10

@@ -26,9 +26,9 @@ $priority = @(
 )
 
 $stagesByPaper = @{
-    "2021_truong_dfme" = "victim_train,victim_eval,attack,collect,compare"
+    "2021_truong_dfme" = "victim_eval,attack,collect,compare"
     "2021_kariyappa_maze" = "victim_train,victim_eval,attack,collect,compare"
-    "2022_sanyal_dfms" = "victim_train,victim_eval,attack,collect,compare"
+    "2022_sanyal_dfms" = "victim_eval,attack,collect,compare"
     "2021_gong_inversenet" = "victim_train,victim_eval,attack,collect,compare"
 }
 

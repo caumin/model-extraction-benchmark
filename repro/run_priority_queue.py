@@ -29,10 +29,11 @@ PRIORITY = [
 ]
 
 STAGES_BY_PAPER = {
-    # strict per-paper victim training/eval
-    "2021_truong_dfme": "victim_train,victim_eval,attack,collect,compare",
+    # DFME uses vendored official victim checkpoint.
+    "2021_truong_dfme": "victim_eval,attack,collect,compare",
     "2021_kariyappa_maze": "victim_train,victim_eval,attack,collect,compare",
-    "2022_sanyal_dfms": "victim_train,victim_eval,attack,collect,compare",
+    # DFMS uses existing CIFAR10 ResNet-18 victim checkpoint.
+    "2022_sanyal_dfms": "victim_eval,attack,collect,compare",
     "2021_gong_inversenet": "victim_train,victim_eval,attack,collect,compare",
 }
 

@@ -1,5 +1,6 @@
 """Victim model loading from checkpoint with best practices."""
 
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 import torch
@@ -33,6 +34,49 @@ def _wrap_victim_input_scale(model: nn.Module, input_scale_mode: str, device: st
     wrapped.to(device)
     wrapped.eval()
     return wrapped
+
+
+def _canonicalize_state_dict_keys(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Map common upstream checkpoint key styles to local model keys.
+
+    Supported canonicalizations:
+    - DataParallel prefix: ``module.`` -> removed
+    - CIFAR-ResNet head: ``linear.`` -> ``fc.``
+    - CIFAR-ResNet shortcut block: ``layerX.Y.shortcut.`` -> ``layerX.Y.downsample.``
+    """
+
+    out: Dict[str, Any] = {}
+    for key, value in state_dict.items():
+        new_key = str(key)
+        if new_key.startswith("module."):
+            new_key = new_key[len("module.") :]
+        if new_key.startswith("model."):
+            new_key = new_key[len("model.") :]
+
+        new_key = new_key.replace("linear.", "fc.")
+        new_key = re.sub(r"^layer(\d+)\.(\d+)\.shortcut\.", r"layer\1.\2.downsample.", new_key)
+        out[new_key] = value
+    return out
+
+
+def _infer_width_mult_from_state_dict(arch: str, state_dict: Dict[str, Any]) -> Optional[int]:
+    """Infer width_mult from checkpoint tensor shapes for supported CNN families."""
+
+    conv1 = state_dict.get("conv1.weight")
+    if conv1 is None or not hasattr(conv1, "shape"):
+        return None
+
+    out_channels = int(conv1.shape[0])
+    arch_norm = str(arch).lower().strip()
+    if arch_norm in {"resnet18", "resnet34"}:
+        if out_channels % 64 != 0:
+            return None
+        return max(1, out_channels // 64)
+    if arch_norm in {"resnet20", "wideresnet22", "wrn22", "wideresnet-22"}:
+        if out_channels % 16 != 0:
+            return None
+        return max(1, out_channels // 16)
+    return None
 
 
 def load_victim_checkpoint(
@@ -83,20 +127,35 @@ def load_victim_checkpoint(
 
     # Extract state dict (handle different checkpoint formats)
     if isinstance(checkpoint, dict):
-        state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+        state_dict = checkpoint.get(
+            "state_dict",
+            checkpoint.get("model_state_dict", checkpoint.get("model", checkpoint)),
+        )
     else:
         state_dict = checkpoint
 
-    # Strip 'module.' prefix (common with DataParallel/DDP)
-    if any(k.startswith("module.") for k in state_dict.keys()):
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    if not isinstance(state_dict, dict):
+        raise RuntimeError("Unsupported checkpoint payload: expected state_dict mapping")
+
+    state_dict = _canonicalize_state_dict_keys(state_dict)
+
+    requested_width = int(width_mult)
+    inferred_width = _infer_width_mult_from_state_dict(arch, state_dict)
+    resolved_width = requested_width
+    if inferred_width is not None and inferred_width != requested_width:
+        print(
+            "WARNING: checkpoint appears to use "
+            f"width_mult={inferred_width}, but config requested width_mult={requested_width}. "
+            f"Using inferred width_mult={inferred_width}."
+        )
+        resolved_width = inferred_width
 
     # Initialize model architecture
     model = create_substitute(
         arch=arch,
         num_classes=num_classes,
         input_channels=input_channels,
-        width_mult=width_mult,
+        width_mult=resolved_width,
         dropout_prob=dropout_prob,
     )
 

@@ -8,4 +8,5 @@
 | Query budget (smoke) | low-resource validation | `budget.max_budget` | `2000` in `experiment_smoke.yaml` |
 | G/S step ratio | `n_G:n_S = 1:5` | `attack.n_g_steps`, `attack.n_s_steps` | `1`, `5` (full) |
 | Gradient approx | `m=1`, `epsilon=1e-3` | `attack.grad_approx_m`, `attack.grad_approx_epsilon` | `1`, `0.001` |
+| Victim checkpoint source | official pretrained victim | `victim.checkpoint_ref` | `runs/victims/cifar10-resnet34_8x.pt` |
 | Student arch | ResNet-18-8x | `substitute.arch`, `substitute.width_mult` | `resnet18`, `8` |

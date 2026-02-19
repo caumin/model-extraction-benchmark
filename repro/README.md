@@ -65,8 +65,9 @@ PowerShell sequential runner (recommended if you want live `tqdm`/progress-bar r
 
 Queue behavior:
 
-- Each paper runs its own `victim_train,victim_eval,attack,collect,compare` stages.
-- This avoids cross-paper victim checkpoint reuse and keeps architecture parity stricter.
+- DFME uses the vendored official victim checkpoint (`runs/victims/cifar10-resnet34_8x.pt`) and runs `victim_eval,attack,collect,compare`.
+- DFMS uses existing victim checkpoint (`runs/victims/cifar10_resnet18_seed0.pt`) and runs `victim_eval,attack,collect,compare`.
+- MAZE/InverseNet run `victim_train,victim_eval,attack,collect,compare`.
 
 Remote/high-resource full run:
 
