@@ -197,6 +197,7 @@ class SurrogateDataset(Dataset):
         output_channels: Optional[int] = None,
         class_subset_size: int = 0,
         class_subset_seed: int = 42,
+        class_subset_names: Optional[list[str]] = None,
         emnist_split: str = "balanced",
     ):
         """Initialize surrogate dataset.
@@ -277,12 +278,26 @@ class SurrogateDataset(Dataset):
 
             ds: Dataset = full_dataset
             subset_k = int(class_subset_size)
-            if subset_k > 0:
+            chosen_set: Optional[set[int]] = None
+
+            if class_subset_names:
+                class_to_idx = full_dataset.class_to_idx
+                requested = [str(name) for name in class_subset_names]
+                missing = [name for name in requested if name not in class_to_idx]
+                if missing:
+                    raise ValueError(
+                        "Unknown CIFAR100 class names in surrogate_class_subset_names: "
+                        + ", ".join(sorted(missing))
+                    )
+                chosen_set = set(int(class_to_idx[name]) for name in requested)
+            elif subset_k > 0:
                 if subset_k > 100:
                     raise ValueError(f"CIFAR100 class_subset_size must be <= 100, got {subset_k}")
                 g = torch.Generator().manual_seed(int(class_subset_seed))
                 chosen_classes = torch.randperm(100, generator=g)[:subset_k].tolist()
                 chosen_set = set(int(c) for c in chosen_classes)
+
+            if chosen_set is not None:
                 targets = full_dataset.targets
                 keep_indices = [i for i, t in enumerate(targets) if int(t) in chosen_set]
                 ds = Subset(full_dataset, keep_indices)
@@ -468,6 +483,7 @@ def create_dataloader(
             output_channels=output_channels,
             class_subset_size=int(config.get("surrogate_class_subset_size", 0)),
             class_subset_seed=int(config.get("surrogate_class_subset_seed", 42)),
+            class_subset_names=config.get("surrogate_class_subset_names"),
             emnist_split=str(config.get("surrogate_split", config.get("emnist_split", "balanced"))),
         )
     elif data_mode == "seed":

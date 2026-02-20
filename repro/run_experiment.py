@@ -396,6 +396,41 @@ def _resolve_experiment_path(paper_dir: Path, profile: str) -> Path:
     return paper_dir / "configs" / "experiment.yaml"
 
 
+def _apply_repro_stage_toggles(
+    requested_stages: list[str], experiment_cfg: dict[str, Any]
+) -> list[str]:
+    """Apply stage toggles defined in experiment YAML.
+
+    Supported schema:
+      repro:
+        victim_eval:
+          enabled: true|false
+    """
+
+    stages = list(requested_stages)
+    repro_cfg = experiment_cfg.get("repro", {})
+    if not isinstance(repro_cfg, dict):
+        return stages
+
+    victim_eval_cfg = repro_cfg.get("victim_eval")
+    enabled: Any = None
+    if isinstance(victim_eval_cfg, dict):
+        enabled = victim_eval_cfg.get("enabled")
+    elif isinstance(victim_eval_cfg, bool):
+        enabled = victim_eval_cfg
+
+    if enabled is True and "victim_eval" not in stages:
+        if "victim_train" in stages:
+            insert_at = stages.index("victim_train") + 1
+            stages.insert(insert_at, "victim_eval")
+        else:
+            stages.insert(0, "victim_eval")
+    elif enabled is False and "victim_eval" in stages:
+        stages = [stage for stage in stages if stage != "victim_eval"]
+
+    return stages
+
+
 def run_pipeline(args: argparse.Namespace) -> None:
     paper_dir = PAPERS_ROOT / args.paper_id
     if not paper_dir.exists():
@@ -405,11 +440,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     log_path = paper_dir / "logs" / f"pipeline_{timestamp}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    stages = [s.strip() for s in args.stages.split(",") if s.strip()]
+    requested_stages = [s.strip() for s in args.stages.split(",") if s.strip()]
     _capture_environment(paper_dir, args.device)
 
     experiment_path = _resolve_experiment_path(paper_dir, args.profile)
     experiment_cfg = _load_yaml(experiment_path)
+    stages = _apply_repro_stage_toggles(requested_stages, experiment_cfg)
 
     if "victim_train" in stages:
         cmd = [

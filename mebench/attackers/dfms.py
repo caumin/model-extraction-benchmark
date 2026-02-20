@@ -13,7 +13,12 @@ from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
-from mebench.models.gan import DCGANGenerator, DCGANDiscriminator
+from mebench.models.gan import (
+    DCGANGenerator,
+    DCGANDiscriminator,
+    OfficialDFMSDCGANGenerator,
+    OfficialDFMSDCGANDiscriminator,
+)
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
@@ -114,6 +119,11 @@ class DFMSHL(AttackRunner):
                 f"got {self.internal_input_scale_mode!r}"
             )
 
+        self.use_official_dcgan_arch = bool(config.get("use_official_dcgan_arch", True))
+        self.proxy_pad_crop = bool(config.get("proxy_pad_crop", True))
+        self.alternate_auto_augment = bool(config.get("alternate_auto_augment", True))
+        self.auto_augment_policy = str(config.get("auto_augment_policy", "cifar10")).strip().lower()
+
         self.generator: nn.Module | None = None
         self.discriminator: nn.Module | None = None
         self.clone: nn.Module | None = None
@@ -123,6 +133,7 @@ class DFMSHL(AttackRunner):
         self.clone_scheduler: optim.lr_scheduler.CosineAnnealingLR | None = None
         self.proxy_data: torch.Tensor | None = None
         self.pretrained = False
+        self._auto_augment = self._build_auto_augment()
 
         self._initialize_state(state)
 
@@ -317,6 +328,40 @@ class DFMSHL(AttackRunner):
 
         return x_aug
 
+    def _build_auto_augment(self):
+        if not self.alternate_auto_augment:
+            return None
+        try:
+            from torchvision.transforms import AutoAugment, AutoAugmentPolicy
+
+            policy = {
+                "cifar10": AutoAugmentPolicy.CIFAR10,
+                "imagenet": AutoAugmentPolicy.IMAGENET,
+                "svhn": AutoAugmentPolicy.SVHN,
+            }.get(self.auto_augment_policy, AutoAugmentPolicy.CIFAR10)
+            return AutoAugment(policy)
+        except Exception as exc:  # pragma: no cover
+            self.logger.warning("[DFMSHL] AutoAugment unavailable, disabled: %s", str(exc))
+            return None
+
+    def _augment_auto_augment(self, x: torch.Tensor) -> torch.Tensor:
+        if self._auto_augment is None:
+            return x
+        if x.ndim != 4 or x.size(0) <= 0:
+            return x
+
+        x_unit = clamp_unit(x)
+        augmented: List[torch.Tensor] = []
+        for i in range(int(x_unit.size(0))):
+            img = x_unit[i].detach().cpu()
+            out = self._auto_augment(img)
+            if not isinstance(out, torch.Tensor):
+                return x
+            augmented.append(out)
+
+        x_aug = torch.stack(augmented, dim=0)
+        return x_aug.to(x.device)
+
     def _reset_clone_for_stage(
         self,
         *,
@@ -439,6 +484,8 @@ class DFMSHL(AttackRunner):
             for real_x in self._iter_proxy_epoch_batches(
                 device=device, batch_size=batch_size, subset_size=subset_n
             ):
+                if self.proxy_pad_crop:
+                    real_x = self._augment_pad_crop_hflip(real_x)
                 z = torch.randn(real_x.size(0), self.noise_dim, device=device)
                 fake_x = tanh_to_unit(self.generator(z))
                 self._train_discriminator(real_x, fake_x)
@@ -478,6 +525,8 @@ class DFMSHL(AttackRunner):
             for real_x in self._iter_proxy_epoch_batches(
                 device=device, batch_size=batch_size, subset_size=subset_n
             ):
+                if self.proxy_pad_crop:
+                    real_x = self._augment_pad_crop_hflip(real_x)
                 # Official train_gen.py updates D first, then G (with d_l=10 by default).
                 z = torch.randn(real_x.size(0), self.noise_dim, device=device)
                 fake_x = tanh_to_unit(self.generator(z))
@@ -734,6 +783,8 @@ class DFMSHL(AttackRunner):
                 if b <= 0:
                     break
                 real_x = real_x[:b]
+                if self.proxy_pad_crop:
+                    real_x = self._augment_pad_crop_hflip(real_x)
 
                 # 1) Generate synthetic batch (keep graph for G update)
                 z = torch.randn(b, self.noise_dim, device=device)
@@ -744,6 +795,8 @@ class DFMSHL(AttackRunner):
                 x_for_student = fake_x.detach()
                 if use_pad_crop:
                     x_for_student = self._augment_pad_crop_hflip(x_for_student)
+                if self.alternate_auto_augment:
+                    x_for_student = self._augment_auto_augment(x_for_student)
 
                 y = self._oracle_hard_labels(ctx, x_for_student)
                 pbar.update(int(b))
@@ -883,26 +936,41 @@ class DFMSHL(AttackRunner):
         device = state.metadata.get("device", "cpu")
         if self.generator is None:
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            self.generator = DCGANGenerator(
-                noise_dim=self.noise_dim,
-                output_channels=int(self.config.get("output_channels", input_shape[0])),
-                base_channels=self.base_channels,
-                num_classes=None,
-                output_size=int(input_shape[1]),
-                num_upsamples=self.config.get("generator_upsamples"),
-            ).to(device)
+            if self.use_official_dcgan_arch:
+                self.generator = OfficialDFMSDCGANGenerator(
+                    noise_dim=self.noise_dim,
+                    output_channels=int(self.config.get("output_channels", input_shape[0])),
+                    base_channels=self.base_channels,
+                    output_size=int(input_shape[1]),
+                ).to(device)
+            else:
+                self.generator = DCGANGenerator(
+                    noise_dim=self.noise_dim,
+                    output_channels=int(self.config.get("output_channels", input_shape[0])),
+                    base_channels=self.base_channels,
+                    num_classes=None,
+                    output_size=int(input_shape[1]),
+                    num_upsamples=self.config.get("generator_upsamples"),
+                ).to(device)
             self.generator_optimizer = optim.Adam(
                 self.generator.parameters(), lr=self.generator_lr, betas=(0.5, 0.999)
             )
 
         if self.discriminator is None:
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
-            self.discriminator = DCGANDiscriminator(
-                input_channels=int(self.config.get("output_channels", input_shape[0])),
-                base_channels=self.base_channels,
-                num_classes=None,
-                input_size=int(input_shape[1]),
-            ).to(device)
+            if self.use_official_dcgan_arch:
+                self.discriminator = OfficialDFMSDCGANDiscriminator(
+                    input_channels=int(self.config.get("output_channels", input_shape[0])),
+                    base_channels=self.base_channels,
+                    input_size=int(input_shape[1]),
+                ).to(device)
+            else:
+                self.discriminator = DCGANDiscriminator(
+                    input_channels=int(self.config.get("output_channels", input_shape[0])),
+                    base_channels=self.base_channels,
+                    num_classes=None,
+                    input_size=int(input_shape[1]),
+                ).to(device)
             self.discriminator_optimizer = optim.Adam(
                 self.discriminator.parameters(), lr=self.discriminator_lr, betas=(0.5, 0.999)
             )
@@ -995,7 +1063,7 @@ class DFMSHL(AttackRunner):
 
     def _train_generator(self, fake_x: torch.Tensor) -> None:
         # Regenerate to maintain gradient graph from z to G(z)
-        z = torch.randn(self.batch_size, self.noise_dim, device=fake_x.device)
+        z = torch.randn(int(fake_x.size(0)), self.noise_dim, device=fake_x.device)
         fake_x_gen_raw = self.generator(z)
         fake_x_gen = tanh_to_unit(fake_x_gen_raw)  # [-1, 1] -> [0, 1]
 
@@ -1060,7 +1128,7 @@ class DFMSHL(AttackRunner):
             # Align pretraining with official repo behavior (non-saturating generator loss).
             # Paper writes minimax L_adv,fake as log(1 - D(G(z))) (Eq.(3)), but the official
             # repo uses BCE(fake->real) for generator updates.
-            fake_logits = self.discriminator(clamp_unit(fake_x_2))
+            fake_logits = self.discriminator(self._unit_to_internal(clamp_unit(fake_x_2)))
             loss_g = F.binary_cross_entropy_with_logits(fake_logits, torch.ones_like(fake_logits))
             loss_g.backward()
             self.generator_optimizer.step()

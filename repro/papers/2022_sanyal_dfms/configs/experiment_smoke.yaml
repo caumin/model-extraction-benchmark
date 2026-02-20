@@ -6,6 +6,10 @@ run:
 benchmark:
   protocol_version: "1.2"
 
+repro:
+  victim_eval:
+    enabled: true
+
 victim:
   victim_id: cifar10_resnet18
   arch: resnet18
@@ -27,6 +31,7 @@ attack:
   name: dfms
   output_mode: hard_top1
   internal_input_scale_mode: tanh
+  use_official_dcgan_arch: true
   max_budget: 2000
   batch_size: 32
   oracle_batch_size: 32
@@ -45,6 +50,9 @@ attack:
   proxy_data_ratio: 0.1
   dcgan_data_ratio: 0.1
   div_gan_data_ratio: 0.1
+  proxy_pad_crop: true
+  alternate_auto_augment: true
+  auto_augment_policy: cifar10
   proxy_dataset:
     name: CIFAR10
     data_mode: surrogate
@@ -55,6 +63,7 @@ attack:
     input_size: [32, 32]
     surrogate_class_subset_size: 10
     surrogate_class_subset_seed: 42
+    surrogate_class_subset_names: [plate, rose, castle, keyboard, house, forest, road, television, bottle, wardrobe]
     surrogate_max_samples: 2000
     surrogate_subset_seed: 42
 

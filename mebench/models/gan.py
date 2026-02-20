@@ -164,6 +164,99 @@ class DCGANDiscriminator(nn.Module):
         return source, class_logits
 
 
+class OfficialDFMSDCGANGenerator(nn.Module):
+    """DFMS official DCGAN generator topology.
+
+    Mirrors `official_repo_clones/dfms_hl/code/train_generator/dcgan_model.py`.
+    """
+
+    def __init__(
+        self,
+        noise_dim: int = 100,
+        output_channels: int = 3,
+        base_channels: int = 64,
+        output_size: int = 32,
+    ) -> None:
+        super().__init__()
+        self.noise_dim = int(noise_dim)
+        self.output_channels = int(output_channels)
+        self.base_channels = int(base_channels)
+        self.output_size = int(output_size)
+
+        self.main = nn.Sequential(
+            nn.ConvTranspose2d(self.noise_dim, self.base_channels * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(self.base_channels * 8),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(self.base_channels * 8, self.base_channels * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.base_channels * 4),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(self.base_channels * 4, self.base_channels * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.base_channels * 2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(self.base_channels * 2, self.base_channels, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.base_channels),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(self.base_channels, self.output_channels, 1, 1, 0, bias=False),
+            nn.Tanh(),
+        )
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        if z.ndim == 2:
+            z = z.view(z.size(0), z.size(1), 1, 1)
+        elif z.ndim != 4:
+            raise ValueError(f"Expected latent z with 2D or 4D shape, got {tuple(z.shape)}")
+        x = self.main(z)
+        if x.shape[-1] != self.output_size:
+            x = torch.nn.functional.interpolate(
+                x,
+                size=(self.output_size, self.output_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        return x
+
+
+class OfficialDFMSDCGANDiscriminator(nn.Module):
+    """DFMS official DCGAN discriminator topology.
+
+    Matches convolutional stack from official implementation while returning
+    raw logits (without sigmoid) to pair with BCEWithLogitsLoss.
+    """
+
+    def __init__(
+        self,
+        input_channels: int = 3,
+        base_channels: int = 64,
+        input_size: int = 32,
+    ) -> None:
+        super().__init__()
+        self.input_channels = int(input_channels)
+        self.base_channels = int(base_channels)
+        self.input_size = int(input_size)
+
+        self.main = nn.Sequential(
+            nn.Conv2d(self.input_channels, self.base_channels, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.base_channels, self.base_channels * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.base_channels * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.base_channels * 2, self.base_channels * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.base_channels * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.base_channels * 4, self.base_channels * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.base_channels * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        final_kernel = max(1, int(self.input_size) // 16)
+        self.head = nn.Conv2d(self.base_channels * 8, 1, final_kernel, final_kernel, 0, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.main(x)
+        out = self.head(out)
+        return out.view(-1)
+
+
 class SNDCGANGenerator(DCGANGenerator):
     """DCGAN generator with spectral norm applied to weight layers."""
 

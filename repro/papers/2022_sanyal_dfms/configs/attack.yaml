@@ -6,6 +6,7 @@ attack:
   oracle_batch_size: 64
   use_official_stages: true
   internal_input_scale_mode: tanh
+  use_official_dcgan_arch: true
   dcgan_epochs: 200
   student_init_epochs: 200
   degan_epochs: 100
@@ -21,7 +22,10 @@ attack:
   dcgan_data_ratio: 0.8
   div_gan_data_ratio: 0.8
   student_pad_crop: true
+  proxy_pad_crop: true
   alternate_pad_crop: false
+  alternate_auto_augment: true
+  auto_augment_policy: cifar10
   proxy_dataset:
     name: CIFAR10
     data_mode: surrogate
@@ -32,6 +36,7 @@ attack:
     input_size: [32, 32]
     surrogate_class_subset_size: 10
     surrogate_class_subset_seed: 42
+    surrogate_class_subset_names: [plate, rose, castle, keyboard, house, forest, road, television, bottle, wardrobe]
     surrogate_max_samples: 50000
     surrogate_subset_seed: 42
 
