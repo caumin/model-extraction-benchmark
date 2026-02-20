@@ -137,4 +137,4 @@ evidence_index:
   - item_path: reported_results.tables[0].metrics.cifar10_resnet18_victim.dfms_hl_synthetic_acc
     pdf_page: 15289
     ref: Table 3
-    quote: Victim Accuracy~93.7%, Victim Model: ResNet-18 ... DFMS-HL ... 85.92
+    quote: "Victim Accuracy~93.7%, Victim Model: ResNet-18 ... DFMS-HL ... 85.92"
