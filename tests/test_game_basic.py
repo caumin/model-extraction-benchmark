@@ -30,3 +30,5 @@ def test_game_basic_flow() -> None:
     attack._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, state)
 
     assert state.attack_state["substitute"] is not None
+    assert len(state.attack_state.get("query_data_x", [])) == 1
+    assert len(state.attack_state.get("query_data_y", [])) == 1

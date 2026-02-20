@@ -36,6 +36,7 @@ class GAME(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.proxy_num_classes = int(config.get("proxy_num_classes", 0))
         self.base_channels = int(config.get("base_channels", 64))
         # Official methods.game starts with uniform random sampler_weights.
         self.acs_strategy = str(config.get("acs_strategy", "random")).strip().lower()
@@ -85,6 +86,32 @@ class GAME(AttackRunner):
         self._periodic_eval_done: set[int] = set()
 
         self._initialize_state(state)
+
+    def _resolve_proxy_num_classes(self, state: BenchmarkState) -> int:
+        if int(self.proxy_num_classes) > 0:
+            return int(self.proxy_num_classes)
+
+        proxy_config = self.config.get("attack", {}).get("proxy_dataset")
+        if proxy_config is None:
+            proxy_config = self.config.get("proxy_dataset")
+        if proxy_config is None:
+            proxy_config = state.metadata.get("dataset_config", {}).copy()
+
+        proxy_config = dict(proxy_config or {})
+        num_classes = proxy_config.get("num_classes")
+        if num_classes is not None:
+            return int(num_classes)
+
+        name = str(proxy_config.get("surrogate_name") or proxy_config.get("name") or "").strip().upper()
+        known = {
+            "CIFAR10": 10,
+            "CIFAR100": 100,
+            "SVHN": 10,
+            "GTSRB": 43,
+            "FASHIONMNIST": 10,
+            "EMNIST": 47,
+        }
+        return int(known.get(name, self.num_classes))
 
     def _publish_substitute(self) -> None:
         if self.student is None:
@@ -227,24 +254,36 @@ class GAME(AttackRunner):
         else:
             victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
 
-        self._update_victim_stats(state, victim_probs, meta.get("y_g"))
+        with torch.no_grad():
+            norm_mean, norm_std = self._get_norm_tensors(str(device))
+            student_logits_now = self.student((x_query - norm_mean) / norm_std)
+            student_probs_now = F.softmax(student_logits_now, dim=1)
+
+        qx = state.attack_state.setdefault("query_data_x", [])
+        qy = state.attack_state.setdefault("query_data_y", [])
+        qx.append(x_query.detach().cpu())
+        qy.append(victim_probs.detach().cpu())
+
+        self._update_victim_stats(state, victim_probs, meta.get("y_g"), student_probs_now)
 
         state.attack_state["last_victim_probs"] = victim_probs.detach().cpu()
 
         # Paper Algorithm 1 ordering: distill student (GMD) before generator update (AGU).
-        self._gmd_phase(x_query, victim_probs)
+        gmd_steps = max(1, int(self.gmd_steps))
+        for i in range(gmd_steps):
+            self._gmd_phase(x_query, victim_probs, include_round_retrain=(i == gmd_steps - 1))
         self._agu_phase(x_query, victim_probs, device, meta.get("z"), meta.get("y_g"))
 
         state.attack_state["step"] += 1
         self._publish_substitute()
 
     def _initialize_state(self, state: BenchmarkState) -> None:
+        self.proxy_num_classes = self._resolve_proxy_num_classes(state)
         state.attack_state["step"] = 0
-        state.attack_state["victim_class_avg_prob"] = torch.full(
-            (self.num_classes, self.num_classes),
-            1.0 / self.num_classes,
-        )
-        state.attack_state["victim_class_counts"] = torch.zeros(self.num_classes)
+        state.attack_state["class_score_sum"] = torch.zeros(self.proxy_num_classes)
+        state.attack_state["class_score_count"] = torch.zeros(self.proxy_num_classes)
+        state.attack_state["query_data_x"] = []
+        state.attack_state["query_data_y"] = []
 
     def _init_models(self, state: BenchmarkState) -> None:
         device = state.metadata.get("device", "cpu")
@@ -257,7 +296,7 @@ class GAME(AttackRunner):
                     noise_dim=self.noise_dim,
                     output_channels=int(self.config.get("output_channels", input_shape[0])),
                     base_channels=self.base_channels,
-                    num_classes=self.num_classes,
+                    num_classes=self.proxy_num_classes,
                     output_size=int(input_shape[1]),
                     dropout_prob=0.25,  # Paper-mandated dropout
                 ).to(device)
@@ -266,7 +305,7 @@ class GAME(AttackRunner):
                     noise_dim=self.noise_dim,
                     output_channels=int(self.config.get("output_channels", input_shape[0])),
                     base_channels=self.base_channels,
-                    num_classes=self.num_classes,
+                    num_classes=self.proxy_num_classes,
                     output_size=int(input_shape[1]),
                 ).to(device)
                 
@@ -282,7 +321,7 @@ class GAME(AttackRunner):
                 self.discriminator = ACGANDiscriminator(
                     input_channels=int(self.config.get("output_channels", input_shape[0])),
                     base_channels=self.base_channels,
-                    num_classes=self.num_classes,
+                    num_classes=self.proxy_num_classes,
                     input_size=int(input_shape[1]),
                     dropout_prob=0.25,  # Paper-mandated dropout
                 ).to(device)
@@ -290,7 +329,7 @@ class GAME(AttackRunner):
                 self.discriminator = DCGANDiscriminator(
                     input_channels=int(self.config.get("output_channels", input_shape[0])),
                     base_channels=self.base_channels,
-                    num_classes=self.num_classes if self.use_acgan else None,
+                    num_classes=self.proxy_num_classes if self.use_acgan else None,
                     input_size=int(input_shape[1]),
                 ).to(device)
                 
@@ -411,18 +450,18 @@ class GAME(AttackRunner):
             if batch_size <= 0:
                 continue
 
-            if int(real_y.min().item()) < 0 or int(real_y.max().item()) >= int(self.num_classes):
+            if int(real_y.min().item()) < 0 or int(real_y.max().item()) >= int(self.proxy_num_classes):
                 raise ValueError(
-                    "Proxy labels must be within [0, num_classes). "
+                    "Proxy labels must be within [0, proxy_num_classes). "
                     f"Got min={int(real_y.min().item())}, max={int(real_y.max().item())}, "
-                    f"num_classes={int(self.num_classes)}."
+                    f"proxy_num_classes={int(self.proxy_num_classes)}."
                 )
 
             # -------------------------
             # Train Discriminator: maximize L_C + L_S (Eq.7)
             # -------------------------
             z = torch.randn(batch_size, self.noise_dim, device=device)
-            y_g = torch.randint(0, self.num_classes, (batch_size,), device=device)
+            y_g = torch.randint(0, self.proxy_num_classes, (batch_size,), device=device)
             fake_x = tanh_to_unit(self.generator(z, y_g))
 
             self.discriminator_optimizer.zero_grad()
@@ -459,7 +498,7 @@ class GAME(AttackRunner):
             # Train Generator: maximize L_C - L_S (Eq.6)
             # -------------------------
             z = torch.randn(batch_size, self.noise_dim, device=device)
-            y_g = torch.randint(0, self.num_classes, (batch_size,), device=device)
+            y_g = torch.randint(0, self.proxy_num_classes, (batch_size,), device=device)
             fake_x = tanh_to_unit(self.generator(z, y_g))
 
             self.generator_optimizer.zero_grad()
@@ -482,26 +521,24 @@ class GAME(AttackRunner):
         self.tdl_done = True
 
     def _compute_class_distribution(self, state: BenchmarkState, device: str) -> torch.Tensor:
-        """Compute class distribution from FRESH victim queries for ACS deviation.
-        
-        [P0 FIX] Paper requires fresh victim queries for ACS deviation, not cached stats.
-        """
+        """Compute generator conditioning distribution over proxy classes."""
         if self.student is None or self.generator is None:
-            return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
+            return torch.full((self.proxy_num_classes,), 1.0 / self.proxy_num_classes, device=device)
         # Benchmark scaling unification: identity normalization (mean=0,std=1).
         norm_mean, norm_std = self._get_norm_tensors(device)
+
         def _norm(img: torch.Tensor) -> torch.Tensor:
             # NOTE: `img` here is already in [0,1]. Do NOT apply an extra *0.5+0.5.
             # The benchmark uses identity normalization.
             return (img - norm_mean) / norm_std
 
         if self.acs_strategy == "random":
-            return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
+            return torch.full((self.proxy_num_classes,), 1.0 / self.proxy_num_classes, device=device)
 
         if self.acs_strategy != "deviation":
             # Uncertainty-based selection (default): Prefer classes where student is uncertain
-            z = torch.randn(self.num_classes, self.noise_dim, device=device)
-            class_ids = torch.arange(self.num_classes, device=device)
+            z = torch.randn(self.proxy_num_classes, self.noise_dim, device=device)
+            class_ids = torch.arange(self.proxy_num_classes, device=device)
             with torch.no_grad():
                 # We need ACGAN to control class generation. If DCGAN, class_ids ignored.
                 # GAME assumes ACGAN for class-conditional generation.
@@ -514,55 +551,19 @@ class GAME(AttackRunner):
             # Higher uncertainty -> Higher selection probability
             score = 1.0 - student_probs.max(dim=1).values
         else:
-            # Deviation-based selection: Prefer classes where Student differs from Victim
-            if self._query_fn is None:
-                self.logger.warning("GAME ACS deviation requires oracle query; returning uniform distribution.")
-                return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
-            
-            budget_remaining = None
-            if self._ctx is not None:
-                budget_remaining = int(self._ctx.budget_remaining)
+            # Deviation strategy uses running per-proxy-class disagreement statistics.
+            score_sum = state.attack_state.get("class_score_sum")
+            score_count = state.attack_state.get("class_score_count")
+            if score_sum is None or score_count is None:
+                return torch.full((self.proxy_num_classes,), 1.0 / self.proxy_num_classes, device=device)
 
-            probe_budget = self.num_classes
-            if self.acs_probe_size > 0:
-                probe_budget = min(self.acs_probe_size, self.num_classes)
-            if budget_remaining is not None and self._pending_query_k is not None:
-                probe_budget = min(probe_budget, max(0, budget_remaining - int(self._pending_query_k)))
-
-            if probe_budget <= 0:
-                self.logger.warning("GAME ACS deviation probe skipped due to budget constraints.")
-                return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
-
-            if probe_budget < self.num_classes:
-                class_ids = torch.randperm(self.num_classes, device=device)[:probe_budget]
-            else:
-                class_ids = torch.arange(self.num_classes, device=device)
-
-            z = torch.randn(class_ids.size(0), self.noise_dim, device=device)
-            with torch.no_grad():
-                x_gen_raw = self.generator(z, class_ids)
-                x_gen = tanh_to_unit(x_gen_raw)
-                student_logits = self.student(_norm(x_gen))
-                student_probs = F.softmax(student_logits, dim=1)
-
-            x_query = x_gen
-            oracle_output = self._query_fn(x_query, meta={"acs_probe": True, "y_g": class_ids.detach().cpu()})
-            if oracle_output.kind == "soft_prob":
-                victim_probs = oracle_output.y.to(device)
-            else:
-                victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
-
-            self._update_victim_stats(state, victim_probs, class_ids)
-            
-            # KL(S || V) approximation
-            s_log = torch.log(student_probs + 1e-10)
-            v_log = torch.log(victim_probs + 1e-10)
-            # We want to select classes with HIGH disagreement
-            kl_div = (student_probs * (s_log - v_log)).sum(dim=1)
-            
-            # Map probe scores back to full class vector
-            score = torch.full((self.num_classes,), 1e-6, device=device)
-            score[class_ids] = kl_div
+            score_sum = score_sum.to(device)
+            score_count = score_count.to(device)
+            score = score_sum / score_count.clamp_min(1.0)
+            unseen = score_count <= 0
+            if torch.any(unseen):
+                score = score.clone()
+                score[unseen] = score[~unseen].mean() if torch.any(~unseen) else 1.0
 
         score = score - score.min()
         score = score + 1e-6
@@ -607,25 +608,41 @@ class GAME(AttackRunner):
                 loss.backward()
                 self.student_optimizer.step()
 
-    def _update_victim_stats(self, state: BenchmarkState, probs: torch.Tensor, y_g: Optional[torch.Tensor]) -> None:
-        """Update running statistics of victim class probabilities per generated class."""
+    def _update_victim_stats(
+        self,
+        state: BenchmarkState,
+        probs: torch.Tensor,
+        y_g: Optional[torch.Tensor],
+        student_probs: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Update per-proxy-class discrepancy statistics for ACS."""
         if y_g is None:
             return
-            
-        # Update counts
-        # This is a simplified online update for mean vectors per class
+
+        score_sum = state.attack_state.get("class_score_sum")
+        score_count = state.attack_state.get("class_score_count")
+        if score_sum is None or score_count is None:
+            state.attack_state["class_score_sum"] = torch.zeros(self.proxy_num_classes)
+            state.attack_state["class_score_count"] = torch.zeros(self.proxy_num_classes)
+            score_sum = state.attack_state["class_score_sum"]
+            score_count = state.attack_state["class_score_count"]
+
+        if student_probs is None:
+            sample_score = probs.max(dim=1).values
+        else:
+            sample_score = F.kl_div(
+                torch.log(student_probs + 1e-10),
+                probs,
+                reduction="none",
+            ).sum(dim=1)
+
         for i, c in enumerate(y_g):
             c_idx = int(c.item())
-            if c_idx >= self.num_classes: continue
-            
-            current_avg = state.attack_state["victim_class_avg_prob"][c_idx].to(probs.device)
-            current_n = state.attack_state["victim_class_counts"][c_idx].item()
-            
-            new_n = current_n + 1
-            new_avg = (current_avg * current_n + probs[i]) / new_n
-            
-            state.attack_state["victim_class_avg_prob"][c_idx] = new_avg
-            state.attack_state["victim_class_counts"][c_idx] = new_n
+            if c_idx < 0 or c_idx >= self.proxy_num_classes:
+                continue
+
+            score_sum[c_idx] += float(sample_score[i].detach().cpu().item())
+            score_count[c_idx] += 1.0
 
     def _agu_phase(
         self, 
@@ -708,7 +725,13 @@ class GAME(AttackRunner):
             g_loss.backward()
             self.generator_optimizer.step()
 
-    def _gmd_phase(self, x_query: torch.Tensor, victim_probs: torch.Tensor) -> None:
+    def _gmd_phase(
+        self,
+        x_query: torch.Tensor,
+        victim_probs: torch.Tensor,
+        *,
+        include_round_retrain: bool,
+    ) -> None:
         """Gradient Maximization Discrepancy (GMD) / Student Training."""
         device = x_query.device
         
@@ -739,5 +762,5 @@ class GAME(AttackRunner):
 
         # Official methods.baseline/game retrains attacker for multiple epochs each round.
         # Keep this behavior configurable while preserving existing mebench API.
-        if int(self.round_train_epochs) > 1 and self.train_on_full_buffer:
+        if include_round_retrain and int(self.round_train_epochs) > 1 and self.train_on_full_buffer:
             self._train_student_from_buffer(int(self.round_train_epochs) - 1)

@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import numpy as np
 from tqdm import tqdm
 
 from mebench.attackers.runner import AttackRunner
@@ -68,8 +67,7 @@ class MAZE(AttackRunner):
         self._eval_substitute = None
         self.g_scheduler = None
         self.c_scheduler = None
-        self.replay_x = []
-        self.replay_y = []
+        self.replay_buffer: List[Tuple[torch.Tensor, torch.Tensor]] = []
         self._cached_clone_x: Optional[torch.Tensor] = None
         self._cached_clone_y: Optional[torch.Tensor] = None
         
@@ -125,9 +123,12 @@ class MAZE(AttackRunner):
 
         if self.lr_schedule == "cosine":
             max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
+            # Official MAZE query accounting per outer iteration:
+            # batch_size * ((iter_clone - 1) + (1 + ndirs) * iter_gen)
             queries_per_iter = max(
                 1,
-                int(self.batch_size) * int(self.n_g * (self.grad_approx_m + 1) + self.n_c),
+                int(self.batch_size)
+                * int(self.n_g * (self.grad_approx_m + 1) + max(0, self.n_c - 1)),
             )
             approx_iters = max(1, int(math.ceil(max_budget / float(queries_per_iter))))
             self.g_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.g_opt, T_max=approx_iters)
@@ -210,25 +211,25 @@ class MAZE(AttackRunner):
                     break
                 self.generator.train(); self.clone.eval()
                 z = torch.randn(batch, self.noise_dim, device=device)
-                
-                # Base output for estimation
-                x_base = self.generator(z)
+
+                # Official MAZE perturbs generator pre-tanh activations.
+                pre_tanh, x_base = self.generator(z, return_pre_tanh=True)
                 x_base_01 = torch.clamp((x_base + 1.0) / 2.0, 0.0, 1.0)
                 y_c_base = self._clone_probs_eval(x_base)
-                
+
                 # Objective LG: -KL(yT || yC) to maximize disagreement
                 # loss_base depends on victim output; computed after batching oracle queries below.
-                
+
                 # Zeroth-Order Gradient Estimation (Eq. 11)
-                grad_est_x = torch.zeros_like(x_base)
-                d = x_base[0].numel()
+                grad_est_x = torch.zeros_like(pre_tanh)
+                d = int(pre_tanh[0].numel())
 
                 x_pert_01_list = []
                 u_list = []
                 for _ in range(self.grad_approx_m):
-                    u = torch.randn_like(x_base)
+                    u = torch.randn_like(pre_tanh)
                     u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
-                    x_pert = torch.clamp(x_base + self.epsilon * u, -1.0, 1.0)
+                    x_pert = torch.tanh(pre_tanh + self.epsilon * u)
                     x_pert_01 = torch.clamp((x_pert + 1.0) / 2.0, 0.0, 1.0)
 
                     x_pert_01_list.append(x_pert_01)
@@ -251,15 +252,18 @@ class MAZE(AttackRunner):
 
                 for j in range(self.grad_approx_m):
                     u = u_list[j]
-                    x_pert = torch.clamp(x_base + self.epsilon * u, -1.0, 1.0)
+                    x_pert = torch.tanh(pre_tanh + self.epsilon * u)
                     y_c_pert = self._clone_probs_eval(x_pert)
                     y_t_pert = y_t_pert_all[j]
                     loss_pert = -F.kl_div(torch.log(y_c_pert + 1e-10), y_t_pert, reduction='none').sum(dim=1)
                     grad_est_x += (d / self.grad_approx_m) * ((loss_pert - loss_base).view(-1, 1, 1, 1) / self.epsilon) * u
-                
+
+                # Official implementation averages zeroth-order estimate over batch.
+                grad_est_x /= float(max(1, batch))
+
                 self.g_opt.zero_grad()
                 # Chain rule: dLG/dThetaG = dLG/dx * dx/dThetaG
-                x_base.backward(grad_est_x)
+                pre_tanh.backward(grad_est_x)
                 self.g_opt.step()
                 pbar.update(batch * (1 + self.grad_approx_m))
 
@@ -306,10 +310,24 @@ class MAZE(AttackRunner):
             self._cached_clone_y = None
 
             # 3. Experience Replay Phase
-            if self.replay_x:
+            if self.replay_buffer:
                 self.clone.train()
+                replay_loader = torch.utils.data.DataLoader(
+                    self.replay_buffer,
+                    batch_size=self.batch_size,
+                    shuffle=True,
+                )
+                replay_iter = iter(replay_loader)
                 for _ in range(self.n_r):
-                    x_r, y_r = self._sample_replay()
+                    try:
+                        x_r, y_r = next(replay_iter)
+                    except StopIteration:
+                        replay_iter = iter(replay_loader)
+                        x_r, y_r = next(replay_iter)
+
+                    if int(x_r.size(0)) < int(self.batch_size):
+                        break
+
                     self.c_opt.zero_grad()
                     y_c_r = F.log_softmax(self.clone(self._normalize(x_r.to(device))), dim=1)
                     F.kl_div(y_c_r, y_r.to(device), reduction='batchmean').backward()
@@ -352,9 +370,8 @@ class MAZE(AttackRunner):
         return F.softmax(logits.float(), dim=1)
 
     def _append_replay(self, x: torch.Tensor, y: torch.Tensor):
-        self.replay_x.append(x.cpu())
-        self.replay_y.append(y.cpu())
-
-    def _sample_replay(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        idx = np.random.choice(len(self.replay_x))
-        return self.replay_x[idx], self.replay_y[idx]
+        x_cpu = x.detach().cpu()
+        y_cpu = y.detach().cpu()
+        self.replay_buffer.extend(
+            (x_cpu[i], y_cpu[i]) for i in range(int(x_cpu.size(0)))
+        )

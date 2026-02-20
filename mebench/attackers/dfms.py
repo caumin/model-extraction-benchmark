@@ -424,9 +424,16 @@ class DFMSHL(AttackRunner):
         augmented: List[torch.Tensor] = []
         for i in range(int(x_unit.size(0))):
             img = x_unit[i].detach().cpu()
-            out = self._auto_augment(img)
+            # torchvision AutoAugment may apply Equalize, which only supports uint8 tensors.
+            # Convert [0,1] float tensor -> uint8 before augmentation, then back to float.
+            img_u8 = (img * 255.0).round().clamp(0.0, 255.0).to(torch.uint8)
+            out = self._auto_augment(img_u8)
             if not isinstance(out, torch.Tensor):
                 return x
+            if out.dtype == torch.uint8:
+                out = out.to(dtype=torch.float32).div(255.0)
+            else:
+                out = clamp_unit(out.to(dtype=torch.float32))
             augmented.append(out)
 
         x_aug = torch.stack(augmented, dim=0)
