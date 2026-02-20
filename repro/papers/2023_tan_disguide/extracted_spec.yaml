@@ -14,7 +14,7 @@ attack:
     cifar10: 20000000
     cifar100: 10000000
   substitute:
-    architecture: ResNet-18-8x ensemble
+    architecture: ResNet-18-8x ensemble (effective width=1 in official code)
     training:
       batch_size: 256
       student_lr: 0.03

@@ -721,7 +721,7 @@ def generate_paperlike_configs(
             arch="resnet18",
             seed=int(seed),
             optimizer_lr=0.03,
-            width_mult=8,
+            width_mult=1,
             scheduler_name="multistep",
         )
         disguide_cfg = _paper_base_config(
@@ -734,7 +734,7 @@ def generate_paperlike_configs(
             substitute_cfg=disguide_substitute,
         )
         disguide_cfg["victim"]["victim_id"] = "cifar10_resnet34_8x_official"
-        disguide_cfg["victim"]["width_mult"] = 8
+        disguide_cfg["victim"]["width_mult"] = 1
         disguide_cfg["victim"]["input_scale_mode"] = "tanh"
         disguide_cfg["victim"]["checkpoint_ref"] = "runs/victims/cifar10-resnet34_8x.pt"
         disguide_cfg["victim"]["return_outputs_on_cpu"] = False

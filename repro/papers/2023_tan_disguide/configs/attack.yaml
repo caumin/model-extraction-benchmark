@@ -21,7 +21,7 @@ attack:
 
 substitute:
   arch: resnet18
-  width_mult: 8
+  width_mult: 1
   init_seed: 1234
   optimizer:
     name: sgd

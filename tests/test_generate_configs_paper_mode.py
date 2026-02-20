@@ -92,7 +92,7 @@ def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) ->
 
     assert disguide_cfg["victim"]["arch"] == "resnet34"
     assert disguide_cfg["victim"]["victim_id"] == "cifar10_resnet34_8x_official"
-    assert int(disguide_cfg["victim"]["width_mult"]) == 8
+    assert int(disguide_cfg["victim"]["width_mult"]) == 1
     assert disguide_cfg["victim"]["input_scale_mode"] == "tanh"
     assert disguide_cfg["victim"]["checkpoint_ref"] == "runs/victims/cifar10-resnet34_8x.pt"
     assert int(disguide_cfg["attack"]["max_budget"]) == 20_000_000
@@ -102,7 +102,7 @@ def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) ->
     assert float(disguide_cfg["attack"]["lambda_div"]) == 0.2
     assert float(disguide_cfg["attack"]["student_lr"]) == 0.03
     assert disguide_cfg["attack"]["strict_iteration_budget"] is True
-    assert int(disguide_cfg["substitute"]["width_mult"]) == 8
+    assert int(disguide_cfg["substitute"].get("width_mult", 1)) == 1
 
     assert int(dfms_cfg["attack"]["max_budget"]) == 8_000_000
     assert dfms_cfg["attack"]["use_official_stages"] is True

@@ -47,6 +47,7 @@ This report tracks parity status between official implementations in
 - `SwiftThief`: KD/SL learning-rate default aligned to official `--sl_lr=1e-2`.
 - `GAME`: default query/training batch size aligned to official `--batch_size=1024`.
 - `DisGUIDE`: generator objective aligned to disagreement + diversity, with official-style replay/ensemble defaults.
+  - Official repository uses `_8x` model names, but `network/resnet_8x.py` defines standard-width channels (effective width multiplier 1).
 
 ## 1:1 loop align updates
 
