@@ -268,6 +268,8 @@ class MAZE(AttackRunner):
                 pbar.update(batch * (1 + self.grad_approx_m))
 
             # 2. Clone Update Phase (Disagreement Minimization)
+            replay_x: Optional[torch.Tensor] = None
+            replay_y: Optional[torch.Tensor] = None
             for c_idx in range(self.n_c):
                 use_cached = bool(c_idx == 0 and self._cached_clone_x is not None and self._cached_clone_y is not None)
                 if use_cached:
@@ -300,11 +302,16 @@ class MAZE(AttackRunner):
 
                 if clone_was_training:
                     self.clone.train()
-                
-                # Experience Replay Storage
-                self._append_replay(x_gen, y_t)
+
+                # Official MAZE stores one replay batch per outer iteration
+                # (after clone loop), using the latest (x, T(x)).
+                replay_x = x_gen
+                replay_y = y_t
                 if not use_cached:
                     pbar.update(batch)
+
+            if replay_x is not None and replay_y is not None:
+                self._append_replay(replay_x, replay_y)
 
             self._cached_clone_x = None
             self._cached_clone_y = None
