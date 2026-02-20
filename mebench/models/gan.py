@@ -326,19 +326,23 @@ class ProGANGenerator(nn.Module):
 
 
 class DFMEGenerator(nn.Module):
-    """Generator architecture closer to DFME (upsample + conv blocks).
+    """Official DFME GeneratorA-compatible architecture.
 
-    DFME uses a lightweight generator with linear upsampling between conv layers.
-    This implementation keeps outputs in [-1, 1] via tanh and supports returning
-    pre-tanh activations for zeroth-order gradient backprop.
+    This mirrors the topology from the official DFME repository:
+    - linear projection to ngf*2*init_size^2
+    - BN block
+    - upsample -> conv -> BN -> LeakyReLU
+    - upsample -> conv -> BN -> LeakyReLU -> conv -> BN(affine=False)
+    - tanh activation applied at output
     """
 
     def __init__(
         self,
-        noise_dim: int = 100,
+        noise_dim: int = 256,
         output_channels: int = 3,
-        base_channels: int = 128,
+        base_channels: int = 64,
         output_size: int = 32,
+        final_bn: bool = True,
     ) -> None:
         super().__init__()
         if output_size % 4 != 0:
@@ -348,31 +352,26 @@ class DFMEGenerator(nn.Module):
         self.output_channels = output_channels
         self.base_channels = base_channels
         self.output_size = output_size
+        self.init_size = output_size // 4
 
-        self.fc = nn.Linear(noise_dim, 4 * 4 * base_channels)
-
-        # Upsample + conv blocks until reaching output_size.
-        layers: list[nn.Module] = []
-        cur_channels = base_channels
-        cur_size = 4
-        while cur_size < output_size:
-            next_channels = max(output_channels, cur_channels // 2)
-            layers.extend(
-                [
-                    nn.Upsample(scale_factor=2, mode="nearest"),
-                    nn.Conv2d(cur_channels, next_channels, kernel_size=3, stride=1, padding=1, bias=False),
-                    nn.BatchNorm2d(next_channels),
-                    nn.ReLU(inplace=True),
-                ]
-            )
-            cur_channels = next_channels
-            cur_size *= 2
-
-        # Final conv to RGB.
-        layers.append(
-            nn.Conv2d(cur_channels, output_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.fc = nn.Linear(noise_dim, base_channels * 2 * self.init_size * self.init_size)
+        self.conv_blocks0 = nn.Sequential(nn.BatchNorm2d(base_channels * 2))
+        self.conv_blocks1 = nn.Sequential(
+            nn.Conv2d(base_channels * 2, base_channels * 2, 3, stride=1, padding=1),
+            nn.BatchNorm2d(base_channels * 2),
+            nn.LeakyReLU(0.2, inplace=True),
         )
-        self.net = nn.Sequential(*layers)
+
+        conv2_layers = [
+            nn.Conv2d(base_channels * 2, base_channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(base_channels),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(base_channels, output_channels, 3, stride=1, padding=1),
+        ]
+        if final_bn:
+            conv2_layers.append(nn.BatchNorm2d(output_channels, affine=False))
+        self.conv_blocks2 = nn.Sequential(*conv2_layers)
+
         self.out_act = nn.Tanh()
 
     def forward(
@@ -383,8 +382,12 @@ class DFMEGenerator(nn.Module):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         _ = labels  # unused (DFME generator is unconditional)
         x = self.fc(z)
-        x = x.view(z.size(0), self.base_channels, 4, 4)
-        pre_tanh = self.net(x)
+        x = x.view(z.size(0), self.base_channels * 2, self.init_size, self.init_size)
+        x = self.conv_blocks0(x)
+        x = torch.nn.functional.interpolate(x, scale_factor=2, mode="nearest")
+        x = self.conv_blocks1(x)
+        x = torch.nn.functional.interpolate(x, scale_factor=2, mode="nearest")
+        pre_tanh = self.conv_blocks2(x)
         
         # Resize if dimensions don't match target output_size
         if pre_tanh.shape[-1] != self.output_size:

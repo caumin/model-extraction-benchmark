@@ -28,6 +28,16 @@ class DFME(AttackRunner):
         self.n_s = int(config.get("n_s_steps", 5))
         self.epsilon = float(config.get("grad_approx_epsilon", 1e-3))
         self.m = int(config.get("grad_approx_m", 1))
+        self.noise_dim = int(config.get("noise_dim", 256))
+        self.generator_lr = float(config.get("generator_lr", config.get("lr_G", 1e-4)))
+        self.internal_input_scale_mode = str(
+            config.get("internal_input_scale_mode", "unit")
+        ).strip().lower()
+        if self.internal_input_scale_mode not in {"unit", "tanh"}:
+            raise ValueError(
+                "DFME internal_input_scale_mode must be 'unit' or 'tanh', "
+                f"got {self.internal_input_scale_mode!r}"
+            )
         
         self.student = None
         self.generator = None
@@ -38,17 +48,17 @@ class DFME(AttackRunner):
         input_shape = state.metadata.get("input_shape", (3, 32, 32))
         
         # Generator: Transposed Conv based architecture (GeneratorA in official repo)
-        self.generator = DFMEGenerator(noise_dim=100, output_channels=input_shape[0], output_size=input_shape[1]).to(device)
-        self.g_opt = optim.Adam(self.generator.parameters(), lr=5e-4)
+        self.generator = DFMEGenerator(
+            noise_dim=self.noise_dim,
+            output_channels=input_shape[0],
+            output_size=input_shape[1],
+        ).to(device)
+        self.g_opt = optim.Adam(self.generator.parameters(), lr=self.generator_lr)
         
         # Student: honor substitute config if provided
         sub_config = state.metadata.get("substitute_config", {})
-        arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18-8x")
-        # [FIX] Paper uses ResNet18-8x. If config requests "resnet18" without width, default to 8.
-        if arch == "resnet18" and "width_mult" not in sub_config:
-            width_mult = 8
-        else:
-            width_mult = int(sub_config.get("width_mult", 1))
+        arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18")
+        width_mult = int(sub_config.get("width_mult", 1))
         dropout_prob = float(sub_config.get("dropout_prob", 0.0))
         self.student = create_substitute(
             arch=arch,
@@ -75,6 +85,15 @@ class DFME(AttackRunner):
         """
         log_p = torch.log(probs + 1e-10)
         return log_p - log_p.mean(dim=1, keepdim=True)
+
+    def _student_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:
+        if self.internal_input_scale_mode == "tanh":
+            return torch.clamp(x_tanh, -1.0, 1.0)
+        return torch.clamp(x_tanh * 0.5 + 0.5, 0.0, 1.0)
+
+    @staticmethod
+    def _query_scale(x_tanh: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x_tanh * 0.5 + 0.5, 0.0, 1.0)
 
     def run(self, ctx: BenchmarkContext) -> None:
         device = self.state.metadata.get("device", "cpu")
@@ -125,33 +144,34 @@ class DFME(AttackRunner):
                 if batch <= 0:
                     break
                 self.generator.train(); self.student.eval()
-                z = torch.randn(batch, 100, device=device)
+                z = torch.randn(batch, self.noise_dim, device=device)
                 
                 # Forward Difference for Gradient Estimation (Eq. 6)
-                pre_tanh, x_raw = self.generator(z, return_pre_tanh=True)
-                # Benchmark contract: oracle inputs are in [0, 1] (no mean/std normalization).
-                x = torch.clamp(x_raw * 0.5 + 0.5, 0.0, 1.0)
+                pre_tanh, x_tanh = self.generator(z, return_pre_tanh=True)
+                x_student = self._student_scale(x_tanh)
+                x_query = self._query_scale(x_tanh)
                 with torch.no_grad():
-                    s_out = self.student(x)
+                    s_out = self.student(x_student)
                 # loss_base depends on victim output; computed after querying v_out below.
                 
                 # Estimating Gradient
                 d = pre_tanh.view(pre_tanh.size(0), -1).size(1)
                 grad_est = torch.zeros_like(pre_tanh)
-                x_pert_list = []
+                x_pert_query_list = []
+                x_pert_student_list = []
                 u_list = []
                 for _ in range(self.m):
                     u = torch.randn_like(pre_tanh)
                     u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
-                    x_pert_raw = torch.tanh(pre_tanh + self.epsilon * u)
-                    x_pert = torch.clamp(x_pert_raw * 0.5 + 0.5, 0.0, 1.0)
+                    x_pert_tanh = torch.tanh(pre_tanh + self.epsilon * u)
 
-                    x_pert_list.append(x_pert)
+                    x_pert_query_list.append(self._query_scale(x_pert_tanh))
+                    x_pert_student_list.append(self._student_scale(x_pert_tanh))
                     u_list.append(u)
 
                 # Query victim once for base + perturbed batches (same total images queried).
-                x_query = torch.cat([x] + x_pert_list, dim=0)
-                v_all = self._recover_logits(ctx.query(x_query).y.to(device))
+                x_query_all = torch.cat([x_query] + x_pert_query_list, dim=0)
+                v_all = self._recover_logits(ctx.query(x_query_all).y.to(device))
                 v_out = v_all[:batch]
                 v_pert_all = v_all[batch:].view(self.m, batch, -1)
 
@@ -160,7 +180,7 @@ class DFME(AttackRunner):
                 loss_base = torch.norm(v_out - s_out, p=1, dim=1) / v_out.size(1)
 
                 for j in range(self.m):
-                    x_pert_j = x_pert_list[j]
+                    x_pert_j = x_pert_student_list[j]
                     u_j = u_list[j]
                     with torch.no_grad():
                         s_pert = self.student(x_pert_j)
@@ -181,10 +201,11 @@ class DFME(AttackRunner):
                 if batch <= 0:
                     break
                 self.generator.eval(); self.student.train()
-                z = torch.randn(batch, 100, device=device)
-                x_raw = self.generator(z).detach()
-                x = torch.clamp(x_raw * 0.5 + 0.5, 0.0, 1.0)
-                v_out = self._recover_logits(ctx.query(x).y.to(device))
+                z = torch.randn(batch, self.noise_dim, device=device)
+                x_tanh = self.generator(z).detach()
+                x_student = self._student_scale(x_tanh)
+                x_query = self._query_scale(x_tanh)
+                v_out = self._recover_logits(ctx.query(x_query).y.to(device))
                 
                 self.s_opt.zero_grad()
                 # Avoid BatchNorm crashes on tiny final batches (e.g., batch=1)
@@ -195,7 +216,7 @@ class DFME(AttackRunner):
 
                 # [FIX] Align with Official Code (TEMP_DFME/dfme/train.py line 34)
                 # Official implementation uses default reduction='mean' for student update.
-                loss = F.l1_loss(self.student(x), v_out)
+                loss = F.l1_loss(self.student(x_student), v_out)
                 loss.backward(); self.s_opt.step()
 
                 if student_was_training:

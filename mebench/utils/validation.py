@@ -21,7 +21,7 @@ class LearningRateValidator:
     EXCEPTIONS = {
         "dfme": {
             "student_lr": 0.01,  # Fixed by our implementation
-            "generator_lr": 5e-4,  # Generator LR - legitimately different
+            "generator_lr": 1e-4,  # Generator LR - aligned to official DFME setup
             "justification": "Generator uses Adam with different dynamics than substitute SGD"
         },
         "maze": {
