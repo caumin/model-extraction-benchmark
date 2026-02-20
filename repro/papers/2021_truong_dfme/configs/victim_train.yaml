@@ -2,8 +2,8 @@ dataset: CIFAR10
 arch: resnet34
 width_mult: 8
 seed: 0
-victim_id: cifar10_resnet34_w8
-out: runs/victims/cifar10_resnet34_w8_seed0.pt
+victim_id: cifar10_resnet34_8x_official
+out: runs/victims/cifar10-resnet34_8x.pt
 save_metadata: true
 train:
   epochs: 200

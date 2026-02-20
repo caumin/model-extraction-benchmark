@@ -2,8 +2,8 @@ dataset: CIFAR10
 arch: resnet18
 input_scale_mode: unit
 seed: 0
-victim_id: cifar10_resnet18_swiftthief
-out: runs/victims/cifar10_resnet18_swiftthief_seed0.pt
+victim_id: cifar10_resnet18
+out: runs/victims/cifar10_resnet18_seed0.pt
 save_metadata: true
 train:
   epochs: 200

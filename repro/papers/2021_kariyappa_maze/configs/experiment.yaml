@@ -7,13 +7,13 @@ benchmark:
   protocol_version: "1.2"
 
 victim:
-  victim_id: cifar10_resnet20
-  arch: resnet20
-  input_scale_mode: tanh
+  victim_id: cifar10_resnet18
+  arch: resnet18
+  input_scale_mode: unit
   channels: 3
   num_classes: 10
   input_size: [32, 32]
-  checkpoint_ref: runs/victims/cifar10_resnet20_seed0.pt
+  checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
   output_mode: soft_prob
   temperature: 1.0
 
