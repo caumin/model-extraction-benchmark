@@ -1,5 +1,5 @@
 run:
-  name: repro_2021_wang_blackbox_dissector_full30k_seed0
+  name: repro_2021_wang_blackbox_dissector_smoke2k_seed0
   seeds: [0]
   device: cuda:0
 
@@ -25,21 +25,23 @@ dataset:
   channels: 3
   input_size: [32, 32]
   num_workers: 0
+  surrogate_max_samples: 20000
+  surrogate_subset_seed: 42
 
 attack:
   name: blackbox_dissector
   output_mode: hard_top1
-  max_budget: 30000
-  batch_size: 128
-  n_variants: 10
+  max_budget: 2000
+  batch_size: 64
+  n_variants: 4
   erase_rate: 0.25
-  iterative_budgets: [1000, 5000, 10000, 20000, 30000]
-  lr: 0.02
+  iterative_budgets: [200, 600, 1000, 1400, 1800, 2000]
+  lr: 0.01
   momentum: 0.9
-  max_epochs: 200
-  patience: 20
+  max_epochs: 5
+  patience: 2
   l2_reg: 0.0005
-  selection_batch_size: 256
+  selection_batch_size: 128
   sl: 0.02
   sh: 0.4
   r1: 0.3
@@ -51,18 +53,18 @@ substitute:
   arch: resnet34
   width_mult: 1
   init_seed: 1234
-  batch_size: 128
+  batch_size: 64
   optimizer:
     name: sgd
-    lr: 0.02
+    lr: 0.01
     momentum: 0.9
     weight_decay: 0.0005
-  max_epochs: 200
-  patience: 20
+  max_epochs: 5
+  patience: 2
 
 budget:
-  max_budget: 30000
-  checkpoints: [1000, 5000, 10000, 20000, 30000]
+  max_budget: 2000
+  checkpoints: [200, 600, 1000, 1400, 1800, 2000]
 
 cache:
   enabled: true

@@ -23,7 +23,7 @@ Each paper uses this structure under `repro/papers/<paper_id>/`:
 
 Use `repro/run_experiment.py`.
 
-Priority queue runner: `repro/run_priority_queue.py` (DFME -> MAZE -> DFMS -> InverseNet).
+Priority queue runner: `repro/run_priority_queue.py` (MAZE -> GAME -> DFMS -> blackbox-dissector -> disguide).
 
 ### 1) Bootstrap all paper folders
 
@@ -65,9 +65,8 @@ PowerShell sequential runner (recommended if you want live `tqdm`/progress-bar r
 
 Queue behavior:
 
-- DFME uses the vendored official victim checkpoint (`runs/victims/cifar10-resnet34_8x.pt`) and runs `victim_eval,attack,collect,compare`.
+- MAZE, GAME, blackbox-dissector, disguide run `victim_train,victim_eval,attack,collect,compare`.
 - DFMS uses existing victim checkpoint (`runs/victims/cifar10_resnet18_seed0.pt`) and runs `victim_eval,attack,collect,compare`.
-- MAZE/InverseNet run `victim_train,victim_eval,attack,collect,compare`.
 
 Remote/high-resource full run:
 

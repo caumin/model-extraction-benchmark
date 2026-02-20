@@ -1,0 +1,9 @@
+paper_id: 2022_xie_game
+strict_reproduction:
+  possible_locally: true
+  blockers: []
+  caveats:
+    - "Official GAME uses proxy class space larger than victim classes (e.g., CIFAR100->CIFAR10); keep proxy dataset available on remote server"
+local_fallback_profile:
+  config_smoke: repro/papers/2022_xie_game/configs/experiment_smoke.yaml
+  config_full: repro/papers/2022_xie_game/configs/experiment.yaml

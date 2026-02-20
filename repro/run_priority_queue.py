@@ -1,12 +1,11 @@
-"""Run prioritized reproduction queue for four attacks.
+"""Run prioritized reproduction queue for selected attacks.
 
 Priority order:
-1) DFME
-2) MAZE
+1) MAZE
+2) GAME
 3) DFMS
-4) GAME
-5) SwiftThief
-6) InverseNet
+4) Blackbox Dissector
+5) DisGUIDE
 """
 
 from __future__ import annotations
@@ -24,23 +23,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 PRIORITY = [
-    "2021_truong_dfme",
     "2021_kariyappa_maze",
-    "2022_sanyal_dfms",
     "2022_xie_game",
-    "2024_lee_swiftthief",
-    "2021_gong_inversenet",
+    "2022_sanyal_dfms",
+    "2021_wang_blackbox_dissector",
+    "2023_tan_disguide",
 ]
 
 STAGES_BY_PAPER = {
-    # DFME uses vendored official victim checkpoint.
-    "2021_truong_dfme": "victim_eval,attack,collect,compare",
     "2021_kariyappa_maze": "victim_train,victim_eval,attack,collect,compare",
+    "2022_xie_game": "victim_train,victim_eval,attack,collect,compare",
     # DFMS uses existing CIFAR10 ResNet-18 victim checkpoint.
     "2022_sanyal_dfms": "victim_eval,attack,collect,compare",
-    "2022_xie_game": "victim_train,victim_eval,attack,collect,compare",
-    "2024_lee_swiftthief": "victim_train,victim_eval,attack,collect,compare",
-    "2021_gong_inversenet": "victim_train,victim_eval,attack,collect,compare",
+    "2021_wang_blackbox_dissector": "victim_train,victim_eval,attack,collect,compare",
+    "2023_tan_disguide": "victim_train,victim_eval,attack,collect,compare",
 }
 
 STAGE_HINTS = {
@@ -116,7 +112,7 @@ def _run(cmd: list[str], dry_run: bool, label: str, heartbeat_sec: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run DFME/MAZE/DFMS/InverseNet queue")
+    parser = argparse.ArgumentParser(description="Run MAZE/GAME/DFMS/BlackboxDissector/DisGUIDE queue")
     parser.add_argument("--profile", choices=["smoke", "full"], default="smoke")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--dry-run", action="store_true")
