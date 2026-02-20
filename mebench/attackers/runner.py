@@ -30,6 +30,7 @@ class AttackRunner(ABC):
         self.test_loader = None
         self.victim = None
         self.ctx = None  # [ADDED] Context for artifact logging
+        self._tracked_eval_points = set()
 
     @abstractmethod
     def run(self, ctx: BenchmarkContext) -> None:
@@ -183,6 +184,11 @@ class AttackRunner(ABC):
         # Handle cases where query_count is 0 but we have labeled data (e.g. initial seed)
         if current_queries == 0:
             current_queries = len(self.state.attack_state.get('labeled_indices', []))
+
+        eval_key = (str(track), int(current_queries))
+        if eval_key in self._tracked_eval_points:
+            return
+        self._tracked_eval_points.add(eval_key)
 
         msg = (
             f"[{self.__class__.__name__}] [Evaluation] "
