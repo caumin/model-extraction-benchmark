@@ -79,8 +79,41 @@ class GAME(AttackRunner):
         self._ctx: Optional[BenchmarkContext] = None
         self._query_fn: Optional[Callable[..., OracleOutput]] = None
         self._pending_query_k: Optional[int] = None
+        eval_interval_raw = int(config.get("eval_interval_queries", 0))
+        self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
+        self._next_eval_query = self.eval_interval_queries
+        self._periodic_eval_done: set[int] = set()
 
         self._initialize_state(state)
+
+    def _publish_substitute(self) -> None:
+        if self.student is None:
+            return
+        self.state.attack_state["substitute"] = self.student
+
+    def _maybe_periodic_eval(self, device: str) -> None:
+        if self.eval_interval_queries <= 0:
+            return
+        if self.victim is None:
+            return
+        current_queries = int(self.state.query_count)
+        if current_queries < int(self._next_eval_query):
+            return
+        if current_queries in self._periodic_eval_done:
+            return
+        substitute = self.state.attack_state.get("substitute")
+        if substitute is None:
+            return
+
+        self._evaluate_current_substitute(
+            substitute,
+            device,
+            track="track_b",
+            query_count=current_queries,
+        )
+        self._periodic_eval_done.add(current_queries)
+        while self._next_eval_query <= current_queries:
+            self._next_eval_query += self.eval_interval_queries
 
     def _get_norm_tensors(self, device: str) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = self.state.metadata.get("input_shape", (3, 32, 32))
@@ -104,6 +137,7 @@ class GAME(AttackRunner):
         # Target Distribution Learning (TDL) phase (Algorithm 1, Lines 2-3).
         # Pre-train G/D on proxy dataset before consuming any victim queries.
         self._init_models(self.state)
+        self._publish_substitute()
         if not self.tdl_done and self.tdl_steps > 0:
             self._tdl_phase(device)
 
@@ -121,11 +155,14 @@ class GAME(AttackRunner):
             self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
             budget_left -= int(query_batch.x.size(0))
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
 
         # Official baseline final full-buffer training uses attack_train_epoch.
         if self.train_on_full_buffer:
             self._train_student_from_buffer(int(self.attack_train_epoch))
 
+        self._publish_substitute()
         self._evaluate_current_substitute(self.student, device)
                 
         pbar.close()
@@ -199,7 +236,7 @@ class GAME(AttackRunner):
         self._agu_phase(x_query, victim_probs, device, meta.get("z"), meta.get("y_g"))
 
         state.attack_state["step"] += 1
-        state.attack_state["substitute"] = self.student
+        self._publish_substitute()
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["step"] = 0

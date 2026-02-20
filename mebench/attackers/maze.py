@@ -15,6 +15,20 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DCGANGenerator
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.scaling import normalize_input_scale
+
+
+class _ScaledSubstituteWrapper(nn.Module):
+    """Apply input scaling before substitute forward for evaluation."""
+
+    def __init__(self, model: nn.Module, input_scale_mode: str) -> None:
+        super().__init__()
+        self.model = model
+        self.input_scale_mode = str(input_scale_mode)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_scaled = normalize_input_scale(x, self.input_scale_mode)
+        return self.model(x_scaled)
 
 
 class MAZE(AttackRunner):
@@ -44,9 +58,14 @@ class MAZE(AttackRunner):
             raise ValueError(
                 f"MAZE clone_input_scale_mode must be 'unit' or 'tanh', got {self.clone_input_scale_mode!r}"
             )
+        eval_interval_raw = int(config.get("eval_interval_queries", 0))
+        self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
+        self._next_eval_query = self.eval_interval_queries
+        self._periodic_eval_done: set[int] = set()
         
         self.generator = None
         self.clone = None
+        self._eval_substitute = None
         self.g_scheduler = None
         self.c_scheduler = None
         self.replay_x = []
@@ -113,11 +132,49 @@ class MAZE(AttackRunner):
             approx_iters = max(1, int(math.ceil(max_budget / float(queries_per_iter))))
             self.g_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.g_opt, T_max=approx_iters)
             self.c_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.c_opt, T_max=approx_iters)
+
+    def _get_substitute_for_eval(self) -> nn.Module:
+        if self.clone_input_scale_mode != "tanh":
+            return self.clone
+        if self._eval_substitute is None:
+            self._eval_substitute = _ScaledSubstituteWrapper(self.clone, "tanh")
+        return self._eval_substitute
+
+    def _publish_substitute(self) -> None:
+        if self.clone is None:
+            return
+        self.state.attack_state["substitute"] = self._get_substitute_for_eval()
+
+    def _maybe_periodic_eval(self, device: str) -> None:
+        if self.eval_interval_queries <= 0:
+            return
+        if self.victim is None:
+            return
+        current_queries = int(self.state.query_count)
+        if current_queries < int(self._next_eval_query):
+            return
+        if current_queries in self._periodic_eval_done:
+            return
+        substitute = self.state.attack_state.get("substitute")
+        if substitute is None:
+            return
+
+        self._evaluate_current_substitute(
+            substitute,
+            device,
+            track="track_b",
+            query_count=current_queries,
+        )
+        self._periodic_eval_done.add(current_queries)
+        while self._next_eval_query <= current_queries:
+            self._next_eval_query += self.eval_interval_queries
         
     def run(self, ctx: BenchmarkContext) -> None:
+        self.victim = ctx.oracle.model
         device = self.state.metadata.get("device", "cpu")
         # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         pbar = self._create_progress_bar(ctx.budget_remaining, "[MAZE] Extracting")
+        self._publish_substitute()
         
         # Default benchmark scheduler: query milestones.
         if self.lr_schedule == "multistep":
@@ -264,7 +321,10 @@ class MAZE(AttackRunner):
                 if self.c_scheduler is not None:
                     self.c_scheduler.step()
 
-        self.state.attack_state["substitute"] = self.clone
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
+
+        self._publish_substitute()
         pbar.close()
 
     def observe(

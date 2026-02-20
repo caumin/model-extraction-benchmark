@@ -22,7 +22,20 @@ from mebench.models.gan import (
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
-from mebench.utils.scaling import tanh_to_unit, clamp_unit, unit_to_tanh
+from mebench.utils.scaling import tanh_to_unit, clamp_unit, unit_to_tanh, normalize_input_scale
+
+
+class _ScaledCloneWrapper(nn.Module):
+    """Apply input scaling before clone forward for evaluation."""
+
+    def __init__(self, model: nn.Module, input_scale_mode: str) -> None:
+        super().__init__()
+        self.model = model
+        self.input_scale_mode = str(input_scale_mode)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_scaled = normalize_input_scale(x, self.input_scale_mode)
+        return self.model(x_scaled)
 
 
 class DFMSHL(AttackRunner):
@@ -134,6 +147,11 @@ class DFMSHL(AttackRunner):
         self.proxy_data: torch.Tensor | None = None
         self.pretrained = False
         self._auto_augment = self._build_auto_augment()
+        eval_interval_raw = int(config.get("eval_interval_queries", 0))
+        self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
+        self._next_eval_query = self.eval_interval_queries
+        self._periodic_eval_done: set[int] = set()
+        self._eval_substitute: nn.Module | None = None
 
         self._initialize_state(state)
 
@@ -151,6 +169,45 @@ class DFMSHL(AttackRunner):
         if self.internal_input_scale_mode == "tanh":
             return unit_to_tanh(x_unit)
         return x_unit
+
+    def _get_substitute_for_eval(self) -> nn.Module | None:
+        if self.clone is None:
+            return None
+        if self.internal_input_scale_mode != "tanh":
+            return self.clone
+        if self._eval_substitute is None:
+            self._eval_substitute = _ScaledCloneWrapper(self.clone, "tanh")
+        return self._eval_substitute
+
+    def _publish_substitute(self) -> None:
+        substitute = self._get_substitute_for_eval()
+        if substitute is None:
+            return
+        self.state.attack_state["substitute"] = substitute
+
+    def _maybe_periodic_eval(self, device: str) -> None:
+        if self.eval_interval_queries <= 0:
+            return
+        if self.victim is None:
+            return
+        current_queries = int(self.state.query_count)
+        if current_queries < int(self._next_eval_query):
+            return
+        if current_queries in self._periodic_eval_done:
+            return
+        substitute = self.state.attack_state.get("substitute")
+        if substitute is None:
+            return
+
+        self._evaluate_current_substitute(
+            substitute,
+            device,
+            track="track_b",
+            query_count=current_queries,
+        )
+        self._periodic_eval_done.add(current_queries)
+        while self._next_eval_query <= current_queries:
+            self._next_eval_query += self.eval_interval_queries
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
@@ -178,6 +235,8 @@ class DFMSHL(AttackRunner):
         # unified budget-milestone LR decay here to stay aligned with the official repo.
 
         if not self.use_official_stages:
+            self._init_models(self.state)
+            self._publish_substitute()
             # Legacy/paper-style loop (kept for backwards-compat and unit tests).
             while ctx.budget_remaining > 0:
                 step_size = self._default_step_size(ctx)
@@ -185,12 +244,16 @@ class DFMSHL(AttackRunner):
                 oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
                 self._handle_oracle_output(query_batch.x, oracle_output, self.state)
                 pbar.update(query_batch.x.size(0))
+                self._publish_substitute()
+                self._maybe_periodic_eval(device)
+            self._publish_substitute()
             pbar.close()
             return
 
         # Official-repo aligned stage pipeline (see `temp_dfms_hl/run_*.sh`).
         self.logger.info("[DFMSHL] Initializing models + caching proxy data (if needed)...")
         self._init_models(self.state)
+        self._publish_substitute()
 
         if isinstance(self.proxy_data, torch.Tensor) and self.proxy_data.numel() > 0:
             self.logger.info(
@@ -225,6 +288,8 @@ class DFMSHL(AttackRunner):
                 train_epochs=self.student_init_epochs,
                 student_lr=self.student_init_lr,
             )
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
 
         # Stage 3: train DeGAN/DivGAN (no oracle queries).
         ctx.log_event("dfmshl_stage", {"stage": "train_degan", "queries": 0})
@@ -244,13 +309,18 @@ class DFMSHL(AttackRunner):
                 train_epochs=self.student_degan_epochs,
                 student_lr=self.student_init_lr,
             )
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
 
         # Stage 5: alternate training until budget exhausted (budget-capped).
         if ctx.budget_remaining > 0:
             ctx.log_event("dfmshl_stage", {"stage": "alternate", "queries": "labels"})
             self.logger.info("[DFMSHL] Stage 5/5: alternate training (queries for labels)")
             self._official_stage_alternate(ctx, device, pbar=pbar)
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
 
+        self._publish_substitute()
         pbar.close()
 
     def _official_proxy_subset_size(self) -> int:
@@ -393,6 +463,7 @@ class DFMSHL(AttackRunner):
 
             # Clone internal scale follows `internal_input_scale_mode`.
             self.clone = base_clone
+            self._eval_substitute = None
 
         self.clone_optimizer = optim.SGD(
             self.clone.parameters(),
@@ -589,6 +660,8 @@ class DFMSHL(AttackRunner):
             y = self._oracle_hard_labels(ctx, x)
             y_proxy_list.append(y)
             pbar.update(int(take))
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
             proxy_cursor += int(take)
 
         # Query labels for synthetic samples.
@@ -605,6 +678,8 @@ class DFMSHL(AttackRunner):
             y = self._oracle_hard_labels(ctx, x)
             y_synth_list.append(y)
             pbar.update(int(take))
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
             synth_cursor += int(take)
 
         if len(y_proxy_list) == 0 and len(y_synth_list) == 0:
@@ -800,6 +875,8 @@ class DFMSHL(AttackRunner):
 
                 y = self._oracle_hard_labels(ctx, x_for_student)
                 pbar.update(int(b))
+                self._publish_substitute()
+                self._maybe_periodic_eval(device)
 
                 self.clone.train()
                 self.clone_optimizer.zero_grad(set_to_none=True)
@@ -993,6 +1070,7 @@ class DFMSHL(AttackRunner):
 
             # Clone internal scale follows `internal_input_scale_mode`.
             self.clone = base_clone
+            self._eval_substitute = None
 
             # [UNIFIED] Config-driven optimizer construction
             self.clone_optimizer = self._build_optimizer(self.clone.parameters(), opt_params)
@@ -1177,6 +1255,7 @@ class DFMSHL(AttackRunner):
 
         # Benchmark scaling unification (DFME-style): clone consumes [0,1] inputs.
         self.clone = base_clone
+        self._eval_substitute = None
         self.clone_optimizer = optim.SGD(
             self.clone.parameters(),
             lr=float(opt_params.get("lr", self.clone_lr)),
