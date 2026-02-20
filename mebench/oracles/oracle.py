@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from mebench.core.types import OracleOutput
 from mebench.core.state import BenchmarkState
+from mebench.data.preprocessing import apply_official_preprocess_batch, get_official_preprocess
 
 
 class Oracle:
@@ -29,6 +30,8 @@ class Oracle:
         # large outputs (e.g., soft_prob) on GPU.
         self.return_outputs_on_cpu = bool(config.get("return_outputs_on_cpu", True))
         self.input_shape = tuple(config.get("input_size", (3, 32, 32)))
+        self.official_preprocess_profile = config.get("official_preprocess_profile")
+        self._official_preprocess_logged = False
         if len(self.input_shape) == 2:
              # Add channel if missing
              self.input_shape = (config.get("channels", 1), *self.input_shape)
@@ -66,6 +69,15 @@ class Oracle:
         # Normalize inputs to match victim's channels/size: reshape if needed
         # Contract: Assume x_batch is in [0, 1]. No additional normalization.
         x_reshaped = x_batch.view(x_batch.size(0), *self.input_shape)
+
+        if self.official_preprocess_profile:
+            x_reshaped = apply_official_preprocess_batch(
+                x_reshaped, str(self.official_preprocess_profile)
+            )
+            if not self._official_preprocess_logged:
+                profile = get_official_preprocess(str(self.official_preprocess_profile))
+                print(f"[Oracle] official_preprocess_profile={profile.describe()}")
+                self._official_preprocess_logged = True
 
         # Forward pass
         logits = self.model(x_reshaped)

@@ -32,7 +32,11 @@ class KnockoffNets(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
 
-        self.batch_size = int(config.get("batch_size", 128))
+        # Official knockoffnets transfer.py defaults to batch_size=8.
+        self.batch_size = int(config.get("batch_size", 8))
+        self.policy = str(config.get("policy", "adaptive")).strip().lower()
+        if self.policy not in {"random", "adaptive"}:
+            raise ValueError(f"KnockoffNets policy must be 'random' or 'adaptive', got {self.policy!r}")
         # Update substitute periodically or every batch if policy requires fresh logits
         self.train_every = max(1, int(config.get("train_every", self.batch_size)))
         self.train_epochs = int(config.get("train_epochs", 1))
@@ -89,6 +93,9 @@ class KnockoffNets(AttackRunner):
         self._finalize_attack(self.state)
 
     def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
+        if self.policy == "random":
+            return self._select_query_batch_random(k, state)
+
         if self.pool_dataset is None:
             self._load_pool(state)
 
@@ -166,6 +173,52 @@ class KnockoffNets(AttackRunner):
             meta={"indices": selected_indices, "classes": selected_classes, "synthetic": False},
         )
 
+    def _select_query_batch_random(self, k: int, state: BenchmarkState) -> QueryBatch:
+        """Official transfer.py semantics: random no-policy sampling with refill."""
+        if self.pool_dataset is None:
+            self._load_pool(state)
+
+        pool_len = len(self.pool_dataset) if self.pool_dataset is not None else 0
+        if pool_len <= 0:
+            raise ValueError(f"{self.__class__.__name__} requires a non-empty pool dataset.")
+
+        state.attack_state.setdefault("queried_indices", [])
+        state.attack_state.setdefault("unqueried_indices", list(range(pool_len)))
+        unqueried = state.attack_state["unqueried_indices"]
+        if len(unqueried) == 0:
+            unqueried.extend(list(range(pool_len)))
+            state.attack_state["random_refill_count"] = int(
+                state.attack_state.get("random_refill_count", 0)
+            ) + 1
+
+        selected_indices: List[int] = []
+        while len(selected_indices) < int(k):
+            if len(unqueried) == 0:
+                unqueried.extend(list(range(pool_len)))
+                state.attack_state["random_refill_count"] = int(
+                    state.attack_state.get("random_refill_count", 0)
+                ) + 1
+
+            take = min(int(k) - len(selected_indices), len(unqueried))
+            chosen = np.random.choice(unqueried, take, replace=False).tolist()
+            for idx in chosen:
+                unqueried.remove(idx)
+                state.attack_state["queried_indices"].append(int(idx))
+            selected_indices.extend(chosen)
+
+        x_list = [self.pool_dataset[idx][0] for idx in selected_indices]
+        x = torch.stack(x_list)
+        return QueryBatch(
+            x=x,
+            meta={
+                "indices": selected_indices,
+                "classes": [-1] * len(selected_indices),
+                "synthetic": False,
+                "policy": "random",
+                "refill_count": int(state.attack_state.get("random_refill_count", 0)),
+            },
+        )
+
     def _handle_oracle_output(
         self,
         x_batch: torch.Tensor,
@@ -185,6 +238,19 @@ class KnockoffNets(AttackRunner):
         recent_probs = state.attack_state["recent_victim_probs"]
         for row in probs:
             recent_probs.append(row)
+
+        if self.policy == "random":
+            last_train_count = state.attack_state.get("last_train_count", 0)
+            if state.attack_state["query_count"] - last_train_count >= self.train_every:
+                self._train_substitute(
+                    state,
+                    reset_model=False,
+                    epochs=self.online_train_epochs,
+                    store_key="online_substitute",
+                )
+                state.attack_state["substitute"] = state.attack_state.get("online_substitute")
+                state.attack_state["last_train_count"] = state.attack_state["query_count"]
+            return
 
         top2 = torch.topk(probs, k=2, dim=1).values
         certainty_reward = top2[:, 0] - top2[:, 1]
@@ -328,6 +394,7 @@ class KnockoffNets(AttackRunner):
         state.attack_state["last_train_count"] = 0
         state.attack_state["class_to_coarse"] = {}
         state.attack_state["coarse_to_classes"] = {}
+        state.attack_state["random_refill_count"] = 0
 
     def _get_dataset_config(self, state: BenchmarkState) -> dict:
         dataset_config = state.metadata.get("dataset_config", {})

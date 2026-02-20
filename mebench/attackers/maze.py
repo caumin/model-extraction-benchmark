@@ -35,7 +35,8 @@ class MAZE(AttackRunner):
         self.n_c = int(config.get("n_c_steps", 5))
         self.n_r = int(config.get("n_r_steps", 10))
         self.noise_dim = int(config.get("noise_dim", 100))
-        self.lr_schedule = str(config.get("lr_schedule", "multistep")).lower()
+        # Official MAZE implementation uses cosine annealing with SGD optimizers.
+        self.lr_schedule = str(config.get("lr_schedule", "cosine")).lower()
         if self.lr_schedule not in {"multistep", "cosine"}:
             raise ValueError(f"MAZE lr_schedule must be 'multistep' or 'cosine', got {self.lr_schedule!r}")
         self.clone_input_scale_mode = str(config.get("clone_input_scale_mode", "unit")).strip().lower()

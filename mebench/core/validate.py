@@ -1,6 +1,7 @@
 """Config validation logic."""
 
 from typing import Dict, Any
+from mebench.data.preprocessing import list_official_preprocess_profiles
 
 
 def _require_positive_int(config: Dict[str, Any], path: str) -> int:
@@ -119,6 +120,15 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError(
             f"victim.input_scale_mode must be one of {sorted(valid_scale_modes)}, got {input_scale_mode!r}"
         )
+
+    official_profile = config.get("victim", {}).get("official_preprocess_profile")
+    if official_profile is not None:
+        names = set(list_official_preprocess_profiles())
+        if str(official_profile) not in names:
+            raise ValueError(
+                "victim.official_preprocess_profile must be one of "
+                f"{sorted(names)}, got {official_profile!r}"
+            )
 
     # Check budget checkpoints
     checkpoints = config["budget"]["checkpoints"]

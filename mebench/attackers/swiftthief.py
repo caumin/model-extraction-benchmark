@@ -409,9 +409,19 @@ class SwiftThief(AttackRunner):
         self.patience = int(config.get("patience", 50))
         self.unlabeled_ssl_size = int(config.get("unlabeled_ssl_size", 50000))
 
+        # Official swiftthief.py query schedule:
+        # - initial labeled set = 10% of query_budget
+        # - each sampling augmentation round adds another 10%
+        # - imbalance_kde mode performs 5 sub-round samplings
+        self.query_fraction_per_round = float(config.get("query_fraction_per_round", 0.1))
+        self.imbalance_kde_splits = int(config.get("imbalance_kde_splits", 5))
+        self.sl_epoch = int(config.get("sl_epoch", 500))
+        self.sl_aug_interval = int(config.get("sl_aug_interval", 50))
+
         # KD defaults aligned to paper
         self.kd_epochs = int(config.get("kd_epochs", 40))
-        self.kd_lr = float(config.get("kd_lr", self.lr))
+        # Official swiftthief.py default: --sl_lr 1e-2.
+        self.kd_lr = float(config.get("kd_lr", 1e-2))
 
         # internal
         self.pool_dataset = None
@@ -449,29 +459,73 @@ class SwiftThief(AttackRunner):
             self.state.metadata.get("max_budget")
             or self.config.get("max_budget", ctx.budget_remaining)
         )
-        round_size = max(1, int(math.ceil(total_budget / max(self.I, 1))))
+        round_quota = max(1, int(total_budget * float(self.query_fraction_per_round)))
 
         pbar = tqdm(total=total_budget, desc="[SwiftThief] Extracting")
-        while ctx.budget_remaining > 0:
-            step_size = min(round_size, ctx.budget_remaining)
-            query_batch = self._select_query_batch(step_size, self.state)
-            
-            # [FIX] Handle pool exhaustion
-            if query_batch.x.size(0) == 0:
-                self.logger.warning("SwiftThief query selection returned empty batch. Stopping attack.")
-                break
-                
-            oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
-            self._handle_oracle_output(query_batch, oracle_output, self.state)
-            pbar.update(query_batch.x.size(0))
 
-        labeled_count = len(self.state.attack_state["labeled_indices"])
-        last_train = int(self.state.attack_state.get("last_train_labeled_count", 0))
-        if labeled_count > last_train:
+        # Official: initial 10% random seed query.
+        if ctx.budget_remaining > 0:
+            queried = self._execute_query_round(
+                ctx,
+                query_count=min(round_quota, int(ctx.budget_remaining)),
+                force_random=True,
+            )
+            pbar.update(int(queried))
+            if queried > 0:
+                self.train_substitute(self.state, cl_epochs_override=self.cl_epochs)
+
+        # Official: every sl_aug_interval, query another 10% with sampling policy.
+        virtual_epoch = int(self.sl_aug_interval)
+        while ctx.budget_remaining > 0:
+            if virtual_epoch % int(self.sl_aug_interval) != 0:
+                virtual_epoch += 1
+                continue
+
+            self._update_sampling_mode(self.state)
+            mode = str(self.state.attack_state.get("sampling_mode", "entropy"))
+            splits = 1 if mode == "entropy" else max(1, int(self.imbalance_kde_splits))
+            per_split = max(1, int(round_quota // splits))
+
+            round_queried = 0
+            for _ in range(splits):
+                if ctx.budget_remaining <= 0:
+                    break
+                q = min(per_split, int(ctx.budget_remaining))
+                queried = self._execute_query_round(ctx, query_count=q, force_random=False)
+                pbar.update(int(queried))
+                round_queried += int(queried)
+                if queried <= 0:
+                    break
+
+            if round_queried <= 0:
+                break
+
+            self.train_substitute(self.state, cl_epochs_override=self.cl_epochs)
+            virtual_epoch += int(self.sl_aug_interval)
+
+        if len(self.state.attack_state["labeled_indices"]) > 0:
             self.train_substitute(self.state, cl_epochs_override=self.final_cl_epochs)
-            self.state.attack_state["last_train_labeled_count"] = labeled_count
+            self.state.attack_state["last_train_labeled_count"] = len(
+                self.state.attack_state["labeled_indices"]
+            )
 
         pbar.close()
+
+    def _execute_query_round(
+        self,
+        ctx: BenchmarkContext,
+        *,
+        query_count: int,
+        force_random: bool,
+    ) -> int:
+        if query_count <= 0 or ctx.budget_remaining <= 0:
+            return 0
+        query_batch = self._select_query_batch(query_count, self.state, force_random=force_random)
+        if query_batch.x.size(0) == 0:
+            return 0
+        oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
+        self._handle_oracle_output(query_batch, oracle_output, self.state)
+        return int(query_batch.x.size(0))
 
     # -------------------------
     # Dataset + Normalizer
@@ -567,7 +621,7 @@ class SwiftThief(AttackRunner):
     # Propose + sampling
     # -------------------------
 
-    def _select_query_batch(self, k: int, state: BenchmarkState) -> QueryBatch:
+    def _select_query_batch(self, k: int, state: BenchmarkState, force_random: bool = False) -> QueryBatch:
         self._ensure_pool_dataset(state)
 
         labeled = state.attack_state["labeled_indices"]
@@ -584,8 +638,10 @@ class SwiftThief(AttackRunner):
         total_budget = int(state.metadata.get("max_budget") or self.config.get("max_budget", 10000))
         initial_seed_size = int(self.initial_seed_ratio * total_budget)
 
-        if len(labeled) < initial_seed_size:
+        if force_random or len(labeled) < initial_seed_size:
             n_seed = min(k, initial_seed_size - len(labeled), len(unlabeled))
+            if force_random:
+                n_seed = min(k, len(unlabeled))
             selected = np.random.choice(unlabeled, n_seed, replace=False).tolist() if n_seed > 0 else []
             if len(selected) < k:
                 remaining = [i for i in unlabeled if i not in selected]
@@ -829,15 +885,7 @@ class SwiftThief(AttackRunner):
         for lab in labels:
             state.attack_state["class_counts"][lab] = state.attack_state["class_counts"].get(lab, 0) + 1
 
-        labeled_count = len(state.attack_state["labeled_indices"])
-        total_budget = int(state.metadata.get("max_budget") or self.config.get("max_budget", 10000))
-        round_size = max(1, int(math.ceil(total_budget / max(self.I, 1))))
-        last_train = int(state.attack_state.get("last_train_labeled_count", 0))
-        if labeled_count > 0 and (labeled_count - last_train) >= round_size:
-            is_final_round = labeled_count >= total_budget
-            cl_epochs = self.final_cl_epochs if is_final_round else self.cl_epochs
-            self.train_substitute(state, cl_epochs_override=cl_epochs)
-            state.attack_state["last_train_labeled_count"] = labeled_count
+        # Query handling only; training schedule is orchestrated in run().
 
     # -------------------------
     # KD stage (hardcoded)

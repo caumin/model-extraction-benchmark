@@ -25,7 +25,8 @@ class GAME(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
 
-        self.batch_size = int(config.get("batch_size", 128))
+        # Official GAME attack.py default: --batch_size 1024.
+        self.batch_size = int(config.get("batch_size", 1024))
         self.student_lr = float(config.get("student_lr", 0.1))
         self.generator_lr = float(config.get("generator_lr", 2e-4))
         self.discriminator_lr = float(config.get("discriminator_lr", 2e-4))
@@ -36,7 +37,8 @@ class GAME(AttackRunner):
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
         self.base_channels = int(config.get("base_channels", 64))
-        self.acs_strategy = config.get("acs_strategy", "uncertainty")
+        # Official methods.game starts with uniform random sampler_weights.
+        self.acs_strategy = str(config.get("acs_strategy", "random")).strip().lower()
         self.acs_probe_size = int(config.get("acs_probe_size", 0))
 
         # Loss weights (Eq.14). Defaults follow the reference implementation.
@@ -44,6 +46,12 @@ class GAME(AttackRunner):
         self.beta2 = float(config.get("beta2", 0.01))   # L_bou
         self.beta3 = float(config.get("beta3", 10.0))   # L_adv
         self.beta4 = float(config.get("beta4", 100.0))  # L_dif
+
+        # Official attack.py defaults.
+        self.querybudget = int(config.get("querybudget", config.get("budget", 2000)))
+        self.attack_train_epoch = int(config.get("attack_train_epoch", 40))
+        self.round_train_epochs = int(config.get("round_train_epochs", 20))
+        self.train_on_full_buffer = bool(config.get("train_on_full_buffer", True))
 
         # TDL: Training Discriminator and Generator with proxy data.
         # Paper implies iterative training. default to 20 epochs/steps.
@@ -99,51 +107,26 @@ class GAME(AttackRunner):
         if not self.tdl_done and self.tdl_steps > 0:
             self._tdl_phase(device)
 
-        total_budget = self.state.budget_remaining
+        total_budget = min(int(self.state.budget_remaining), int(self.querybudget))
         # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         pbar = self._create_progress_bar(total_budget, "[GAME] Extracting")
         
-        # [UNIFIED] MultiStepLR Scheduler (10%, 30%, 50% of budget)
-        max_budget = int(self.state.metadata.get("max_budget", 20_000_000))
-        milestones = [int(max_budget * p) for p in [0.1, 0.3, 0.5]]
-        gamma = 0.3
-        self.milestones = sorted(milestones)
-        self.current_milestone_idx = 0
-        
-        last_eval_queries = 0
-        eval_interval = total_budget // 10
-
-        while ctx.budget_remaining > 0:
-            # Check for LR decay
-            current_queries = self.state.query_count
-            if self.current_milestone_idx < len(self.milestones):
-                if current_queries >= self.milestones[self.current_milestone_idx]:
-                    # Decay optimizers
-                    if self.generator_optimizer:
-                        for param_group in self.generator_optimizer.param_groups:
-                            param_group['lr'] *= gamma
-                    if self.discriminator_optimizer:
-                        for param_group in self.discriminator_optimizer.param_groups:
-                            param_group['lr'] *= gamma
-                    if self.student_optimizer:
-                        for param_group in self.student_optimizer.param_groups:
-                            param_group['lr'] *= gamma
-                    self.logger.info(f"[GAME] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})")
-                    self.current_milestone_idx += 1
-
-            step_size = self._default_step_size(ctx)
+        budget_left = int(total_budget)
+        while budget_left > 0 and ctx.budget_remaining > 0:
+            step_size = min(int(self.batch_size), int(budget_left), int(ctx.budget_remaining))
             query_batch = self._select_query_batch(step_size, self.state)
             if query_batch.x.size(0) == 0:
                 break
             oracle_output = ctx.query(query_batch.x, meta=query_batch.meta)
             self._handle_oracle_output(query_batch.x, query_batch.meta, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
-            
-            # Periodic evaluation
-            queries_done = total_budget - ctx.budget_remaining
-            if queries_done - last_eval_queries >= eval_interval:
-                self._evaluate_current_substitute(self.student, device)
-                last_eval_queries = queries_done
+            budget_left -= int(query_batch.x.size(0))
+
+        # Official baseline final full-buffer training uses attack_train_epoch.
+        if self.train_on_full_buffer:
+            self._train_student_from_buffer(int(self.attack_train_epoch))
+
+        self._evaluate_current_substitute(self.student, device)
                 
         pbar.close()
         self._ctx = None
@@ -281,7 +264,11 @@ class GAME(AttackRunner):
         if self.student is None:
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             sub_config = state.metadata.get("substitute_config", {})
-            opt_params = sub_config.get("optimizer", {})
+            opt_params = dict(sub_config.get("optimizer", {}))
+            opt_params.setdefault("name", "sgd")
+            opt_params.setdefault("lr", float(self.student_lr))
+            opt_params.setdefault("momentum", 0.9)
+            opt_params.setdefault("weight_decay", 5e-4)
             
             arch = sub_config.get("arch") or self.config.get("student_arch", "resnet18")
             width_mult = int(sub_config.get("width_mult", 1))
@@ -471,6 +458,9 @@ class GAME(AttackRunner):
             # The benchmark uses identity normalization.
             return (img - norm_mean) / norm_std
 
+        if self.acs_strategy == "random":
+            return torch.full((self.num_classes,), 1.0 / self.num_classes, device=device)
+
         if self.acs_strategy != "deviation":
             # Uncertainty-based selection (default): Prefer classes where student is uncertain
             z = torch.randn(self.num_classes, self.noise_dim, device=device)
@@ -540,6 +530,45 @@ class GAME(AttackRunner):
         score = score - score.min()
         score = score + 1e-6
         return score / score.sum()
+
+    def _train_student_from_buffer(self, epochs: int) -> None:
+        if self.student is None or self.student_optimizer is None:
+            return
+        if epochs <= 0:
+            return
+        qx = self.state.attack_state.get("query_data_x", [])
+        qy = self.state.attack_state.get("query_data_y", [])
+        if len(qx) == 0 or len(qy) == 0:
+            return
+
+        x_all = torch.cat(qx, dim=0)
+        y_all = torch.cat(qy, dim=0)
+        device = next(self.student.parameters()).device
+        norm_mean, norm_std = self._get_norm_tensors(str(device))
+
+        dataset = torch.utils.data.TensorDataset(x_all, y_all)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=min(self.batch_size, len(dataset)),
+            shuffle=True,
+            num_workers=0,
+            drop_last=False,
+        )
+
+        self.student.train()
+        for _ in range(int(epochs)):
+            for x_b, y_b in loader:
+                x_b = x_b.to(device)
+                y_b = y_b.to(device)
+                logits = self.student((x_b - norm_mean) / norm_std)
+                probs = F.softmax(logits, dim=1)
+                if y_b.ndim == 1:
+                    y_b = F.one_hot(y_b.long(), num_classes=self.num_classes).float()
+                y_b = y_b / y_b.sum(dim=1, keepdim=True).clamp_min(1e-10)
+                loss = F.kl_div(torch.log(probs + 1e-10), y_b, reduction="batchmean")
+                self.student_optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                self.student_optimizer.step()
 
     def _update_victim_stats(self, state: BenchmarkState, probs: torch.Tensor, y_g: Optional[torch.Tensor]) -> None:
         """Update running statistics of victim class probabilities per generated class."""
@@ -670,3 +699,8 @@ class GAME(AttackRunner):
         loss = self.beta1 * loss_res
         loss.backward()
         self.student_optimizer.step()
+
+        # Official methods.baseline/game retrains attacker for multiple epochs each round.
+        # Keep this behavior configurable while preserving existing mebench API.
+        if int(self.round_train_epochs) > 1 and self.train_on_full_buffer:
+            self._train_student_from_buffer(int(self.round_train_epochs) - 1)

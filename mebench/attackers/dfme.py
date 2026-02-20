@@ -86,7 +86,12 @@ class DFME(AttackRunner):
             width_mult=width_mult,
             dropout_prob=dropout_prob,
         ).to(device)
-        opt_config = sub_config.get("optimizer", {})
+        opt_config = dict(sub_config.get("optimizer", {}))
+        # Official DFME defaults (train.py): SGD lr=0.1, momentum=0.9, weight_decay=5e-4.
+        opt_config.setdefault("name", "sgd")
+        opt_config.setdefault("lr", float(self.config.get("student_lr", 0.1)))
+        opt_config.setdefault("momentum", 0.9)
+        opt_config.setdefault("weight_decay", 5e-4)
         self.s_opt = self._build_optimizer(self.student.parameters(), opt_config)
         
         # [ADDED] LR Schedulers as per DFME paper
