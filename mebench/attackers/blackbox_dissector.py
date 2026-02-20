@@ -471,6 +471,12 @@ class BlackboxDissector(AttackRunner):
 
         # Algorithm 2 (outer loop) iterative max-budget sequence.
         self.iterative_budgets = config.get("iterative_budgets")
+        # Official implementation defaults to erase_rate=0.25 and allocates
+        # each per-iteration budget between original and erased queries using
+        # this ratio.
+        self.erase_rate = float(config.get("erase_rate", 0.25))
+        if not (0.0 <= self.erase_rate <= 1.0):
+            raise ValueError(f"blackbox_dissector erase_rate must be in [0,1], got {self.erase_rate!r}")
 
         # Initialize attack state
         # Pool dataset (loaded during selection/init)
@@ -665,9 +671,11 @@ class BlackboxDissector(AttackRunner):
         prev_q = int(state.attack_state.get("iter_prev_q", 0))
         target_q = int(state.attack_state.get("iter_target_q", 0))
         delta = max(0, target_q - prev_q)
-        # Two query stages per iteration with separate accounting.
-        a = int(delta // 2)
-        b = int(delta - a)
+        # Official repo allocates per-iteration budget by erase_rate:
+        # - Stage A (original): budget * (1 - erase_rate)
+        # - Stage B (erased): budget * erase_rate
+        b = int(delta * float(self.erase_rate))
+        a = int(delta - b)
         state.attack_state["stage_a_remaining"] = a
         state.attack_state["stage_b_remaining"] = b
         state.attack_state["iter_stage"] = "A"

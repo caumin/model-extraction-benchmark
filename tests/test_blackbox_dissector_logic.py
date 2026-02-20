@@ -60,32 +60,41 @@ def test_stage_accounting_exact_split():
         # Verify initial targets
         assert state.attack_state["iter_target_q"] == 100
         assert state.attack_state["iter_prev_q"] == 0
-        # Delta = 100. A=50, B=50.
-        assert state.attack_state["stage_a_remaining"] == 50
-        assert state.attack_state["stage_b_remaining"] == 50
+        # Delta = 100. With official erase_rate=0.25: A=75, B=25.
+        assert state.attack_state["stage_a_remaining"] == 75
+        assert state.attack_state["stage_b_remaining"] == 25
         
         # 1. Consume Stage A
         # Request 32 queries
         batch = attacker._select_query_batch(32, state)
         assert batch.meta["stage"] == "A"
         assert batch.x.size(0) == 32
-        assert state.attack_state["stage_a_remaining"] == 18 # 50 - 32
+        assert state.attack_state["stage_a_remaining"] == 43 # 75 - 32
         
         # Execute
         ctx.query(batch.x, meta=batch.meta)
         attacker._handle_oracle_output(batch, OracleOutput(y=torch.zeros(32), kind="hard_top1"), state)
         
-        # Request 32 queries again (should get 18)
+        # Request 32 queries again (should get 32)
         batch = attacker._select_query_batch(32, state)
         assert batch.meta["stage"] == "A"
-        assert batch.x.size(0) == 18
-        assert state.attack_state["stage_a_remaining"] == 0
+        assert batch.x.size(0) == 32
+        assert state.attack_state["stage_a_remaining"] == 11
         
         # Execute
         ctx.query(batch.x, meta=batch.meta)
-        attacker._handle_oracle_output(batch, OracleOutput(y=torch.zeros(18), kind="hard_top1"), state)
+        attacker._handle_oracle_output(batch, OracleOutput(y=torch.zeros(32), kind="hard_top1"), state)
+
+        # Final Stage A tail (11)
+        batch = attacker._select_query_batch(32, state)
+        assert batch.meta["stage"] == "A"
+        assert batch.x.size(0) == 11
+        assert state.attack_state["stage_a_remaining"] == 0
+
+        ctx.query(batch.x, meta=batch.meta)
+        attacker._handle_oracle_output(batch, OracleOutput(y=torch.zeros(11), kind="hard_top1"), state)
         
-        assert state.query_count == 50
+        assert state.query_count == 75
         
         # 2. Consume Stage B
         # Now Stage A is empty. Should switch to B.
@@ -94,22 +103,12 @@ def test_stage_accounting_exact_split():
         batch = attacker._select_query_batch(32, state)
         assert batch.meta["stage"] == "B"
         assert state.attack_state["iter_stage"] == "B"
-        assert batch.x.size(0) == 32
-        assert state.attack_state["stage_b_remaining"] == 18 # 50 - 32
+        assert batch.x.size(0) == 25
+        assert state.attack_state["stage_b_remaining"] == 0 # 25 consumed in one shot
         
         # Execute
         ctx.query(batch.x, meta=batch.meta)
-        attacker._handle_oracle_output(batch, OracleOutput(y=torch.zeros(32), kind="hard_top1"), state)
-        
-        # Remaining B
-        batch = attacker._select_query_batch(32, state)
-        assert batch.meta["stage"] == "B"
-        assert batch.x.size(0) == 18
-        assert state.attack_state["stage_b_remaining"] == 0
-        
-        # Execute
-        ctx.query(batch.x, meta=batch.meta)
-        attacker._handle_oracle_output(batch, OracleOutput(y=torch.zeros(18), kind="hard_top1"), state)
+        attacker._handle_oracle_output(batch, OracleOutput(y=torch.zeros(25), kind="hard_top1"), state)
         
         assert state.query_count == 100
         
@@ -120,9 +119,9 @@ def test_stage_accounting_exact_split():
         assert state.attack_state["iter_prev_q"] == 100
         assert state.attack_state["iter_target_q"] == 1000
         
-        # Delta = 900. A=450, B=450.
-        assert state.attack_state["stage_a_remaining"] == 450
-        assert state.attack_state["stage_b_remaining"] == 450
+        # Delta = 900. With official erase_rate=0.25: A=675, B=225.
+        assert state.attack_state["stage_a_remaining"] == 675
+        assert state.attack_state["stage_b_remaining"] == 225
         assert state.attack_state["iter_stage"] == "A"
 
 def test_resume_capability():
@@ -178,5 +177,3 @@ def test_resume_capability():
              attacker._advance_iteration_if_needed(state)
              
         assert state.attack_state["iter_target_q"] == 200
-
-

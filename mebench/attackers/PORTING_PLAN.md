@@ -48,7 +48,7 @@ Scope:
 | ActiveThief (paper ref) | `ActiveThief` | IN_PROGRESS (no direct official clone in scope) |
 | CopycatCNN (paper ref) | `CopycatCNN` | IN_PROGRESS (no direct official clone in scope) |
 | InverseNet (paper ref) | `InverseNet` | IN_PROGRESS (no direct official clone in scope) |
-| Blackbox Dissector (paper ref) | `BlackboxDissector` | IN_PROGRESS (no direct official clone in scope) |
+| Blackbox Dissector | `BlackboxDissector` | IN_PROGRESS (official clone added) |
 | Blackbox Ripper (paper ref) | `BlackboxRipper` | IN_PROGRESS (no direct official clone in scope) |
 
 ## 3) Per-attack porting notes (required fields)
@@ -153,6 +153,23 @@ Scope:
   - Caffe preprocess/deprocess path in `optimize.py:134-149` + `utils.py`
 - Porting caution:
   - channel/order differences (Caffe-style) and bound constraints must be explicitly handled.
+
+### Blackbox Dissector -> mebench/attackers/blackbox_dissector.py
+- Official code location: `official_repo_clones/blackbox-dissector/attack.py`, `.../sampler.py`, `.../my_transform.py`
+- Internal code location: `mebench/attackers/blackbox_dissector.py`
+- Victim query type / budget counting:
+  - Official attack is hard-label oriented and uses per-image querying in iterative splits.
+  - mebench enforces hard-top1 for this attack and strict per-image budget accounting via context/oracle.
+- Hyperparameters (official defaults):
+  - `batch_size=128`, `train_epochs=200`, `lr=0.02`, `momentum=0.9`, `weight_decay=5e-4`, `erase_rate=0.25`, `sh=0.1`.
+  - split checkpoints + increments in `attack.py` (`splits` / `budgets`).
+- Preprocess pipeline (official):
+  - dataset-specific resize/normalize pipelines defined in `attack.py`.
+  - random/priori erasing implementations in `my_transform.py`.
+- Porting caution:
+  - official code assumes normalized inputs and file-path based transfer-set workflow.
+  - benchmark contract keeps canonical oracle inputs in `[0,1]`; any normalization differences must remain explicit.
+  - started alignment: per-iteration stage budget split now follows configurable `erase_rate` (default `0.25`) rather than fixed 50:50.
 
 ## 4) Preprocessing compatibility layer plan
 

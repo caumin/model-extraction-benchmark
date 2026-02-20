@@ -62,7 +62,7 @@ def test_dissector_stage_a_and_b_are_separate_batches(monkeypatch) -> None:
     qb_a = attack._select_query_batch(100, state)
     assert qb_a.meta["stage"] == "A"
     assert all(t == "original" for t in qb_a.meta["variant_types"])
-    assert qb_a.x.shape[0] == 2
+    assert qb_a.x.shape[0] == 3
 
     # Provide victim labels so Stage B can run.
     for idx in qb_a.meta["indices"]:
@@ -71,7 +71,7 @@ def test_dissector_stage_a_and_b_are_separate_batches(monkeypatch) -> None:
     qb_b = attack._select_query_batch(100, state)
     assert qb_b.meta["stage"] == "B"
     assert all(t == "erased" for t in qb_b.meta["variant_types"])
-    assert qb_b.x.shape[0] == 2
+    assert qb_b.x.shape[0] == 1
 
 
 def test_random_erase_fills_with_uniform_0_1() -> None:
