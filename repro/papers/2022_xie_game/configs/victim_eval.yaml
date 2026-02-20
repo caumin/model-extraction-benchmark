@@ -1,1 +1,15 @@
-# TODO
+seed: 0
+batch_size: 256
+num_workers: 0
+victim:
+  arch: resnet34
+  input_scale_mode: unit
+  checkpoint_ref: runs/victims/cifar10_resnet34_game_seed0.pt
+  channels: 3
+  num_classes: 10
+  input_size: [32, 32]
+dataset:
+  name: CIFAR10
+output:
+  json: repro/papers/2022_xie_game/results/victim_eval.json
+  csv: repro/papers/2022_xie_game/results/victim_eval.csv

@@ -1,1 +1,33 @@
-# TODO
+attack:
+  name: game
+  output_mode: soft_prob
+  max_budget: 2000
+  batch_size: 1024
+  querybudget: 2000
+  attack_train_epoch: 40
+  round_train_epochs: 20
+  train_on_full_buffer: true
+  optimizer: sgd
+  acs_strategy: random
+  use_acgan: true
+  tdl_steps: 20
+  agu_steps: 1
+  gmd_steps: 1
+  noise_dim: 100
+  student_lr: 0.1
+  generator_lr: 0.0002
+  discriminator_lr: 0.0002
+
+substitute:
+  arch: resnet34
+  width_mult: 1
+  init_seed: 0
+  optimizer:
+    name: sgd
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 0.0005
+
+budget:
+  max_budget: 2000
+  checkpoints: [200, 600, 1000, 1400, 1800, 2000]

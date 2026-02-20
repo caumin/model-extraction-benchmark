@@ -4,7 +4,9 @@ Priority order:
 1) DFME
 2) MAZE
 3) DFMS
-4) InverseNet
+4) GAME
+5) SwiftThief
+6) InverseNet
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ PRIORITY = [
     "2021_truong_dfme",
     "2021_kariyappa_maze",
     "2022_sanyal_dfms",
+    "2022_xie_game",
+    "2024_lee_swiftthief",
     "2021_gong_inversenet",
 ]
 
@@ -34,6 +38,8 @@ STAGES_BY_PAPER = {
     "2021_kariyappa_maze": "victim_train,victim_eval,attack,collect,compare",
     # DFMS uses existing CIFAR10 ResNet-18 victim checkpoint.
     "2022_sanyal_dfms": "victim_eval,attack,collect,compare",
+    "2022_xie_game": "victim_train,victim_eval,attack,collect,compare",
+    "2024_lee_swiftthief": "victim_train,victim_eval,attack,collect,compare",
     "2021_gong_inversenet": "victim_train,victim_eval,attack,collect,compare",
 }
 

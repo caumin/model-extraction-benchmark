@@ -22,6 +22,8 @@ $priority = @(
     "2021_truong_dfme",
     "2021_kariyappa_maze",
     "2022_sanyal_dfms",
+    "2022_xie_game",
+    "2024_lee_swiftthief",
     "2021_gong_inversenet"
 )
 
@@ -29,6 +31,8 @@ $stagesByPaper = @{
     "2021_truong_dfme" = "victim_eval,attack,collect,compare"
     "2021_kariyappa_maze" = "victim_train,victim_eval,attack,collect,compare"
     "2022_sanyal_dfms" = "victim_eval,attack,collect,compare"
+    "2022_xie_game" = "victim_train,victim_eval,attack,collect,compare"
+    "2024_lee_swiftthief" = "victim_train,victim_eval,attack,collect,compare"
     "2021_gong_inversenet" = "victim_train,victim_eval,attack,collect,compare"
 }
 

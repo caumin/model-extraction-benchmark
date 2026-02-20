@@ -1,1 +1,18 @@
-# TODO
+dataset: CIFAR10
+arch: resnet34
+input_scale_mode: unit
+seed: 0
+victim_id: cifar10_resnet34_game
+out: runs/victims/cifar10_resnet34_game_seed0.pt
+save_metadata: true
+train:
+  epochs: 20
+  batch_size: 1024
+  scheduler: cosine
+  dropout_prob: 0.0
+  num_workers: 0
+  optimizer:
+    name: sgd
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 0.0005

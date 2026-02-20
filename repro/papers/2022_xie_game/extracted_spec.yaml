@@ -1,16 +1,49 @@
 paper:
   paper_id: 2022_xie_game
-  title: ""
+  title: "GAME: Generative-Based Adaptive Model Extraction Attack"
   authors: []
   year: 2022
-  venue: ""
+  venue: "Springer LNCS"
 pdf:
   path: /papers/GAME.pdf
   sha256: c63d55714b898b3ce929b34dbfda1994de7ad43d65366545dbe4d9311009587e
-datasets: []
-victim: {}
-attack: {}
-evaluation: {}
-reported_results: {tables: [], figures: []}
-assumptions: []
-evidence_index: []
+datasets:
+  - name: CIFAR10
+    notes: origin dataset in official attack.py default
+  - name: CIFAR100
+    notes: proxy dataset in official attack.py default
+victim:
+  architecture:
+    name: ResNet34
+  training:
+    epochs: 20
+    batch_size: 1024
+attack:
+  name: game
+  oracle_access:
+    type: prob
+  query_budget:
+    cifar10: 2000
+  hyperparameters:
+    batch_size: 1024
+    attack_train_epoch: 40
+    optimizer: SGD
+evaluation:
+  metrics:
+    - acc_gt
+    - agreement
+reported_results:
+  tables: []
+  figures: []
+  targets: []
+assumptions:
+  - item: official defaults imported from game_attack/attack.py
+    reason: paper table values are not yet extracted into this repository
+    impact_check: comparison table remains incomplete until targets are added
+evidence_index:
+  - item_path: attack.query_budget.cifar10
+    ref: official_repo_clones/game_attack/attack.py:24
+    quote: "--querybudget ... default=2000"
+  - item_path: attack.hyperparameters.attack_train_epoch
+    ref: official_repo_clones/game_attack/attack.py:26
+    quote: "--attack_train_epoch ... default=40"
