@@ -39,6 +39,11 @@ class LearningRateValidator:
             "generator_lr": 1e-4,  # Generator LR - legitimately different
             "justification": "Generator uses Adam for GAN training"
         },
+        "disguide": {
+            "student_lr": 0.01,
+            "generator_lr": 1e-4,
+            "justification": "Generator and clone optimizers follow DisGUIDE training dynamics",
+        },
         "es_attack": {
             "substitute_lr": 0.01,  # Must follow contract
             "justification": "Uses standard classifier training"

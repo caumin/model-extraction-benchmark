@@ -20,6 +20,7 @@ from mebench.attackers.cloudleak import CloudLeak
 from mebench.attackers.copycatcnn import CopycatCNN
 from mebench.attackers.dfme import DFME
 from mebench.attackers.dfms import DFMSHL
+from mebench.attackers.disguide import DisGUIDE
 from mebench.attackers.es_attack import ESAttack
 from mebench.attackers.game import GAME
 from mebench.attackers.inversenet import InverseNet
@@ -52,6 +53,8 @@ def create_runner(
         return MAZE(config["attack"], state)
     elif attack_name == "dfms":
         return DFMSHL(config["attack"], state)
+    elif attack_name == "disguide":
+        return DisGUIDE(config["attack"], state)
     elif attack_name == "game":
         return GAME(config["attack"], state)
     elif attack_name == "es":

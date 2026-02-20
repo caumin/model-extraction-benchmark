@@ -5,6 +5,7 @@ from mebench.attackers.activethief import ActiveThief
 from mebench.attackers.dfme import DFME
 from mebench.attackers.maze import MAZE
 from mebench.attackers.dfms import DFMSHL
+from mebench.attackers.disguide import DisGUIDE
 from mebench.attackers.game import GAME
 from mebench.attackers.es_attack import ESAttack
 from mebench.attackers.swiftthief import SwiftThief
@@ -26,6 +27,7 @@ __all__ = [
     "MAZE",
     "DFMSHL",
     "DFMS",
+    "DisGUIDE",
     "GAME",
     "ESAttack",
     "SwiftThief",

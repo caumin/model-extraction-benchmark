@@ -17,7 +17,7 @@ from typing import Dict, Any
 from mebench.attackers import (
     RandomBaseline, ActiveThief, DFME, MAZE, KnockoffNets,
     BlackboxDissector, CloudLeak, InverseNet, SwiftThief,
-    DFMS, ESAttack, GAME, CopycatCNN, BlackboxRipper
+    DFMS, ESAttack, GAME, CopycatCNN, BlackboxRipper, DisGUIDE
 )
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
@@ -38,6 +38,7 @@ class TestAttackInterface:
         "inversenet",
         "swiftthief",
         "dfms",
+        "disguide",
         "es_attack",
         "game",
         "copycatcnn",
@@ -111,6 +112,7 @@ class TestAttackInterface:
             "inversenet": InverseNet,
             "swiftthief": SwiftThief,
             "dfms": DFMS,
+            "disguide": DisGUIDE,
             "es_attack": ESAttack,
             "game": GAME,
             "copycatcnn": CopycatCNN,
@@ -222,6 +224,10 @@ class TestLearningRateCompliance:
             "dfms": {
                 "substitute_lr": 0.01,
                 "generator_lr": 1e-4
+            },
+            "disguide": {
+                "student_lr": 0.01,
+                "generator_lr": 1e-4,
             },
             "es_attack": {
                 "substitute_lr": 0.01

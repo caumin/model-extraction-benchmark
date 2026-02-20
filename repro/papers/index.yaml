@@ -25,3 +25,5 @@ papers:
     pdf: papers/MAZE.pdf
   - paper_id: 2024_lee_swiftthief
     pdf: papers/swiftthief.pdf
+  - paper_id: 2023_tan_disguide
+    pdf: papers/disguide.pdf

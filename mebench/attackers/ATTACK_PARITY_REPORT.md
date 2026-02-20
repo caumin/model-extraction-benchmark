@@ -22,6 +22,7 @@ This report tracks parity status between official implementations in
 | SwiftThief | `swiftthief/swiftthief.py` | `mebench/attackers/swiftthief.py` | CLOSE (strict budget gateway + framework adaptation) |
 | GAME | `game_attack/attack.py` | `mebench/attackers/game.py` | CLOSE |
 | DFMS-HL | `dfms_hl/code/*` | `mebench/attackers/dfms.py` | CLOSE |
+| DisGUIDE | `disguide/disguide/train.py` | `mebench/attackers/disguide.py` | SAME_CORE_LOOP (contract-aligned scaling + budget gateway) |
 | CloudLeak | `cloudleak/optimize.py` | `mebench/attackers/cloudleak.py` | CLOSE |
 
 ## Accepted differences and rationale
@@ -45,6 +46,7 @@ This report tracks parity status between official implementations in
 - `DFME`: student optimizer defaults aligned to official (`SGD lr=0.1 momentum=0.9 wd=5e-4`).
 - `SwiftThief`: KD/SL learning-rate default aligned to official `--sl_lr=1e-2`.
 - `GAME`: default query/training batch size aligned to official `--batch_size=1024`.
+- `DisGUIDE`: generator objective aligned to disagreement + diversity, with official-style replay/ensemble defaults.
 
 ## 1:1 loop align updates
 
@@ -72,6 +74,7 @@ This report tracks parity status between official implementations in
 
 - Soft-output required attacks are enforced by validation sets in `mebench/core/validate.py:68-96`.
 - Hard-output required attacks are also enforced there (including DFMS-HL).
+- DisGUIDE is enforced as both-capable (`soft_prob` / `hard_top1`) with hard-label guard (`loss='hl'`) in `mebench/attackers/disguide.py`.
 
 ## Remaining work
 

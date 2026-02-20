@@ -38,25 +38,29 @@ def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
     out_dir = tmp_path / "cfg"
     count = _generate_matrix(out_dir)
 
-    assert count == 26
+    assert count == 28
     assert not (out_dir / "SET-A1_maze_paper_soft_30m_seed0.yaml").exists()
     assert not (out_dir / "SET-B1_maze_paper_soft_30m_seed0.yaml").exists()
     assert not (out_dir / "SET-A1_dfms_paper_hard_30m_seed0.yaml").exists()
     assert not (out_dir / "SET-B1_dfms_paper_c100_40c_resnet18_hard_8m_seed0.yaml").exists()
     assert (out_dir / "SET-B1_maze_soft_30m_seed0.yaml").exists()
+    assert (out_dir / "SET-A1_disguide_soft_30m_seed0.yaml").exists()
+    assert (out_dir / "SET-B1_disguide_soft_30m_seed0.yaml").exists()
 
 
 def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) -> None:
     out_dir = tmp_path / "cfg"
     count = _generate_paperlike(out_dir)
 
-    assert count == 5
+    assert count == 6
 
     inversenet_cfg_path = out_dir / "SET-A1_inversenet_paper_hard_30k_seed0.yaml"
     maze_cfg_path = out_dir / "SET-B1_maze_paper_soft_30m_seed0.yaml"
+    disguide_cfg_path = out_dir / "SET-B1_disguide_paper_soft_20m_seed0.yaml"
     dfms_cfg_path = out_dir / "SET-B1_dfms_paper_c100_40c_resnet18_hard_8m_seed0.yaml"
     assert inversenet_cfg_path.exists()
     assert maze_cfg_path.exists()
+    assert disguide_cfg_path.exists()
     assert dfms_cfg_path.exists()
     assert (out_dir / "SET-B1_dfms_paper_c100_10c_resnet18_hard_8m_seed0.yaml").exists()
     assert (out_dir / "SET-B1_dfms_paper_c100_40c_resnet34_hard_8m_seed0.yaml").exists()
@@ -64,6 +68,7 @@ def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) ->
 
     inversenet_cfg = yaml.safe_load(inversenet_cfg_path.read_text(encoding="utf-8"))
     maze_cfg = yaml.safe_load(maze_cfg_path.read_text(encoding="utf-8"))
+    disguide_cfg = yaml.safe_load(disguide_cfg_path.read_text(encoding="utf-8"))
     dfms_cfg = yaml.safe_load(dfms_cfg_path.read_text(encoding="utf-8"))
 
     assert inversenet_cfg["victim"]["arch"] == "classifier"
@@ -84,6 +89,20 @@ def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) ->
     assert maze_cfg["attack"]["n_r_steps"] == 10
     assert maze_cfg["attack"]["lr_schedule"] == "cosine"
     assert float(maze_cfg["substitute"]["optimizer"]["lr"]) == 0.1
+
+    assert disguide_cfg["victim"]["arch"] == "resnet34"
+    assert disguide_cfg["victim"]["victim_id"] == "cifar10_resnet34_8x_official"
+    assert int(disguide_cfg["victim"]["width_mult"]) == 8
+    assert disguide_cfg["victim"]["input_scale_mode"] == "tanh"
+    assert disguide_cfg["victim"]["checkpoint_ref"] == "runs/victims/cifar10-resnet34_8x.pt"
+    assert int(disguide_cfg["attack"]["max_budget"]) == 20_000_000
+    assert int(disguide_cfg["attack"]["batch_size"]) == 256
+    assert int(disguide_cfg["attack"]["ensemble_size"]) == 2
+    assert disguide_cfg["attack"]["replay"] == "Classic"
+    assert float(disguide_cfg["attack"]["lambda_div"]) == 0.2
+    assert float(disguide_cfg["attack"]["student_lr"]) == 0.03
+    assert disguide_cfg["attack"]["strict_iteration_budget"] is True
+    assert int(disguide_cfg["substitute"]["width_mult"]) == 8
 
     assert int(dfms_cfg["attack"]["max_budget"]) == 8_000_000
     assert dfms_cfg["attack"]["use_official_stages"] is True

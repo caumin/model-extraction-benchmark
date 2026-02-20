@@ -21,6 +21,7 @@ Scope:
 | SwiftThief | `official_repo_clones/swiftthief/swiftthief.py:44` | `.../swiftthief.py:260-274`, `.../utils/configs.py` |
 | GAME | `official_repo_clones/game_attack/attack.py:11` | `.../attack.py:14-28` |
 | DFMS-HL | `official_repo_clones/dfms_hl/code/train_student/train_student.py:81`, `.../train_gen.py` | `.../train_student.py:93-127` |
+| DisGUIDE | `official_repo_clones/disguide/disguide/train.py`, `.../cli_parser.py` | `official_repo_clones/disguide/run_cifar-10.sh`, `.../run_cifar-100.sh` |
 | CloudLeak / FeatureFool | `official_repo_clones/cloudleak/optimize.py:132`, `.../MCV_query.py` | `.../optimize.py:12-14`, `.../README.md` |
 | FFF | `official_repo_clones/fff/train.py`, `.../evaluate.py` | `.../train.py` |
 
@@ -41,6 +42,7 @@ Scope:
 | SwiftThief | `SwiftThief` | DONE |
 | GAME | `GAME` | DONE |
 | DFMS-HL | `DFMSHL` | DONE |
+| DisGUIDE | `DisGUIDE` | DONE |
 | CloudLeak (FeatureFool pipeline) | `CloudLeak` | DONE |
 | MAZE-JBDA (variant) | N/A (not standalone) | TODO |
 | MAZE-noise baseline | N/A (not standalone) | TODO |
@@ -140,6 +142,21 @@ Scope:
   - normalization `(0.5,0.5,0.5)` in `train_student.py:241-246`, test `:413-416`
 - Porting caution:
   - official scripts are multi-stage and script-driven; preserve stage semantics in attack config.
+
+### DisGUIDE -> mebench/attackers/disguide.py
+- Official code location: `official_repo_clones/disguide/disguide/train.py`, `official_repo_clones/disguide/disguide/my_utils.py`
+- Internal code location: `mebench/attackers/disguide.py`
+- Victim query type / budget counting:
+  - official clone training queries teacher outputs in-loop with million-scale query budgets.
+  - mebench uses `BenchmarkContext.query(...)` for strict per-image accounting and checkpoint callbacks.
+- Hyperparameters (official defaults):
+  - `batch_size=256`, `d_iter=1`, `rep_iter=3`, `replay=Classic`, `ensemble_size>=2`, `lr_G=1e-4`, `lr_S=0.03`, `lambda_div=0.2 (CIFAR-10) / 0.04 (CIFAR-100)`.
+- Preprocess pipeline (official):
+  - input space switch (`pre-transform` vs `post-transform`) in `disguide/dataloader.py`.
+  - optional grayscale augmentation frequency (`grayscale=8` in CIFAR-10 script).
+- Porting caution:
+  - benchmark canonical oracle input remains `[0,1]`; DisGUIDE internal clone path may use tanh/unit compatibility mode.
+  - `hard_top1` mode must use `loss=hl`; `soft_prob` mode supports `loss=l1/kl`.
 
 ### CloudLeak -> mebench/attackers/cloudleak.py
 - Official code location: `official_repo_clones/cloudleak/optimize.py:132-172`, `.../README.md`

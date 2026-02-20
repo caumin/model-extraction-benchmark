@@ -170,3 +170,27 @@ def test_new_attacks_mode_mismatch():
     }
     with pytest.raises(ValueError, match="Mode mismatch"):
         validate_config(config)
+
+
+def test_disguide_allows_soft_prob():
+    """DisGUIDE supports soft_prob output mode."""
+    config = {
+        "run": {"name": "test", "seeds": [0]},
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0},
+        "dataset": {"data_mode": "data_free"},
+        "attack": {"name": "disguide", "output_mode": "soft_prob"},
+        "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
+    }
+    validate_config(config)
+
+
+def test_disguide_allows_hard_top1():
+    """DisGUIDE supports hard_top1 output mode."""
+    config = {
+        "run": {"name": "test", "seeds": [0]},
+        "victim": {"output_mode": "hard_top1", "temperature": 1.0},
+        "dataset": {"data_mode": "data_free"},
+        "attack": {"name": "disguide", "output_mode": "hard_top1"},
+        "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
+    }
+    validate_config(config)

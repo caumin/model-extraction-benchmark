@@ -198,6 +198,7 @@ def generate_configs(
         
         AttackSpec("dfme", kind="synthetic", label_capability="soft_only"),
         AttackSpec("maze", kind="synthetic", label_capability="soft_only"),
+        AttackSpec("disguide", kind="synthetic", label_capability="both"),
         # NOTE: GAME is temporarily excluded from the default matrix because its
         # TDL pretraining requires proxy labels aligned to victim classes.
         AttackSpec("blackbox_ripper", kind="synthetic", label_capability="soft_only"),
@@ -413,7 +414,7 @@ def generate_configs(
                     # loops. Keep oracle outputs on-device to avoid unnecessary
                     # GPU->CPU->GPU transfers while preserving the 1-query=1-image
                     # contract.
-                    if attack.name in {"dfms", "dfme"}:
+                    if attack.name in {"dfms", "dfme", "disguide"}:
                         cfg["victim"]["return_outputs_on_cpu"] = False
 
                     if attack.name == "blackbox_ripper":
@@ -681,6 +682,65 @@ def generate_paperlike_configs(
         )
         (out_dir / f"{maze_run_name}.yaml").write_text(
             yaml.safe_dump(maze_cfg, sort_keys=False),
+            encoding="utf-8",
+        )
+        count += 1
+
+        # DisGUIDE paper-like profile (CIFAR-10 soft-label):
+        # - victim: ResNet-34-8x (paper/default script target)
+        # - budget: 20M
+        # - batch_size=256, ensemble_size=2
+        # - d_iter=1, replay=Classic, rep_iter=3, grayscale=8
+        disguide_budget = 20_000_000
+        disguide_run_name = (
+            f"{cifar10_setup.set_id}_disguide_paper_soft_{_budget_suffix(disguide_budget)}_seed{seed}"
+        )
+        disguide_attack = {
+            "name": "disguide",
+            "output_mode": "soft_prob",
+            "max_budget": int(disguide_budget),
+            "pool_num_workers": int(pool_num_workers),
+            "batch_size": 256,
+            "g_iter": 1,
+            "d_iter": 1,
+            "rep_iter": 3,
+            "replay": "Classic",
+            "replay_size": 1_000_000,
+            "loss": "l1",
+            "student_lr": 0.03,
+            "generator_lr": 1e-4,
+            "ensemble_size": 2,
+            "grayscale_freq": 8,
+            "lambda_div": 0.2,
+            "internal_input_scale_mode": "tanh",
+            "strict_iteration_budget": True,
+            "lr_decay_milestones_ratio": [0.4, 0.8],
+            "lr_decay_gamma": 0.3,
+        }
+        disguide_substitute = _paper_substitute_config(
+            arch="resnet18",
+            seed=int(seed),
+            optimizer_lr=0.03,
+            width_mult=8,
+            scheduler_name="multistep",
+        )
+        disguide_cfg = _paper_base_config(
+            run_name=disguide_run_name,
+            seed=int(seed),
+            victim_arch="resnet34",
+            victim_output_mode="soft_prob",
+            max_budget=int(disguide_budget),
+            attack_cfg=disguide_attack,
+            substitute_cfg=disguide_substitute,
+        )
+        disguide_cfg["victim"]["victim_id"] = "cifar10_resnet34_8x_official"
+        disguide_cfg["victim"]["width_mult"] = 8
+        disguide_cfg["victim"]["input_scale_mode"] = "tanh"
+        disguide_cfg["victim"]["checkpoint_ref"] = "runs/victims/cifar10-resnet34_8x.pt"
+        disguide_cfg["victim"]["return_outputs_on_cpu"] = False
+
+        (out_dir / f"{disguide_run_name}.yaml").write_text(
+            yaml.safe_dump(disguide_cfg, sort_keys=False),
             encoding="utf-8",
         )
         count += 1

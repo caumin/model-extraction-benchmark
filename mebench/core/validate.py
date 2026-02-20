@@ -34,7 +34,15 @@ def validate_config(config: Dict[str, Any]) -> None:
     data_mode = config["dataset"]["data_mode"]
     seed_name = config.get("dataset", {}).get("seed_name", config.get("dataset", {}).get("name"))
     # Data-free attacks must be in data_free mode; pool-based attacks must have a valid seed/surrogate config
-    data_free_attacks = {"dfme", "maze", "dfms", "game", "es", "blackbox_ripper"}
+    data_free_attacks = {
+        "dfme",
+        "maze",
+        "dfms",
+        "disguide",
+        "game",
+        "es",
+        "blackbox_ripper",
+    }
     if attack in data_free_attacks and data_mode != "data_free":
         raise ValueError(f"{attack.upper()} requires data_free mode")
     if data_mode in {"seed", "surrogate"} and seed_name not in {"CIFAR10", "MNIST", "EMNIST", "FashionMNIST", "SVHN", "GTSRB"}:
@@ -86,6 +94,7 @@ def validate_config(config: Dict[str, Any]) -> None:
         # Works under both soft_prob and hard_top1.
         "activethief",
         "swiftthief",
+        "disguide",
         "es",
     }
 

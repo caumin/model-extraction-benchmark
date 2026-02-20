@@ -1,0 +1,65 @@
+run:
+  name: repro_2023_tan_disguide_smoke50k_seed0
+  seeds: [0]
+  device: cuda:0
+
+benchmark:
+  protocol_version: "1.2"
+
+victim:
+  victim_id: cifar10_resnet34_8x_official
+  arch: resnet34
+  width_mult: 8
+  input_scale_mode: tanh
+  channels: 3
+  num_classes: 10
+  input_size: [32, 32]
+  checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt
+  output_mode: soft_prob
+  temperature: 1.0
+  return_outputs_on_cpu: false
+
+dataset:
+  name: CIFAR10
+  data_mode: data_free
+  channels: 3
+  input_size: [32, 32]
+
+attack:
+  name: disguide
+  output_mode: soft_prob
+  max_budget: 50000
+  eval_interval_queries: 10000
+  batch_size: 128
+  g_iter: 1
+  d_iter: 1
+  rep_iter: 1
+  replay: Classic
+  replay_size: 50000
+  loss: l1
+  student_lr: 0.03
+  generator_lr: 0.0001
+  ensemble_size: 2
+  grayscale_freq: 8
+  lambda_div: 0.2
+  internal_input_scale_mode: tanh
+  strict_iteration_budget: true
+
+substitute:
+  arch: resnet18
+  width_mult: 8
+  init_seed: 1234
+  optimizer:
+    name: sgd
+    lr: 0.03
+    momentum: 0.9
+    weight_decay: 0.0005
+
+budget:
+  max_budget: 50000
+  checkpoints: [1000, 10000, 25000, 50000]
+
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true
