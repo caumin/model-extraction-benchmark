@@ -2,6 +2,7 @@ attack:
   name: dfme
   output_mode: soft_prob
   max_budget: 20000000
+  eval_interval_queries: 1000000
   batch_size: 256
   n_g_steps: 1
   n_s_steps: 5

@@ -11,6 +11,20 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DFMEGenerator
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.scaling import normalize_input_scale
+
+
+class _ScaledSubstituteWrapper(nn.Module):
+    """Apply input scaling before substitute forward for evaluation."""
+
+    def __init__(self, model: nn.Module, input_scale_mode: str) -> None:
+        super().__init__()
+        self.model = model
+        self.input_scale_mode = str(input_scale_mode)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_scaled = normalize_input_scale(x, self.input_scale_mode)
+        return self.model(x_scaled)
 
 class DFME(AttackRunner):
     """DFME implementation strictly aligned with Truong et al. (2021).
@@ -38,9 +52,14 @@ class DFME(AttackRunner):
                 "DFME internal_input_scale_mode must be 'unit' or 'tanh', "
                 f"got {self.internal_input_scale_mode!r}"
             )
-        
+        eval_interval_raw = int(config.get("eval_interval_queries", 0))
+        self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
+        self._next_eval_query = self.eval_interval_queries
+        self._periodic_eval_done: set[int] = set()
+
         self.student = None
         self.generator = None
+        self._eval_substitute = None
         self._initialize_models(state)
 
     def _initialize_models(self, state: BenchmarkState):
@@ -95,10 +114,48 @@ class DFME(AttackRunner):
     def _query_scale(x_tanh: torch.Tensor) -> torch.Tensor:
         return torch.clamp(x_tanh * 0.5 + 0.5, 0.0, 1.0)
 
+    def _get_substitute_for_eval(self) -> nn.Module:
+        if self.internal_input_scale_mode != "tanh":
+            return self.student
+        if self._eval_substitute is None:
+            self._eval_substitute = _ScaledSubstituteWrapper(self.student, "tanh")
+        return self._eval_substitute
+
+    def _publish_substitute(self) -> None:
+        if self.student is None:
+            return
+        self.state.attack_state["substitute"] = self._get_substitute_for_eval()
+
+    def _maybe_periodic_eval(self, device: str) -> None:
+        if self.eval_interval_queries <= 0:
+            return
+        if self.victim is None:
+            return
+        current_queries = int(self.state.query_count)
+        if current_queries < int(self._next_eval_query):
+            return
+        if current_queries in self._periodic_eval_done:
+            return
+        substitute = self.state.attack_state.get("substitute")
+        if substitute is None:
+            return
+
+        self._evaluate_current_substitute(
+            substitute,
+            device,
+            track="track_b",
+            query_count=current_queries,
+        )
+        self._periodic_eval_done.add(current_queries)
+        while self._next_eval_query <= current_queries:
+            self._next_eval_query += self.eval_interval_queries
+
     def run(self, ctx: BenchmarkContext) -> None:
         device = self.state.metadata.get("device", "cpu")
+        self.victim = ctx.oracle.model
         # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         pbar = self._create_progress_bar(ctx.budget_remaining, "[DFME] Extracting")
+        self._publish_substitute()
         
         # Initialize schedulers
         # Milestones: 0.1, 0.3, 0.5 of TOTAL budget.
@@ -174,10 +231,11 @@ class DFME(AttackRunner):
                 v_all = self._recover_logits(ctx.query(x_query_all).y.to(device))
                 v_out = v_all[:batch]
                 v_pert_all = v_all[batch:].view(self.m, batch, -1)
+                num_classes = int(v_out.size(1))
 
-                # [FIX] Align with Official Code (approximate_gradients.py line 90)
-                # Use mean(dim=1) over classes for gradient estimation signal
-                loss_base = torch.norm(v_out - s_out, p=1, dim=1) / v_out.size(1)
+                # Official path (approximate_gradients.py):
+                # loss_values = -F.l1_loss(..., reduction='none').mean(dim=1)
+                loss_base = -F.l1_loss(s_out, v_out, reduction="none").mean(dim=1)
 
                 for j in range(self.m):
                     x_pert_j = x_pert_student_list[j]
@@ -185,13 +243,16 @@ class DFME(AttackRunner):
                     with torch.no_grad():
                         s_pert = self.student(x_pert_j)
                     v_pert = v_pert_all[j]
-                    # [FIX] Use mean(dim=1) here as well
-                    loss_pert = torch.norm(v_pert - s_pert, p=1, dim=1) / v_pert.size(1)
+                    loss_pert = -F.l1_loss(s_pert, v_pert, reduction="none").mean(dim=1)
                     grad_est += (loss_pert - loss_base).view(-1, 1, 1, 1) * u_j
                 
                 self.g_opt.zero_grad()
-                # Maximize L1 Disagreement (Gradient Ascent)
-                pre_tanh.backward(- (grad_est * d / (self.m * self.epsilon)))
+                # Official estimate scaling:
+                # (1/eps) * differences * u * dim, averaged over m,
+                # then divided by (num_classes * batch_size).
+                grad_est_scaled = grad_est * (d / (self.m * self.epsilon))
+                grad_est_scaled = grad_est_scaled / float(max(1, num_classes * batch))
+                pre_tanh.backward(grad_est_scaled)
                 self.g_opt.step()
                 pbar.update(batch * (1 + self.m))
 
@@ -222,8 +283,11 @@ class DFME(AttackRunner):
                 if student_was_training:
                     self.student.train()
                 pbar.update(batch)
-        
-        self.state.attack_state["substitute"] = self.student
+
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
+
+        self._publish_substitute()
         pbar.close()
 
     def observe(
