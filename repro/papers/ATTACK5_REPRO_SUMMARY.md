@@ -40,14 +40,14 @@
 
 | Attack | Result file | Latest populated budget(s) | Notes |
 |---|---|---|---|
-| DFME | `repro/papers/2021_truong_dfme/results/reproduced_metrics.json` | smoke 200..2000 | full 20M pending |
+| DFME | `repro/papers/2021_truong_dfme/results/reproduced_metrics.json` | smoke 200..2000 | re-verification rerun planned; full 20M + compare refresh pending |
 | DFMS-HL | `repro/papers/2022_sanyal_dfms/results/reproduced_metrics.json` | smoke 200..2000 | full 8M pending |
 | MAZE | `repro/papers/2021_kariyappa_maze/results/reproduced_metrics.json` | smoke 200..2000 | full 30M pending |
 | GAME | `repro/papers/2022_xie_game/results/reproduced_metrics.json` | none (`[]`) | run not executed yet |
 | SwiftThief | `repro/papers/2024_lee_swiftthief/results/reproduced_metrics.json` | none (`[]`) | run not executed yet |
 
 ## Pipeline coverage
-- Queue runner now includes all five attacks in order: `repro/run_priority_queue.py` and `repro/run_priority_queue.ps1`.
+- Queue runner now includes non-DFME priority order: `repro/run_priority_queue.py` and `repro/run_priority_queue.ps1`.
 - Stage policy:
   - DFME/DFMS: `victim_eval,attack,collect,compare`
   - MAZE/GAME/SwiftThief: `victim_train,victim_eval,attack,collect,compare`

@@ -465,6 +465,9 @@ class DisGUIDE(AttackRunner):
             )
             target = self._format_teacher_target(oracle_output.y.to(device))
 
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
+
             if self.replay_memory is not None:
                 self.replay_memory.update(x_student, target)
 

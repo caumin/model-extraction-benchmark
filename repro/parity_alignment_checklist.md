@@ -17,6 +17,13 @@
 - [x] `gmd_steps` now applied in the extraction loop.
 - [x] ACS class distribution operates on proxy class-space.
 - [x] Targeted parity tests pass.
+- [x] Fixed student-loss scaling bug in GMD (`loss_res` is no longer multiplied by `beta1`).
+- [x] AGU loss scaling aligned closer to official (sum-based `L_res`/`L_bou`, `L_dif` reduction parity).
+- [x] AGU discriminator update made optional and default-off for official-like extraction path.
+- [ ] Smoke/full reproduction still underperforming (near-random accuracy plateau); runtime parity investigation ongoing.
+- [ ] AGU strict parity review pending (official extraction loop behavior vs current discriminator updates).
+- [ ] Experimental parity gaps remain (`32x32` resize, half-* substitute architectures, `[-1,1]` preprocess vs benchmark `[0,1]`).
+- [ ] Detailed live checklist maintained at `repro/papers/2022_xie_game/GAME_PARITY_CHECKLIST.md`.
 
 ## DFMS (official_repo_clones/dfms_hl)
 

@@ -577,6 +577,182 @@ class LeNetMNIST(nn.Module):
         return x
 
 
+class HalfLeNet(nn.Module):
+    """Official GAME-style Half-LeNet for 32x32 inputs."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 1,
+        dropout_prob: float = 0.0,
+    ) -> None:
+        super().__init__()
+        _ = float(dropout_prob)  # kept for factory signature compatibility
+
+        self.conv1 = nn.Conv2d(int(input_channels), 3, kernel_size=5, stride=1, padding=0)
+        self.pool1 = nn.MaxPool2d(kernel_size=2)
+        self.conv2 = nn.Conv2d(3, 8, kernel_size=5, stride=1, padding=0)
+        self.pool2 = nn.MaxPool2d(kernel_size=2)
+
+        # 32 -> 28 -> 14 -> 10 -> 5 => 8*5*5
+        self.fc1 = nn.Linear(8 * 5 * 5, 120)
+        self.fc2 = nn.Linear(120, 84)
+        self.fc3 = nn.Linear(84, int(num_classes))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.relu(self.conv1(x))
+        x = self.pool1(x)
+        x = torch.relu(self.conv2(x))
+        x = self.pool2(x)
+        x = x.view(-1, 8 * 5 * 5)
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+
+class OfficialHalfAlexNet(nn.Module):
+    """Official GAME-style Half-AlexNet for 32x32 inputs."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 3,
+        dropout_prob: float = 0.5,
+    ) -> None:
+        super().__init__()
+        p = float(dropout_prob) if float(dropout_prob) > 0 else 0.5
+
+        self.conv1 = nn.Conv2d(int(input_channels), 24, 5, stride=1, padding=2)
+        self.relu = nn.ReLU(inplace=True)
+        self.lrn = nn.LocalResponseNorm(2)
+        self.pool = nn.MaxPool2d(3, stride=2)
+        self.bn1 = nn.BatchNorm2d(24, eps=0.001)
+
+        self.conv2 = nn.Conv2d(24, 64, 5, stride=1, padding=2)
+        self.bn2 = nn.BatchNorm2d(64, eps=0.001)
+
+        self.conv3 = nn.Conv2d(64, 96, 3, stride=1, padding=1)
+        self.bn3 = nn.BatchNorm2d(96, eps=0.001)
+
+        self.conv4 = nn.Conv2d(96, 96, 3, stride=1, padding=1)
+        self.bn4 = nn.BatchNorm2d(96, eps=0.001)
+
+        self.conv5 = nn.Conv2d(96, 64, 3, stride=1, padding=1)
+        self.bn5 = nn.BatchNorm2d(64, eps=0.001)
+
+        self.fc1 = nn.Linear(64 * 3 * 3, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, int(num_classes))
+
+        self.drop = nn.Dropout(p=p)
+        self.bn6 = nn.BatchNorm1d(256, eps=0.001)
+        self.bn7 = nn.BatchNorm1d(128, eps=0.001)
+
+        # Match official GAME initialization behavior.
+        nn.init.normal_(self.conv1.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv1.bias, 0.0)
+        nn.init.normal_(self.conv2.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv2.bias, 1.0)
+        nn.init.normal_(self.conv3.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv3.bias, 0.0)
+        nn.init.normal_(self.conv4.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv4.bias, 1.0)
+        nn.init.normal_(self.conv5.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv5.bias, 1.0)
+        nn.init.normal_(self.fc1.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.fc1.bias, 0.0)
+        nn.init.normal_(self.fc2.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.fc2.bias, 0.0)
+        nn.init.normal_(self.fc3.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.fc3.bias, 0.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.bn1(self.pool(self.lrn(self.relu(self.conv1(x)))))
+        x = self.bn2(self.pool(self.lrn(self.relu(self.conv2(x)))))
+        x = self.bn3(self.relu(self.conv3(x)))
+        x = self.bn4(self.relu(self.conv4(x)))
+        x = self.bn5(self.pool(self.relu(self.conv5(x))))
+        x = x.view(-1, 64 * 3 * 3)
+        x = self.relu(self.fc1(x))
+        x = self.bn6(self.drop(x))
+        x = self.relu(self.fc2(x))
+        x = self.bn7(self.drop(x))
+        x = self.fc3(x)
+        return x
+
+
+class OfficialAlexNet(nn.Module):
+    """Official GAME-style AlexNet for 32x32 inputs."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 3,
+        dropout_prob: float = 0.5,
+    ) -> None:
+        super().__init__()
+        p = float(dropout_prob) if float(dropout_prob) > 0 else 0.5
+
+        self.conv1 = nn.Conv2d(int(input_channels), 48, 5, stride=1, padding=2)
+        self.relu = nn.ReLU(inplace=True)
+        self.lrn = nn.LocalResponseNorm(2)
+        self.pool = nn.MaxPool2d(3, stride=2)
+        self.bn1 = nn.BatchNorm2d(48, eps=0.001)
+
+        self.conv2 = nn.Conv2d(48, 128, 5, stride=1, padding=2)
+        self.bn2 = nn.BatchNorm2d(128, eps=0.001)
+
+        self.conv3 = nn.Conv2d(128, 192, 3, stride=1, padding=1)
+        self.bn3 = nn.BatchNorm2d(192, eps=0.001)
+
+        self.conv4 = nn.Conv2d(192, 192, 3, stride=1, padding=1)
+        self.bn4 = nn.BatchNorm2d(192, eps=0.001)
+
+        self.conv5 = nn.Conv2d(192, 128, 3, stride=1, padding=1)
+        self.bn5 = nn.BatchNorm2d(128, eps=0.001)
+
+        self.fc1 = nn.Linear(128 * 3 * 3, 512)
+        self.fc2 = nn.Linear(512, 256)
+        self.fc3 = nn.Linear(256, int(num_classes))
+
+        self.drop = nn.Dropout(p=p)
+        self.bn6 = nn.BatchNorm1d(512, eps=0.001)
+        self.bn7 = nn.BatchNorm1d(256, eps=0.001)
+
+        # Match official GAME initialization behavior.
+        nn.init.normal_(self.conv1.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv1.bias, 0.0)
+        nn.init.normal_(self.conv2.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv2.bias, 1.0)
+        nn.init.normal_(self.conv3.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv3.bias, 0.0)
+        nn.init.normal_(self.conv4.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv4.bias, 1.0)
+        nn.init.normal_(self.conv5.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.conv5.bias, 1.0)
+        nn.init.normal_(self.fc1.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.fc1.bias, 0.0)
+        nn.init.normal_(self.fc2.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.fc2.bias, 0.0)
+        nn.init.normal_(self.fc3.bias, mean=0.0, std=0.01)
+        nn.init.constant_(self.fc3.bias, 0.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.bn1(self.pool(self.lrn(self.relu(self.conv1(x)))))
+        x = self.bn2(self.pool(self.lrn(self.relu(self.conv2(x)))))
+        x = self.bn3(self.relu(self.conv3(x)))
+        x = self.bn4(self.relu(self.conv4(x)))
+        x = self.bn5(self.pool(self.relu(self.conv5(x))))
+        x = x.view(-1, 128 * 3 * 3)
+        x = self.relu(self.fc1(x))
+        x = self.bn6(self.drop(x))
+        x = self.relu(self.fc2(x))
+        x = self.bn7(self.drop(x))
+        x = self.fc3(x)
+        return x
+
+
 class LeNet5MNIST(nn.Module):
     """LeNet-5 for MNIST (1x28x28).
 
@@ -686,12 +862,27 @@ def create_substitute(
             dropout_prob=dropout_prob,
         )
     elif arch == "alexnet":
-        _require_torchvision_3ch_input("alexnet", input_channels)
+        return OfficialAlexNet(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            dropout_prob=(dropout_prob if float(dropout_prob) > 0 else 0.5),
+        )
+    elif arch == "vgg16":
         if int(width_mult) != 1:
-            raise ValueError("Torchvision alexnet does not support width_mult; use width_mult=1")
-        if float(dropout_prob) != 0.0:
-            raise ValueError("Torchvision alexnet does not support dropout_prob override; use dropout_prob=0.0")
-        return models.alexnet(weights=None, num_classes=int(num_classes))
+            raise ValueError("Torchvision vgg16 does not support width_mult; use width_mult=1")
+        model = models.vgg16(weights=None, num_classes=int(num_classes))
+        if int(input_channels) != 3:
+            model.features[0] = nn.Conv2d(
+                int(input_channels),
+                64,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            )
+        if float(dropout_prob) > 0:
+            model.classifier[2] = nn.Dropout(p=float(dropout_prob))
+            model.classifier[5] = nn.Dropout(p=float(dropout_prob))
+        return model
     elif arch in {"alexnet_half", "alexnet-half"}:
         return AlexNetHalf(
             num_classes=num_classes,
@@ -722,6 +913,14 @@ def create_substitute(
         return LeNet(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
     elif arch == "lenet_mnist":
         return LeNet5MNIST(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
+    elif arch in {"half_lenet", "half-lenet"}:
+        return HalfLeNet(num_classes=num_classes, input_channels=input_channels, dropout_prob=dropout_prob)
+    elif arch in {"half_alexnet", "half-alexnet"}:
+        return OfficialHalfAlexNet(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            dropout_prob=(dropout_prob if float(dropout_prob) > 0 else 0.5),
+        )
     elif arch == "activethief_cnn":
         return ActiveThiefCNN(
             num_classes=num_classes, 
@@ -762,6 +961,10 @@ def get_model_info(arch: str) -> Dict[str, Any]:
             "num_params": 57044810,  # torchvision alexnet (num_classes=10)
             "default_width": 1,
         },
+        "vgg16": {
+            "num_params": 0,
+            "default_width": 1,
+        },
         "alexnet_half": {
             "num_params": 0,
             "default_width": 1,
@@ -784,6 +987,14 @@ def get_model_info(arch: str) -> Dict[str, Any]:
         },
         "lenet_mnist": {
             "num_params": 61706,
+            "default_width": 1,
+        },
+        "half_lenet": {
+            "num_params": 0,
+            "default_width": 1,
+        },
+        "half_alexnet": {
+            "num_params": 0,
             "default_width": 1,
         },
         "activethief_cnn": {

@@ -25,6 +25,11 @@ Use `repro/run_experiment.py`.
 
 Priority queue runner: `repro/run_priority_queue.py` (MAZE -> GAME -> DFMS -> blackbox-dissector -> disguide).
 
+Current status:
+
+- DFME (`2021_truong_dfme`) is scheduled for a fresh verification rerun (smoke -> full).
+- Priority queue still starts from MAZE; run DFME explicitly via `repro/run_experiment.py` when needed.
+
 ### 1) Bootstrap all paper folders
 
 ```bash
@@ -65,8 +70,8 @@ PowerShell sequential runner (recommended if you want live `tqdm`/progress-bar r
 
 Queue behavior:
 
-- MAZE, GAME, blackbox-dissector, disguide run `victim_train,victim_eval,attack,collect,compare`.
-- DFMS uses existing victim checkpoint (`runs/victims/cifar10_resnet18_seed0.pt`) and runs `victim_eval,attack,collect,compare`.
+- MAZE and DFMS use existing victim checkpoints and run `victim_eval,attack,collect,compare`.
+- GAME, blackbox-dissector, disguide run `victim_train,victim_eval,attack,collect,compare`.
 
 Remote/high-resource full run:
 
@@ -80,13 +85,10 @@ python repro/run_priority_queue.py --profile full --device cuda:0
 
 ## Stages
 
-Default run stages:
+Default run stages (when `--stages` is omitted):
 
-- `victim_train`
-- `victim_eval`
-- `attack`
-- `collect`
-- `compare`
+- `victim_train,victim_eval,attack,collect,compare`
+- If a victim checkpoint already exists at the configured `victim_train.out`, pipeline auto-skips `victim_train` and reuses that checkpoint.
 
 Custom stage selection example:
 

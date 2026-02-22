@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 REPRO_ROOT = ROOT / "repro"
 PAPERS_ROOT = REPRO_ROOT / "papers"
 
+DEFAULT_STAGES = "victim_train,victim_eval,attack,collect,compare"
+
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -388,12 +390,63 @@ def _capture_environment(paper_dir: Path, device: str) -> None:
     out.write_text(json.dumps(env, indent=2), encoding="utf-8")
 
 
-def _resolve_experiment_path(paper_dir: Path, profile: str) -> Path:
-    if profile == "smoke":
-        smoke = paper_dir / "configs" / "experiment_smoke.yaml"
-        if smoke.exists():
-            return smoke
-    return paper_dir / "configs" / "experiment.yaml"
+def _resolve_config_path(
+    paper_dir: Path,
+    base_name: str,
+    pair: str,
+    profile: str,
+) -> Path:
+    """Resolve config file with optional pair-specific overrides.
+
+    Existing pair-1 behavior is preserved using the legacy filenames:
+      victim_train.yaml, victim_eval.yaml, attack.yaml, experiment.yaml.
+
+    Pair-2 can use pair-suffixed filenames:
+      victim_train_pair2.yaml, victim_eval_pair2.yaml, attack_pair2.yaml,
+      experiment_pair2.yaml.
+    If no explicit pair-2 file exists for an attack or experiment, we fall back to
+    the best-effort existing alias pattern.
+    """
+
+    config_dir = paper_dir / "configs"
+
+    # Pair-1 keeps current pathing to avoid regressions.
+    if pair == "pair1":
+        if base_name == "experiment":
+            if profile == "smoke":
+                smoke = config_dir / "experiment_smoke.yaml"
+                if smoke.exists():
+                    return smoke
+            return config_dir / "experiment.yaml"
+        return config_dir / f"{base_name}.yaml"
+
+    pair_suffix = f"{base_name}_pair2.yaml"
+    explicit_pair = config_dir / pair_suffix
+    if explicit_pair.exists():
+        return explicit_pair
+
+    if base_name == "experiment":
+        # Prefer explicit smoke profile pair-2 file when available.
+        if profile == "smoke":
+            smoke_pair = config_dir / "experiment_smoke_pair2.yaml"
+            if smoke_pair.exists():
+                return smoke_pair
+
+        # Some generated configs use the paper-specific naming pattern.
+        for candidate in config_dir.glob("experiment_paper_pair2*.yaml"):
+            return candidate
+
+        # Fallback to a generic legacy pair-2 file if it already exists.
+        pair2_full = config_dir / "experiment_pair2.yaml"
+        if pair2_full.exists():
+            return pair2_full
+
+    # Last-resort fallback keeps the pipeline runnable if a specific pair file is missing.
+    return config_dir / f"{base_name}.yaml"
+
+
+def _resolve_experiment_path(paper_dir: Path, profile: str, pair: str) -> Path:
+    return _resolve_config_path(paper_dir, "experiment", pair, profile)
 
 
 def _apply_repro_stage_toggles(
@@ -431,6 +484,59 @@ def _apply_repro_stage_toggles(
     return stages
 
 
+def _resolve_requested_stages(stages_arg: str | None) -> list[str]:
+    raw = "" if stages_arg is None else str(stages_arg).strip()
+    if raw != "":
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+    return [s.strip() for s in DEFAULT_STAGES.split(",") if s.strip()]
+
+
+def _resolve_victim_train_output(victim_train_cfg: dict[str, Any]) -> Path | None:
+    raw = victim_train_cfg.get("out")
+    if not isinstance(raw, str):
+        return None
+    out_str = raw.strip()
+    if out_str == "":
+        return None
+    out_path = Path(out_str)
+    if not out_path.is_absolute():
+        out_path = ROOT / out_path
+    return out_path
+
+
+def _prefer_existing_victim_checkpoint(
+    stages: list[str],
+    *,
+    paper_dir: Path,
+    profile: str,
+    pair: str,
+    stages_arg: str | None,
+) -> list[str]:
+    """Checkpoint-first behavior for implicit default stages.
+
+    If user did not pass --stages and victim checkpoint already exists, skip victim_train.
+    Explicit --stages is respected as-is.
+    """
+
+    raw = "" if stages_arg is None else str(stages_arg).strip()
+    if raw != "":
+        return stages
+
+    victim_train_cfg_path = _resolve_config_path(paper_dir, "victim_train", pair, profile)
+    victim_train_cfg = _load_yaml(victim_train_cfg_path)
+    if not victim_train_cfg:
+        return stages
+
+    out_path = _resolve_victim_train_output(victim_train_cfg)
+    if out_path is None or not out_path.exists():
+        return stages
+
+    filtered = [stage for stage in stages if stage != "victim_train"]
+    print(f"[INFO] Reusing existing victim checkpoint: {out_path}")
+    return filtered
+
+
 def run_pipeline(args: argparse.Namespace) -> None:
     paper_dir = PAPERS_ROOT / args.paper_id
     if not paper_dir.exists():
@@ -440,19 +546,27 @@ def run_pipeline(args: argparse.Namespace) -> None:
     log_path = paper_dir / "logs" / f"pipeline_{timestamp}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    requested_stages = [s.strip() for s in args.stages.split(",") if s.strip()]
+    requested_stages = _resolve_requested_stages(args.stages)
     _capture_environment(paper_dir, args.device)
 
-    experiment_path = _resolve_experiment_path(paper_dir, args.profile)
+    experiment_path = _resolve_experiment_path(paper_dir, args.profile, args.pair)
     experiment_cfg = _load_yaml(experiment_path)
     stages = _apply_repro_stage_toggles(requested_stages, experiment_cfg)
+    stages = _prefer_existing_victim_checkpoint(
+        stages,
+        paper_dir=paper_dir,
+        profile=args.profile,
+        pair=args.pair,
+        stages_arg=args.stages,
+    )
 
     if "victim_train" in stages:
+        victim_train_cfg = _resolve_config_path(paper_dir, "victim_train", args.pair, args.profile)
         cmd = [
             sys.executable,
             "scripts/train_victim.py",
             "--config",
-            str(paper_dir / "configs" / "victim_train.yaml"),
+            str(victim_train_cfg),
             "--device",
             args.device,
         ]
@@ -463,11 +577,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
         _run_command(cmd, log_path, args.dry_run, args.live_output)
 
     if "victim_eval" in stages:
+        victim_eval_cfg = _resolve_config_path(paper_dir, "victim_eval", args.pair, args.profile)
         cmd = [
             sys.executable,
             "scripts/eval_victim.py",
             "--config",
-            str(paper_dir / "configs" / "victim_eval.yaml"),
+            str(victim_eval_cfg),
             "--device",
             args.device,
         ]
@@ -517,13 +632,23 @@ def main() -> None:
     p_run = sub.add_parser("run", help="Run staged pipeline for a paper")
     p_run.add_argument("--paper-id", type=str, required=True)
     p_run.add_argument("--profile", choices=["smoke", "full"], default="smoke")
+    p_run.add_argument(
+        "--pair",
+        choices=["pair1", "pair2"],
+        default="pair1",
+        help="Dataset pair for reproduction profiles (pair1 or pair2)",
+    )
     p_run.add_argument("--device", type=str, default="cuda:0")
     p_run.add_argument("--dry-run", action="store_true")
     p_run.add_argument(
         "--stages",
         type=str,
-        default="victim_train,victim_eval,attack,collect,compare",
-        help="Comma-separated stages",
+        default="",
+        help=(
+            "Comma-separated stages. If omitted, defaults to "
+            "victim_train,victim_eval,attack,collect,compare, but victim_train is "
+            "auto-skipped when an existing victim checkpoint is found."
+        ),
     )
     p_run.add_argument(
         "--smoke-epochs",

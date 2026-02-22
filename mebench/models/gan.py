@@ -319,33 +319,25 @@ class ACGANGenerator(nn.Module):
         self.base_channels = base_channels
 
         self.label_emb = nn.Embedding(num_classes, noise_dim)
-        self.fc = nn.Linear(noise_dim, 4 * 4 * base_channels * 8)
+        self.init_size = int(output_size) // 4
+        self.fc = nn.Linear(noise_dim, 128 * self.init_size * self.init_size)
 
-        num_upsamples = int(math.log2(output_size // 4))
+        p = float(dropout_prob) if float(dropout_prob) > 0 else 0.0
         layers = [
-            nn.BatchNorm2d(base_channels * 8),
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(128),
+            nn.Upsample(scale_factor=2),
+            nn.Conv2d(128, 128, 3, stride=1, padding=1),
+            nn.BatchNorm2d(128, 0.8),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Upsample(scale_factor=2),
+            nn.Conv2d(128, 64, 3, stride=1, padding=1),
+            nn.BatchNorm2d(64, 0.8),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(64, output_channels, 3, stride=1, padding=1),
         ]
-        if dropout_prob > 0:
-            layers.append(nn.Dropout2d(dropout_prob))
-
-        in_channels = base_channels * 8
-        for i in range(num_upsamples - 1):
-            out_channels = max(base_channels, in_channels // 2)
-            layers.extend(
-                [
-                    nn.ConvTranspose2d(in_channels, out_channels, 4, 2, 1, bias=False),
-                    nn.BatchNorm2d(out_channels),
-                    nn.ReLU(inplace=True),
-                ]
-            )
-            if dropout_prob > 0:
-                layers.append(nn.Dropout2d(dropout_prob))
-            in_channels = out_channels
-
-        layers.append(
-            nn.ConvTranspose2d(in_channels, output_channels, 4, 2, 1, bias=False)
-        )
+        if p > 0:
+            layers.insert(5, nn.Dropout2d(p))
+            layers.insert(10, nn.Dropout2d(p))
         self.main = nn.Sequential(*layers)
         self.out_act = nn.Tanh()
 
@@ -353,7 +345,7 @@ class ACGANGenerator(nn.Module):
         # Multiplicative conditioning (standard ACGAN style)
         z = z * self.label_emb(labels)
         x = self.fc(z)
-        x = x.view(-1, self.base_channels * 8, 4, 4)
+        x = x.view(-1, 128, self.init_size, self.init_size)
         x = self.main(x)
         if x.shape[-1] != self.output_size:
             x = torch.nn.functional.interpolate(x, size=(self.output_size, self.output_size))
@@ -372,39 +364,39 @@ class ACGANDiscriminator(nn.Module):
         dropout_prob: float = 0.0,
     ) -> None:
         super().__init__()
-        self.input_size = input_size
-        num_downsamples = int(math.log2(input_size // 2))
+        self.input_size = int(input_size)
+        p = float(dropout_prob) if float(dropout_prob) > 0 else 0.25
 
-        layers = [
-            nn.Conv2d(input_channels, base_channels, 4, 2, 1, bias=False),
-            nn.LeakyReLU(0.2, inplace=True),
-        ]
-        if dropout_prob > 0:
-            layers.append(nn.Dropout2d(dropout_prob))
+        def block(in_filters: int, out_filters: int, bn: bool = True) -> list[nn.Module]:
+            items: list[nn.Module] = [
+                nn.Conv2d(in_filters, out_filters, 3, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Dropout2d(p),
+            ]
+            if bn:
+                items.append(nn.BatchNorm2d(out_filters, 0.8))
+            return items
 
-        in_channels = base_channels
-        for i in range(1, num_downsamples):
-            out_channels = base_channels * (2**i)
-            layers.extend(
-                [
-                    nn.Conv2d(in_channels, out_channels, 4, 2, 1, bias=False),
-                    nn.BatchNorm2d(out_channels),
-                    nn.LeakyReLU(0.2, inplace=True),
-                ]
-            )
-            if dropout_prob > 0:
-                layers.append(nn.Dropout2d(dropout_prob))
-            in_channels = out_channels
+        self.features = nn.Sequential(
+            *block(input_channels, 16, bn=False),
+            *block(16, 32, bn=True),
+            *block(32, 64, bn=True),
+            *block(64, 128, bn=True),
+            *block(128, 256, bn=True),
+        )
 
-        self.features = nn.Sequential(*layers)
-        final_size = input_size // (2**num_downsamples)
-        self.source_head = nn.Conv2d(in_channels, 1, final_size, 1, 0, bias=False)
-        self.classifier_head = nn.Linear(in_channels * final_size * final_size, num_classes)
+        ds_size = max(1, self.input_size // (2**5))
+        flattened = 256 * ds_size * ds_size
+        self.source_head = nn.Linear(flattened, 1)
+        self.source_act = nn.Sigmoid()
+        # Official GAME discriminator aux head predicts n_classes + 1 where the
+        # extra class corresponds to fake samples.
+        self.classifier_head = nn.Linear(flattened, num_classes + 1)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         feats = self.features(x)
-        source = self.source_head(feats).view(x.size(0), -1)
         flat = feats.view(x.size(0), -1)
+        source = self.source_act(self.source_head(flat)).view(-1)
         class_logits = self.classifier_head(flat)
         return source, class_logits
 

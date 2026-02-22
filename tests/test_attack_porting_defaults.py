@@ -44,9 +44,29 @@ def test_game_default_batch_size_matches_official() -> None:
     assert atk.querybudget == 2000
     assert atk.attack_train_epoch == 40
     assert atk.acs_strategy == "random"
+    assert atk.agu_steps == 2
+    assert atk.agu_loss_terms == ("res", "bou", "dif")
 
 
 def test_dfme_student_optimizer_defaults_match_official() -> None:
     atk = DFME({}, _state())
     assert isinstance(atk.s_opt, torch.optim.SGD)
     assert abs(float(atk.s_opt.param_groups[0]["lr"]) - 0.1) < 1e-12
+
+
+def test_game_default_loss_terms_and_update_policy() -> None:
+    atk = GAME({}, _state())
+    assert atk.tdl_steps == 20
+    assert atk.agu_steps == 2
+    assert atk.gmd_steps == 1
+    assert atk.agu_update_discriminator is False
+    assert atk.agu_loss_terms == ("res", "bou", "dif")
+    assert abs(atk.beta1 - 0.002) < 1e-12
+    assert abs(atk.beta2 - 0.01) < 1e-12
+    assert abs(atk.beta3 - 10.0) < 1e-12
+    assert abs(atk.beta4 - 100.0) < 1e-12
+
+
+def test_game_loss_terms_config_is_normalized() -> None:
+    atk = GAME({"agu_loss_terms": "RES, boU, Adv"}, _state())
+    assert atk.agu_loss_terms == ("res", "bou", "adv")

@@ -31,9 +31,8 @@ PRIORITY = [
 ]
 
 STAGES_BY_PAPER = {
-    "2021_kariyappa_maze": "victim_train,victim_eval,attack,collect,compare",
+    "2021_kariyappa_maze": "victim_eval,attack,collect,compare",
     "2022_xie_game": "victim_train,victim_eval,attack,collect,compare",
-    # DFMS uses existing CIFAR10 ResNet-18 victim checkpoint.
     "2022_sanyal_dfms": "victim_eval,attack,collect,compare",
     "2021_wang_blackbox_dissector": "victim_train,victim_eval,attack,collect,compare",
     "2023_tan_disguide": "victim_train,victim_eval,attack,collect,compare",

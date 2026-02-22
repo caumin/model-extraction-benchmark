@@ -19,7 +19,6 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $priority = @(
-    "2021_kariyappa_maze",
     "2022_xie_game",
     "2022_sanyal_dfms",
     "2021_wang_blackbox_dissector",
@@ -27,11 +26,10 @@ $priority = @(
 )
 
 $stagesByPaper = @{
-    "2021_kariyappa_maze" = "victim_train,victim_eval,attack,collect,compare"
     "2022_xie_game" = "victim_train,victim_eval,attack,collect,compare"
     "2022_sanyal_dfms" = "victim_eval,attack,collect,compare"
-    "2021_wang_blackbox_dissector" = "victim_train,victim_eval,attack,collect,compare"
-    "2023_tan_disguide" = "victim_train,victim_eval,attack,collect,compare"
+    "2021_wang_blackbox_dissector" = "victim_eval,attack,collect,compare"
+    "2023_tan_disguide" = "victim_eval,attack,collect,compare"
 }
 
 $queueStart = Get-Date

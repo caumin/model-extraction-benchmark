@@ -13,7 +13,7 @@ victim:
   channels: 3
   num_classes: 10
   input_size: [32, 32]
-  checkpoint_ref: runs/victims/cifar10_resnet34_seed0.pt
+  checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt
   output_mode: hard_top1
   temperature: 1.0
 

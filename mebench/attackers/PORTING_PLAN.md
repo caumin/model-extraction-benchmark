@@ -1,206 +1,82 @@
 # Attack Porting Plan (official_repo_clones -> mebench)
 
-This document is the design/reference map for fairness-oriented attack porting.
+This document is the implementation mapping for fairness-preserving attack porting.
 
-Scope:
-- Official sources: `official_repo_clones/` (read-only)
-- Internal targets: `mebench/attackers/`
+- Official sources (read-only): `official_repo_clones/`
+- Internal framework: `mebench/attackers/`
+- Goal: keep preprocessing, query/output interface, budget semantics, hyperparameters, and seed behavior aligned with official references.
 
 ## 1) Inventory
 
-### 1.1 Official attack implementations discovered
+### 1.1 Official attack implementations found in `official_repo_clones/`
 
-| Official attack | Entrypoint(s) | Key config/hparams source |
+| Official attack | Primary entrypoint(s) | Default/config evidence |
 |---|---|---|
-| DFME | `official_repo_clones/datafree-model-extraction/dfme/train.py:57`, `...:179` | `.../dfme/train.py:207-244` |
-| MAZE | `official_repo_clones/maze/src/attacker.py:65`, `official_repo_clones/maze/src/attacks/maze.py:30` | `official_repo_clones/maze/src/utils/config.py`, `.../maze.py:39-43` |
-| MAZE-Knockoff variant | `official_repo_clones/maze/src/attacks/knockoff.py:13` | `.../knockoff.py:17-25` |
-| MAZE-JBDA variant | `official_repo_clones/maze/src/attacks/jbda.py:104` | `.../jbda.py:119-149` |
-| MAZE-Noise baseline | `official_repo_clones/maze/src/attacks/noise.py` | `.../noise.py` |
-| KnockoffNets | `official_repo_clones/knockoffnets/knockoff/adversary/transfer.py`, `.../train.py` | `.../transfer.py` CLI `--budget`, `.../victim/blackbox.py` |
-| SwiftThief | `official_repo_clones/swiftthief/swiftthief.py:44` | `.../swiftthief.py:260-274`, `.../utils/configs.py` |
-| GAME | `official_repo_clones/game_attack/attack.py:11` | `.../attack.py:14-28` |
-| DFMS-HL | `official_repo_clones/dfms_hl/code/train_student/train_student.py:81`, `.../train_gen.py` | `.../train_student.py:93-127` |
-| DisGUIDE | `official_repo_clones/disguide/disguide/train.py`, `.../cli_parser.py` | `official_repo_clones/disguide/run_cifar-10.sh`, `.../run_cifar-100.sh` |
-| CloudLeak / FeatureFool | `official_repo_clones/cloudleak/optimize.py:132`, `.../MCV_query.py` | `.../optimize.py:12-14`, `.../README.md` |
-| FFF | `official_repo_clones/fff/train.py`, `.../evaluate.py` | `.../train.py` |
+| DFME | `official_repo_clones/datafree-model-extraction/dfme/train.py:57` | `official_repo_clones/datafree-model-extraction/dfme/train.py:182`, `official_repo_clones/datafree-model-extraction/dfme/train.py:185`, `official_repo_clones/datafree-model-extraction/dfme/train.py:186`, `official_repo_clones/datafree-model-extraction/dfme/train.py:188` |
+| MAZE | `official_repo_clones/maze/src/attacks/maze.py:30` | `official_repo_clones/maze/src/attacks/maze.py:39`, `official_repo_clones/maze/src/attacks/maze.py:40`, `official_repo_clones/maze/src/attacks/maze.py:55` |
+| KnockoffNets | `official_repo_clones/knockoffnets/knockoff/adversary/transfer.py:93` | `official_repo_clones/knockoffnets/knockoff/adversary/transfer.py:101`, `official_repo_clones/knockoffnets/knockoff/adversary/transfer.py:104` |
+| SwiftThief | `official_repo_clones/swiftthief/swiftthief.py:44` | `official_repo_clones/swiftthief/swiftthief.py:50`, `official_repo_clones/swiftthief/swiftthief.py:132`, `official_repo_clones/swiftthief/swiftthief.py:150` |
+| GAME | `official_repo_clones/game_attack/attack.py:11` | `official_repo_clones/game_attack/attack.py:23`, `official_repo_clones/game_attack/attack.py:24`, `official_repo_clones/game_attack/attack.py:26` |
+| DFMS-HL | `official_repo_clones/dfms_hl/code/train_student/train_student.py:81` | `official_repo_clones/dfms_hl/code/train_student/train_student.py:93`, `official_repo_clones/dfms_hl/code/train_student/train_student.py:95`, `official_repo_clones/dfms_hl/code/train_student/train_student.py:245` |
+| DisGUIDE | `official_repo_clones/disguide/disguide/train.py`, `official_repo_clones/disguide/disguide/cli_parser.py` | `official_repo_clones/disguide/disguide/cli_parser.py:15`, `official_repo_clones/disguide/disguide/cli_parser.py:99`, `official_repo_clones/disguide/disguide/train.py:152` |
+| CloudLeak / FeatureFool | `official_repo_clones/cloudleak/optimize.py` | `official_repo_clones/cloudleak/optimize.py:12`, `official_repo_clones/cloudleak/optimize.py:13` |
+| Blackbox Dissector | `official_repo_clones/blackbox-dissector/attack.py` | `official_repo_clones/blackbox-dissector/attack.py:48`, `official_repo_clones/blackbox-dissector/attack.py:684` |
+| FFF | `official_repo_clones/fff/train.py` | `official_repo_clones/fff/train.py` |
 
-### 1.2 Current mebench attackers
+### 1.2 Internal attacks found in `mebench/attackers/`
 
-`mebench/attackers/__init__.py:3-39` exports:
+`mebench/attackers/__init__.py:3` exports:
 
-- `ActiveThief`, `DFME`, `MAZE`, `DFMSHL` (`DFMS` alias), `GAME`, `ESAttack`, `SwiftThief`,
+- `ActiveThief`, `DFME`, `MAZE`, `DFMSHL` (`DFMS` alias), `DisGUIDE`, `GAME`, `ESAttack`, `SwiftThief`
 - `BlackboxDissector`, `CloudLeak`, `BlackboxRipper`, `CopycatCNN`, `InverseNet`, `KnockoffNets`, `RandomBaseline`
 
-## 2) Mapping Table
+## 2) Mapping Table (required parity fields)
 
-| Official name | mebench name | Status |
+| Official attack | mebench attack | Status | Official code location | Internal code location | Victim query type + budget counting | Hyperparameters + source | Preprocessing pipeline + source | Porting cautions |
+|---|---|---|---|---|---|---|---|---|
+| DFME | `DFME` | DONE | `official_repo_clones/datafree-model-extraction/dfme/train.py:57` | `mebench/attackers/dfme.py` | Official uses teacher logits/softmax path; mebench uses `BenchmarkContext.query` -> `Oracle.query` (`mebench/core/context.py:68`, `mebench/oracles/oracle.py:66`) with 1-image budget decrement | `batch_size=256`, `g_iter=1`, `d_iter=5`, `lr_S=0.1`, `grad_epsilon=1e-3` (`official_repo_clones/datafree-model-extraction/dfme/train.py:182`, `official_repo_clones/datafree-model-extraction/dfme/train.py:185`, `official_repo_clones/datafree-model-extraction/dfme/train.py:186`, `official_repo_clones/datafree-model-extraction/dfme/train.py:188`, `official_repo_clones/datafree-model-extraction/dfme/train.py:221`) | CIFAR test normalize profile implemented as `dfme_cifar10_test` (`mebench/data/preprocessing.py:54`) from `official_repo_clones/datafree-model-extraction/dfme/dataloader.py` | Keep benchmark [0,1] oracle contract; use profile only when parity run explicitly requests official normalization |
+| MAZE | `MAZE` | DONE | `official_repo_clones/maze/src/attacks/maze.py:30` | `mebench/attackers/maze.py` | Official computes `budget_per_iter`; mebench decrements on every query image (`mebench/core/context.py:68`, `mebench/oracles/oracle.py:66`) | `iter_clone`, `iter_gen`, `ndirs`, cosine schedule with SGD (`official_repo_clones/maze/src/attacks/maze.py:39`, `official_repo_clones/maze/src/attacks/maze.py:40`, `official_repo_clones/maze/src/attacks/maze.py:55`) | Official RGB normalization mapped as `maze_rgb_test` (`mebench/data/preprocessing.py:68`) | MAZE repo includes jbda/noise/knockoff variants with separate loops; only MAZE core loop mapped to `MAZE` |
+| KnockoffNets | `KnockoffNets` | DONE | `official_repo_clones/knockoffnets/knockoff/adversary/transfer.py:93` | `mebench/attackers/knockoff_nets.py` | Official blackbox returns softmax probabilities; mebench enforces soft-prob mode for this attack (`mebench/core/validate.py:77`) and per-image budget | `--budget`, `--batch_size` defaults from transfer CLI (`official_repo_clones/knockoffnets/knockoff/adversary/transfer.py:101`, `official_repo_clones/knockoffnets/knockoff/adversary/transfer.py:104`) | Official ImageNet test transform mapped as `knockoffnets_default_test` (`mebench/data/preprocessing.py:90`) | Preserve dataset-family transform differences; do not silently apply ImageNet normalization unless profile requested |
+| SwiftThief | `SwiftThief` | DONE | `official_repo_clones/swiftthief/swiftthief.py:44` | `mebench/attackers/swiftthief.py` | Official budget split is 10% seed + periodic additions; mebench mirrors scheduling while budgeting via oracle image counts | Seed 10% and periodic augmentation/sampling (`official_repo_clones/swiftthief/swiftthief.py:50`, `official_repo_clones/swiftthief/swiftthief.py:132`, `official_repo_clones/swiftthief/swiftthief.py:150`) | Official CIFAR normalization profile mapped as `swiftthief_cifar_test` (`mebench/data/preprocessing.py:74`) | Official repo expects `unlabeled_dataset.pt`; mebench adapts to framework pool loaders and state |
+| GAME | `GAME` | DONE | `official_repo_clones/game_attack/attack.py:11` | `mebench/attackers/game.py` | Official uses `querybudget`; mebench honors same semantics with strict context budget gate | `batch_size=1024`, `querybudget=2000`, `attack_train_epoch=40` (`official_repo_clones/game_attack/attack.py:23`, `official_repo_clones/game_attack/attack.py:24`, `official_repo_clones/game_attack/attack.py:26`) | Dataset transform path from official `GAME/datasets.py`; internal canonical [0,1] scale maintained unless profile used | Keep class-conditional synthetic loop parity while preserving mebench artifact and evaluation hooks |
+| DFMS-HL | `DFMSHL` | DONE | `official_repo_clones/dfms_hl/code/train_student/train_student.py:81` | `mebench/attackers/dfms.py` | Hard-label regime in official scripts; mebench enforces hard-top1 requirement for `dfms` (`mebench/core/validate.py:90`) | `lr=0.1`, `max_epochs=200`, synthetic sample defaults (`official_repo_clones/dfms_hl/code/train_student/train_student.py:93`, `official_repo_clones/dfms_hl/code/train_student/train_student.py:95`, `official_repo_clones/dfms_hl/code/train_student/train_student.py:126`) | Official `(0.5,0.5,0.5)` normalize mapped as `dfms_hl_train_student` (`mebench/data/preprocessing.py:108`) | Official is multi-stage script pipeline; mebench keeps stage semantics in attack runner state machine |
+| DisGUIDE | `DisGUIDE` | DONE | `official_repo_clones/disguide/disguide/train.py`, `official_repo_clones/disguide/disguide/cli_parser.py` | `mebench/attackers/disguide.py` | Official updates query budget in-loop; mebench tracks via oracle/context image counting | Query budget in millions + no-logits flags (`official_repo_clones/disguide/disguide/cli_parser.py:15`, `official_repo_clones/disguide/disguide/cli_parser.py:99`) | Official supports pre/post transform assumptions in `disguide/dataloader.py`; mebench keeps canonical input + internal scale mode options | In hard mode, use HL loss only; mebench enforces this guard in `DisGUIDE` config checks |
+| CloudLeak | `CloudLeak` | DONE | `official_repo_clones/cloudleak/optimize.py` | `mebench/attackers/cloudleak.py` | Official optimization queries victim with generated candidates; mebench uses context query for each batch | L-BFGS params from official optimization script (`official_repo_clones/cloudleak/optimize.py:12`, `official_repo_clones/cloudleak/optimize.py:13`) | Official code is Caffe-style preprocessing/deprocessing; mebench normalizes to canonical [0,1] before oracle | Channel-order and preprocessing order differences must be explicit in parity report |
+| Blackbox Dissector | `BlackboxDissector` | DONE | `official_repo_clones/blackbox-dissector/attack.py` | `mebench/attackers/blackbox_dissector.py` | Official iterative budget splits + hard-label training; mebench enforces hard-top1 and image-count budget | `initial_budget`, split budgets list in script (`official_repo_clones/blackbox-dissector/attack.py:48`, `official_repo_clones/blackbox-dissector/attack.py:684`) | Official includes dataset-specific normalize chains in `attack.py`; mebench keeps parity notes and profile option | File-path transfer set workflow in official is adapted into in-memory framework datasets |
+| FFF | N/A | NOT_IN_SCOPE | `official_repo_clones/fff/train.py` | N/A | Fast Feature Fool is a universal perturbation method, not the model-extraction attack family used by this benchmark matrix | N/A | N/A | Excluded from benchmark attack matrix scope |
+| MAZE-JBDA variant | N/A | NOT_IN_SCOPE | `official_repo_clones/maze/src/attacks/jbda.py` | N/A | Variant attack baseline, not part of current benchmark matrix identifiers | N/A | Uses MAZE dataset transform path | Can be added later as separate attack id if scope expands |
+| MAZE-noise baseline | N/A | NOT_IN_SCOPE | `official_repo_clones/maze/src/attacks/noise.py` | N/A | Variant attack baseline, not part of current benchmark matrix identifiers | N/A | Uses MAZE dataset transform path | Can be added later as separate attack id if scope expands |
+
+## 3) Non-official-clone internal attacks (paper-based ports)
+
+The following mebench attacks do not have direct code in `official_repo_clones/`, but are maintained for matrix completeness and paper-faithful behavior.
+
+| mebench attack | Status | Notes |
 |---|---|---|
-| DFME | `DFME` | DONE |
-| MAZE | `MAZE` | DONE |
-| KnockoffNets | `KnockoffNets` | DONE |
-| SwiftThief | `SwiftThief` | DONE |
-| GAME | `GAME` | DONE |
-| DFMS-HL | `DFMSHL` | DONE |
-| DisGUIDE | `DisGUIDE` | DONE |
-| CloudLeak (FeatureFool pipeline) | `CloudLeak` | DONE |
-| MAZE-JBDA (variant) | N/A (not standalone) | TODO |
-| MAZE-noise baseline | N/A (not standalone) | TODO |
-| FFF | N/A (no mebench attacker) | TODO |
-| ActiveThief (paper ref) | `ActiveThief` | IN_PROGRESS (no direct official clone in scope) |
-| CopycatCNN (paper ref) | `CopycatCNN` | IN_PROGRESS (no direct official clone in scope) |
-| InverseNet (paper ref) | `InverseNet` | IN_PROGRESS (no direct official clone in scope) |
-| Blackbox Dissector | `BlackboxDissector` | IN_PROGRESS (official clone added) |
-| Blackbox Ripper (paper ref) | `BlackboxRipper` | IN_PROGRESS (no direct official clone in scope) |
+| `ActiveThief` | DONE_PAPER | Paper-faithful active sampling loop, seed/validation split, checkpoint retraining logic retained in framework |
+| `CopycatCNN` | DONE_PAPER | Paper-faithful offline augmentation + query-train rounds integrated into AttackRunner interface |
+| `InverseNet` | DONE_PAPER | Phase-based extraction loop integrated with strict budget gate |
+| `BlackboxRipper` | DONE_PAPER | Evolutionary latent optimization runner integrated with strict oracle budget and output-mode checks |
+| `RandomBaseline` | DONE | Framework baseline, no official clone expected |
+| `ESAttack` | DONE | Framework data-free baseline aligned to benchmark contract |
 
-## 3) Per-attack porting notes (required fields)
+## 4) Preprocessing compatibility layer (implemented)
 
-### DFME -> mebench/attackers/dfme.py
-- Official code location: `official_repo_clones/datafree-model-extraction/dfme/train.py:57-136`, `.../approximate_gradients.py:15-146`
-- Internal code location: `mebench/attackers/dfme.py`
-- Victim query type / budget counting:
-  - Official: soft probabilities recovered to logits (`train.py` + `approximate_gradients.py`);
-  - mebench: oracle `soft_prob` with per-image budget decrement in `mebench/oracles/oracle.py:60-65`
-- Hyperparameters (official defaults):
-  - `batch_size=256`, `n_g=1`, `n_s=5`, `epsilon=1e-3`, `m=1`, schedule at 10/30/50% (`train.py` and paper-aligned comments)
-- Preprocess pipeline (official):
-  - CIFAR10 train/test uses normalize `(0.4914,0.4822,0.4465)/(0.2023,0.1994,0.2010)` in `.../dfme/dataloader.py:45-59`
-- Porting caution:
-  - Official code often expects normalized inputs; benchmark contract uses `[0,1]` canonical oracle inputs.
-
-### MAZE -> mebench/attackers/maze.py
-- Official code location: `official_repo_clones/maze/src/attacks/maze.py:30-283`
-- Internal code location: `mebench/attackers/maze.py`
-- Victim query type / budget counting:
-  - Official uses KL over logits/probs and computes `budget_per_iter` in `.../maze.py:39-43`
-  - mebench uses `BenchmarkContext.query(...)` and image-count budget in `mebench/core/context.py:60-90`
-- Hyperparameters (official defaults):
-  - `iter_clone`, `iter_gen`, `ndirs`, `alpha_gan`, optimizer/lr in `.../maze.py:44-63`
-- Preprocess pipeline (official):
-  - dataset transforms in `official_repo_clones/maze/src/datasets/datasets.py:84-186`
-  - default normalize `(0.5,0.5,0.5)` or grayscale equivalents
-- Porting caution:
-  - MAZE repo includes multiple attack variants (`noise`, `knockoff`, `jbda`) with different assumptions.
-
-### KnockoffNets -> mebench/attackers/knockoff_nets.py
-- Official code location: `official_repo_clones/knockoffnets/knockoff/adversary/transfer.py`, `.../adversary/train.py`, `.../victim/blackbox.py`
-- Internal code location: `mebench/attackers/knockoff_nets.py`
-- Victim query type / budget counting:
-  - Official blackbox returns softmax probs in `.../blackbox.py` and transfer uses `--budget` image count in `.../transfer.py`
-  - mebench enforces same image-count accounting via oracle/context path.
-- Hyperparameters (official defaults):
-  - transfer `batch_size`, budget; train epochs/lr in `.../adversary/train.py`
-- Preprocess pipeline (official):
-  - ImageNet family transforms in `official_repo_clones/knockoffnets/knockoff/utils/transforms.py:15-30`
-- Porting caution:
-  - Family-specific transforms and output truncation/rounding options in official blackbox should be explicitly documented when disabled.
-
-### SwiftThief -> mebench/attackers/swiftthief.py
-- Official code location: `official_repo_clones/swiftthief/swiftthief.py:44-285`, `.../utils/get_datasets.py:20-47`
-- Internal code location: `mebench/attackers/swiftthief.py`
-- Victim query type / budget counting:
-  - Official query budget used by scheduling/splits (`swiftthief.py:50-52`, `:144-159`)
-  - mebench uses strict oracle image budget and round-based query batches.
-- Hyperparameters (official defaults):
-  - `sl_lr`, `sl_epoch`, `sl_aug_interval` in `swiftthief.py:267-270`
-- Preprocess pipeline (official):
-  - CIFAR group: resize + random crop + flip + normalize in `.../get_datasets.py:21-32`
-  - MNIST group: grayscale->3ch + crop/flip + normalize in `.../get_datasets.py:35-47`
-- Porting caution:
-  - official code mixes CL and KD with dataset-specific assumptions (e.g., unlabeled_dataset.pt layout).
-  - 1:1 scheduling anchors now mirrored:
-    - official initial split `10%` (`official_repo_clones/swiftthief/swiftthief.py:50-52`)
-    - sampling trigger `epoch % sl_aug_interval == 0 and epoch != 0` (`official_repo_clones/swiftthief/swiftthief.py:132-133`)
-    - imbalance mode uses 5 sub-rounds (`official_repo_clones/swiftthief/swiftthief.py:149-160`)
-
-### GAME -> mebench/attackers/game.py
-- Official code location: `official_repo_clones/game_attack/attack.py:11-99`, `.../GAME/methods.py`
-- Internal code location: `mebench/attackers/game.py`
-- Victim query type / budget counting:
-  - official uses `querybudget` arg (`attack.py:24`) and method-level extraction calls.
-  - mebench: strict per-image budget via context/oracle.
-- Hyperparameters (official defaults):
-  - `batch_size=1024`, `querybudget=2000`, `attack_train_epoch=40` in `attack.py:23-27`
-- Preprocess pipeline:
-  - defined in `game_attack/GAME/datasets.py` loaders.
-- Porting caution:
-  - official repo can run baseline-only paths; ensure equivalent mode in mebench configs.
-  - 1:1 loop anchors now mirrored:
-    - official budget-tail slicing (`official_repo_clones/game_attack/GAME/methods.py:83-89`)
-    - official defaults `batch_size=1024`, `querybudget=2000`, `attack_train_epoch=40` (`official_repo_clones/game_attack/attack.py:23-27`)
-    - per-round attacker training + final full-buffer train (`official_repo_clones/game_attack/GAME/methods.py:112-114`, `208-214`)
-
-### DFMS-HL -> mebench/attackers/dfms.py
-- Official code location: `official_repo_clones/dfms_hl/code/train_student/train_student.py`, `.../train_generator/train_gen.py`, `.../train_generator_clone.py`
-- Internal code location: `mebench/attackers/dfms.py`
-- Victim query type / budget counting:
-  - official primarily hard-label student supervision (teacher argmax) in `train_student.py:394-403`
-  - mebench uses hard-top1 oracle mode enforcement in `mebench/core/validate.py:77-95`
-- Hyperparameters (official defaults):
-  - `lr=0.1`, `max_epochs=200`, ratios and sample sizes in `train_student.py:93-127, 305-306`
-- Preprocess pipeline (official):
-  - normalization `(0.5,0.5,0.5)` in `train_student.py:241-246`, test `:413-416`
-- Porting caution:
-  - official scripts are multi-stage and script-driven; preserve stage semantics in attack config.
-
-### DisGUIDE -> mebench/attackers/disguide.py
-- Official code location: `official_repo_clones/disguide/disguide/train.py`, `official_repo_clones/disguide/disguide/my_utils.py`
-- Internal code location: `mebench/attackers/disguide.py`
-- Victim query type / budget counting:
-  - official clone training queries teacher outputs in-loop with million-scale query budgets.
-  - mebench uses `BenchmarkContext.query(...)` for strict per-image accounting and checkpoint callbacks.
-- Hyperparameters (official defaults):
-  - `batch_size=256`, `d_iter=1`, `rep_iter=3`, `replay=Classic`, `ensemble_size>=2`, `lr_G=1e-4`, `lr_S=0.03`, `lambda_div=0.2 (CIFAR-10) / 0.04 (CIFAR-100)`.
-- Preprocess pipeline (official):
-  - input space switch (`pre-transform` vs `post-transform`) in `disguide/dataloader.py`.
-  - optional grayscale augmentation frequency (`grayscale=8` in CIFAR-10 script).
-- Porting caution:
-  - benchmark canonical oracle input remains `[0,1]`; DisGUIDE internal clone path may use tanh/unit compatibility mode.
-  - `hard_top1` mode must use `loss=hl`; `soft_prob` mode supports `loss=l1/kl`.
-
-### CloudLeak -> mebench/attackers/cloudleak.py
-- Official code location: `official_repo_clones/cloudleak/optimize.py:132-172`, `.../README.md`
-- Internal code location: `mebench/attackers/cloudleak.py`
-- Victim query type / budget counting:
-  - official pipeline describes synthetic generation + query + label workflow (README)
-  - mebench wraps this via context/oracle budget counting.
-- Hyperparameters (official defaults):
-  - L-BFGS params `factr=1e7`, `pgtol=1e-5` in `optimize.py:12-14`
-- Preprocess pipeline (official):
-  - Caffe preprocess/deprocess path in `optimize.py:134-149` + `utils.py`
-- Porting caution:
-  - channel/order differences (Caffe-style) and bound constraints must be explicitly handled.
-
-### Blackbox Dissector -> mebench/attackers/blackbox_dissector.py
-- Official code location: `official_repo_clones/blackbox-dissector/attack.py`, `.../sampler.py`, `.../my_transform.py`
-- Internal code location: `mebench/attackers/blackbox_dissector.py`
-- Victim query type / budget counting:
-  - Official attack is hard-label oriented and uses per-image querying in iterative splits.
-  - mebench enforces hard-top1 for this attack and strict per-image budget accounting via context/oracle.
-- Hyperparameters (official defaults):
-  - `batch_size=128`, `train_epochs=200`, `lr=0.02`, `momentum=0.9`, `weight_decay=5e-4`, `erase_rate=0.25`, `sh=0.1`.
-  - split checkpoints + increments in `attack.py` (`splits` / `budgets`).
-- Preprocess pipeline (official):
-  - dataset-specific resize/normalize pipelines defined in `attack.py`.
-  - random/priori erasing implementations in `my_transform.py`.
-- Porting caution:
-  - official code assumes normalized inputs and file-path based transfer-set workflow.
-  - benchmark contract keeps canonical oracle inputs in `[0,1]`; any normalization differences must remain explicit.
-  - started alignment: per-iteration stage budget split now follows configurable `erase_rate` (default `0.25`) rather than fixed 50:50.
-
-## 4) Preprocessing compatibility layer plan
-
-Implemented module:
-- `mebench/data/preprocessing.py`
+- Module: `mebench/data/preprocessing.py`
   - `get_official_preprocess(profile)`
   - `list_official_preprocess_profiles()`
   - `apply_official_preprocess_batch(x, profile)`
+- Oracle integration: `mebench/oracles/oracle.py:73`
+  - `victim.official_preprocess_profile` applies official-compatible transform chain right before victim forward.
+  - One-time runtime trace log: profile and transform steps.
+- Config validation: `mebench/core/validate.py:133`
+  - Validates profile name against registered map.
 
-Integrated hook:
-- `mebench/oracles/oracle.py`
-  - optional `victim.official_preprocess_profile` applied immediately before victim forward
-  - one-time runtime log of active profile for traceability
+## 5) Parity verification hooks available
 
-Validation:
-- `mebench/core/validate.py`
-  - checks `victim.official_preprocess_profile` is one of registered profiles
+- Smoke tests: `tests/test_attack_porting_smoke.py`
+- Preprocess parity tests: `tests/test_attack_porting_preprocess.py`
+- Default/hparam parity checks: `tests/test_attack_porting_defaults.py`
+- Per-attack logic routing checks: `tests/test_attack_porting_per_attack_logic.py`
+
+Additional metric-parity execution is tracked in `mebench/attackers/ATTACK_PARITY_REPORT.md` and requires long-running matrix runs.
