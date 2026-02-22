@@ -11,13 +11,15 @@ repro:
     enabled: true
 
 victim:
-  victim_id: cifar10_resnet18
-  arch: resnet18
+  victim_id: cifar10_resnet34_8x_official
+  arch: resnet34
+  # NOTE: "_8x" is naming only here; implementation uses width_mult=1.
+  width_mult: 1
   input_scale_mode: unit
   channels: 3
   num_classes: 10
   input_size: [32, 32]
-  checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
+  checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt
   output_mode: hard_top1
   temperature: 1.0
 
@@ -31,11 +33,19 @@ attack:
   name: dfms
   output_mode: hard_top1
   internal_input_scale_mode: tanh
+  query_input_scale_mode: tanh
   use_official_dcgan_arch: true
   max_budget: 8000000
   batch_size: 64
   oracle_batch_size: 64
   use_official_stages: true
+  # NOTE: Benchmark policy uses strict total-query cap at 8M.
+  # Paper Sec.3.5 equations imply Total=2*nC+NQ, so nC=50k and NQ=8M would be 8.1M total.
+  # We preserve nC=50k and reduce effective alternate-phase NQ to keep total exactly 8.0M.
+  budget_planner:
+    mode: paper_fair
+    nC_target: 50000
+    enforce_exact_budget: true
   dcgan_epochs: 200
   student_init_epochs: 200
   degan_epochs: 100

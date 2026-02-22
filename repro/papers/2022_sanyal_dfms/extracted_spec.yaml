@@ -118,6 +118,9 @@ reported_results:
       track: track_b
       tolerance_pp: 1.0
 assumptions:
+  - item: strict 8M total-query policy in benchmark runs
+    reason: paper Sec.3.5 states `NQ=8M` and `TotalQueries=2*nC+NQ`; with `nC=50,000` this yields 8.1M total
+    impact_check: this repository enforces total oracle queries at 8.0M for fair cross-attack comparability, preserving `nC=50,000` and reducing effective alternate-phase `NQ` to 7.9M
   - item: strictness gating on full-budget execution
     reason: runtime victim is pinned to provided local ResNet-18 checkpoint; strict table-level parity assumes a high-accuracy teacher comparable to the paper row
     impact_check: comparison remains incomplete/fail until full run artifacts are generated

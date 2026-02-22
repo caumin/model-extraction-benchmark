@@ -1,10 +1,17 @@
 attack:
   name: dfms
   output_mode: hard_top1
+  query_input_scale_mode: tanh
   max_budget: 8000000
   batch_size: 64
   oracle_batch_size: 64
   use_official_stages: true
+  # NOTE: Strict total-query policy: cap total oracle queries at 8M.
+  # With paper formula Total=2*nC+NQ and nC=50k, effective NQ is adjusted to 7.9M.
+  budget_planner:
+    mode: paper_fair
+    nC_target: 50000
+    enforce_exact_budget: true
   internal_input_scale_mode: tanh
   use_official_dcgan_arch: true
   dcgan_epochs: 200

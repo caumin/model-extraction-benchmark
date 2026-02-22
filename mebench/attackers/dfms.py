@@ -20,22 +20,10 @@ from mebench.models.gan import (
     OfficialDFMSDCGANDiscriminator,
 )
 from mebench.models.substitute_factory import create_substitute
+from mebench.attackers.dfms_budget import DFMSBudgetPlan, planned_stage5_epochs
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
-from mebench.utils.scaling import tanh_to_unit, clamp_unit, unit_to_tanh, normalize_input_scale
-
-
-class _ScaledCloneWrapper(nn.Module):
-    """Apply input scaling before clone forward for evaluation."""
-
-    def __init__(self, model: nn.Module, input_scale_mode: str) -> None:
-        super().__init__()
-        self.model = model
-        self.input_scale_mode = str(input_scale_mode)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_scaled = normalize_input_scale(x, self.input_scale_mode)
-        return self.model(x_scaled)
+from mebench.utils.scaling import tanh_to_unit, clamp_unit, unit_to_tanh
 
 
 class DFMSHL(AttackRunner):
@@ -89,6 +77,18 @@ class DFMSHL(AttackRunner):
         # 5) Alternate training (train_generator_clone.py): niter=800, student_lr=0.01, d_l=500
         # We implement this stage pipeline inside `run()` when enabled.
         self.use_official_stages = bool(config.get("use_official_stages", True))
+        planner_cfg_raw = config.get("budget_planner", {})
+        planner_cfg = planner_cfg_raw if isinstance(planner_cfg_raw, dict) else {}
+        self.budget_planner_mode = str(
+            planner_cfg.get("mode", config.get("budget_planner_mode", "paper_fair"))
+        ).strip().lower()
+        if self.budget_planner_mode not in {"paper_fair", "legacy_fixed_epochs"}:
+            raise ValueError(
+                "DFMS-HL budget planner mode must be 'paper_fair' or 'legacy_fixed_epochs', "
+                f"got {self.budget_planner_mode!r}"
+            )
+        self.n_c_target = int(planner_cfg.get("nC_target", config.get("nC_target", 50_000)))
+        self.enforce_exact_budget = bool(planner_cfg.get("enforce_exact_budget", True))
         self.dcgan_epochs = int(config.get("dcgan_epochs", 200))
         self.student_init_epochs = int(config.get("student_init_epochs", 200))
         self.degan_epochs = int(config.get("degan_epochs", 100))
@@ -131,6 +131,12 @@ class DFMSHL(AttackRunner):
                 "DFMS-HL internal_input_scale_mode must be 'unit' or 'tanh', "
                 f"got {self.internal_input_scale_mode!r}"
             )
+        self.query_input_scale_mode = str(config.get("query_input_scale_mode", "tanh")).strip().lower()
+        if self.query_input_scale_mode not in {"unit", "tanh"}:
+            raise ValueError(
+                "DFMS-HL query_input_scale_mode must be 'unit' or 'tanh', "
+                f"got {self.query_input_scale_mode!r}"
+            )
 
         self.use_official_dcgan_arch = bool(config.get("use_official_dcgan_arch", True))
         self.proxy_pad_crop = bool(config.get("proxy_pad_crop", True))
@@ -147,20 +153,26 @@ class DFMSHL(AttackRunner):
         self.proxy_data: torch.Tensor | None = None
         self.pretrained = False
         self._auto_augment = self._build_auto_augment()
-        eval_interval_raw = int(config.get("eval_interval_queries", 0))
+        eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
         self._next_eval_query = self.eval_interval_queries
         self._periodic_eval_done: set[int] = set()
         self._eval_substitute: nn.Module | None = None
+        self._budget_plan: DFMSBudgetPlan | None = None
+        self._stage_query_ledger: Dict[str, int] = {
+            "student_init_dcgan": 0,
+            "student_init_degan": 0,
+            "alternate": 0,
+        }
 
         self._initialize_state(state)
 
     # NOTE (DFMS scaling modes):
-    # - Oracle queries must follow benchmark canonical [0,1] input contract.
     # - Official DFMS scripts commonly normalize model-training paths to [-1,1].
     # - `internal_input_scale_mode` controls clone/discriminator/model-internal scale:
     #     * "unit": keep internal paths on [0,1]
     #     * "tanh": convert internal paths to [-1,1]
+    # - `query_input_scale_mode` controls synthetic query scale at oracle boundary.
 
     def _unit_to_internal(self, x: torch.Tensor) -> torch.Tensor:
         """Convert canonical [0,1] tensors to DFMS internal model scale."""
@@ -170,14 +182,25 @@ class DFMSHL(AttackRunner):
             return unit_to_tanh(x_unit)
         return x_unit
 
+    def _query_scale_generated_from_unit(self, x_unit: torch.Tensor) -> torch.Tensor:
+        """Map generated unit-scale tensors to configured oracle-query scale."""
+
+        x_01 = clamp_unit(x_unit)
+        if self.query_input_scale_mode == "tanh":
+            return torch.clamp(unit_to_tanh(x_01), -1.0, 1.0)
+        return x_01
+
+    def _query_scale_generated_from_tanh(self, x_tanh: torch.Tensor) -> torch.Tensor:
+        """Map generated tanh tensors to configured oracle-query scale."""
+
+        if self.query_input_scale_mode == "tanh":
+            return torch.clamp(x_tanh, -1.0, 1.0)
+        return tanh_to_unit(x_tanh)
+
     def _get_substitute_for_eval(self) -> nn.Module | None:
         if self.clone is None:
             return None
-        if self.internal_input_scale_mode != "tanh":
-            return self.clone
-        if self._eval_substitute is None:
-            self._eval_substitute = _ScaledCloneWrapper(self.clone, "tanh")
-        return self._eval_substitute
+        return self.clone
 
     def _publish_substitute(self) -> None:
         substitute = self._get_substitute_for_eval()
@@ -261,6 +284,26 @@ class DFMSHL(AttackRunner):
                 tuple(int(x) for x in self.proxy_data.shape),
                 str(self.proxy_data.device),
             )
+        self._budget_plan = self._build_budget_plan(int(total_budget))
+        self.state.attack_state["dfmshl_budget_plan"] = {
+            "mode": self._budget_plan.mode,
+            "total_budget": int(self._budget_plan.total_budget),
+            "stage2_target_queries": int(self._budget_plan.stage2_target_queries),
+            "stage4_target_queries": int(self._budget_plan.stage4_target_queries),
+            "stage5_target_queries": int(self._budget_plan.stage5_target_queries),
+            "proxy_subset_size": int(self._budget_plan.proxy_subset_size),
+            "stage5_planned_epochs": int(self._budget_plan.stage5_planned_epochs),
+        }
+        self.logger.info(
+            "[DFMSHL] Budget plan mode=%s total=%d s2=%d s4=%d s5=%d np=%d e5=%d",
+            str(self._budget_plan.mode),
+            int(self._budget_plan.total_budget),
+            int(self._budget_plan.stage2_target_queries),
+            int(self._budget_plan.stage4_target_queries),
+            int(self._budget_plan.stage5_target_queries),
+            int(self._budget_plan.proxy_subset_size),
+            int(self._budget_plan.stage5_planned_epochs),
+        )
         self.logger.info(
             "[DFMSHL] Stages: dcgan_epochs=%d student_init_epochs=%d degan_epochs=%d student_degan_epochs=%d alternate_epochs=%d",
             int(self.dcgan_epochs),
@@ -279,6 +322,7 @@ class DFMSHL(AttackRunner):
         if ctx.budget_remaining > 0:
             ctx.log_event("dfmshl_stage", {"stage": "student_init_dcgan", "queries": "labels"})
             self.logger.info("[DFMSHL] Stage 2/5: student init (proxy + DCGAN) (queries for labels)")
+            before_q = int(ctx.query_count)
             self._official_stage_student_init(
                 ctx,
                 device,
@@ -287,7 +331,9 @@ class DFMSHL(AttackRunner):
                 stage_name="student_init_dcgan",
                 train_epochs=self.student_init_epochs,
                 student_lr=self.student_init_lr,
+                target_queries=int(self._budget_plan.stage2_target_queries),
             )
+            self._stage_query_ledger["student_init_dcgan"] = int(ctx.query_count) - before_q
             self._publish_substitute()
             self._maybe_periodic_eval(device)
 
@@ -300,6 +346,7 @@ class DFMSHL(AttackRunner):
         if ctx.budget_remaining > 0:
             ctx.log_event("dfmshl_stage", {"stage": "student_init_degan", "queries": "labels"})
             self.logger.info("[DFMSHL] Stage 4/5: student init (proxy + DeGAN) (queries for labels)")
+            before_q = int(ctx.query_count)
             self._official_stage_student_init(
                 ctx,
                 device,
@@ -308,7 +355,9 @@ class DFMSHL(AttackRunner):
                 stage_name="student_init_degan",
                 train_epochs=self.student_degan_epochs,
                 student_lr=self.student_init_lr,
+                target_queries=int(self._budget_plan.stage4_target_queries),
             )
+            self._stage_query_ledger["student_init_degan"] = int(ctx.query_count) - before_q
             self._publish_substitute()
             self._maybe_periodic_eval(device)
 
@@ -316,11 +365,41 @@ class DFMSHL(AttackRunner):
         if ctx.budget_remaining > 0:
             ctx.log_event("dfmshl_stage", {"stage": "alternate", "queries": "labels"})
             self.logger.info("[DFMSHL] Stage 5/5: alternate training (queries for labels)")
-            self._official_stage_alternate(ctx, device, pbar=pbar)
+            before_q = int(ctx.query_count)
+            self._official_stage_alternate(
+                ctx,
+                device,
+                pbar=pbar,
+                target_queries=int(self._budget_plan.stage5_target_queries),
+                planned_epochs=int(self._budget_plan.stage5_planned_epochs),
+            )
+            self._stage_query_ledger["alternate"] = int(ctx.query_count) - before_q
             self._publish_substitute()
             self._maybe_periodic_eval(device)
 
         self._publish_substitute()
+        self.state.attack_state["dfmshl_stage_query_ledger"] = {
+            key: int(value) for key, value in self._stage_query_ledger.items()
+        }
+        ctx.log_event(
+            "dfmshl_budget_summary",
+            {
+                "mode": str(self.budget_planner_mode),
+                "planned_budget": int(total_budget),
+                "realized_budget": int(ctx.query_count),
+                "budget_remaining": int(ctx.budget_remaining),
+                "q_stage2": int(self._stage_query_ledger["student_init_dcgan"]),
+                "q_stage4": int(self._stage_query_ledger["student_init_degan"]),
+                "q_stage5": int(self._stage_query_ledger["alternate"]),
+            },
+        )
+
+        if self.budget_planner_mode == "paper_fair" and self.enforce_exact_budget:
+            if int(ctx.budget_remaining) != 0:
+                raise RuntimeError(
+                    "DFMS-HL paper_fair mode requires exact budget exhaustion, "
+                    f"but {int(ctx.budget_remaining)} queries remain."
+                )
         pbar.close()
 
     def _official_proxy_subset_size(self) -> int:
@@ -332,6 +411,89 @@ class DFMSHL(AttackRunner):
         if proxy_cap <= 0:
             return 0
         return min(int(self.proxy_data.size(0)), int(proxy_cap))
+
+    def _legacy_stage_target_queries(self, synth_ratio: float) -> int:
+        proxy_n = self._official_proxy_subset_size()
+        synth_n = int(max(0, int(float(synth_ratio) * int(self.max_synth_samples))))
+        return max(0, int(proxy_n + synth_n))
+
+    def _build_budget_plan(self, total_budget: int) -> DFMSBudgetPlan:
+        total = max(0, int(total_budget))
+        proxy_subset = self._official_proxy_subset_size()
+
+        if self.budget_planner_mode == "legacy_fixed_epochs":
+            s2_req = self._legacy_stage_target_queries(self.dcgan_data_ratio)
+            s4_req = self._legacy_stage_target_queries(self.div_gan_data_ratio)
+        else:
+            s2_req = max(0, int(self.n_c_target))
+            s4_req = max(0, int(self.n_c_target))
+
+        s2_target = min(total, s2_req)
+        s4_target = min(max(0, total - s2_target), s4_req)
+        s5_target = max(0, total - s2_target - s4_target)
+
+        if proxy_subset > 0:
+            required_epochs = planned_stage5_epochs(s5_target, proxy_subset)
+        else:
+            required_epochs = 0
+
+        if self.budget_planner_mode == "legacy_fixed_epochs":
+            stage5_epochs = max(int(self.alternate_epochs), int(required_epochs))
+        else:
+            stage5_epochs = int(required_epochs)
+
+        return DFMSBudgetPlan(
+            mode=str(self.budget_planner_mode),
+            total_budget=total,
+            stage2_target_queries=int(s2_target),
+            stage4_target_queries=int(s4_target),
+            stage5_target_queries=int(s5_target),
+            proxy_subset_size=int(proxy_subset),
+            stage5_planned_epochs=int(stage5_epochs),
+        )
+
+    @staticmethod
+    def _allocate_stage_mix(
+        *,
+        target_queries: int,
+        proxy_cap: int,
+        synth_cap: int,
+        proxy_weight: float,
+        synth_weight: float,
+    ) -> Tuple[int, int]:
+        target = max(0, int(target_queries))
+        proxy_cap_i = max(0, int(proxy_cap))
+        synth_cap_i = max(0, int(synth_cap))
+        if target <= 0 or (proxy_cap_i <= 0 and synth_cap_i <= 0):
+            return 0, 0
+
+        if proxy_cap_i <= 0:
+            return 0, min(target, synth_cap_i)
+        if synth_cap_i <= 0:
+            return min(target, proxy_cap_i), 0
+
+        p_w = max(0.0, float(proxy_weight))
+        s_w = max(0.0, float(synth_weight))
+        if (p_w + s_w) <= 0.0:
+            p_w = 1.0
+            s_w = 1.0
+
+        proxy_target = int(round(float(target) * p_w / (p_w + s_w)))
+        proxy_take = min(proxy_cap_i, proxy_target)
+        synth_take = min(synth_cap_i, max(0, target - proxy_take))
+
+        remaining = max(0, target - proxy_take - synth_take)
+        if remaining > 0:
+            synth_spare = max(0, synth_cap_i - synth_take)
+            add_synth = min(remaining, synth_spare)
+            synth_take += add_synth
+            remaining -= add_synth
+        if remaining > 0:
+            proxy_spare = max(0, proxy_cap_i - proxy_take)
+            add_proxy = min(remaining, proxy_spare)
+            proxy_take += add_proxy
+
+        return int(proxy_take), int(synth_take)
 
     def _iter_proxy_epoch_batches(
         self, *, device: str, batch_size: int, subset_size: Optional[int] = None
@@ -356,6 +518,8 @@ class DFMSHL(AttackRunner):
         """Query oracle and return hard top-1 labels on x_query's device."""
 
         oracle_output = ctx.query(x_query)
+        self._publish_substitute()
+        self._maybe_periodic_eval(str(x_query.device))
         if oracle_output.kind == "hard_top1":
             y = oracle_output.y
         else:
@@ -624,6 +788,7 @@ class DFMSHL(AttackRunner):
         stage_name: str,
         train_epochs: int,
         student_lr: float,
+        target_queries: Optional[int] = None,
     ) -> None:
         """Stage 2/4: student init on proxy + generator images (official train_student.py).
 
@@ -639,12 +804,25 @@ class DFMSHL(AttackRunner):
         if int(train_epochs) <= 0:
             return
 
-        proxy_n = self._official_proxy_subset_size()
-        synth_n = int(max(0, int(float(synth_ratio) * int(self.max_synth_samples))))
+        proxy_cap = self._official_proxy_subset_size()
+        synth_cap = int(max(0, int(float(synth_ratio) * int(self.max_synth_samples))))
+        if self.budget_planner_mode == "paper_fair":
+            synth_cap = int(self.max_synth_samples)
+
+        effective_target = int(target_queries) if target_queries is not None else int(proxy_cap + synth_cap)
+        effective_target = min(effective_target, int(ctx.budget_remaining))
+
+        proxy_n, synth_n = self._allocate_stage_mix(
+            target_queries=effective_target,
+            proxy_cap=proxy_cap,
+            synth_cap=synth_cap,
+            proxy_weight=float(self.proxy_data_ratio),
+            synth_weight=float(synth_ratio),
+        )
+
         if proxy_n <= 0 and synth_n <= 0:
             return
 
-        # Cap to remaining budget (best effort). Official scripts assume enough access.
         target_total = int(proxy_n + synth_n)
         if target_total <= 0:
             return
@@ -660,11 +838,18 @@ class DFMSHL(AttackRunner):
         oracle_bs = max(1, int(self.oracle_batch_size))
         proxy_cursor = 0
         while proxy_cursor < proxy_n and ctx.budget_remaining > 0:
-            take = min(oracle_bs, proxy_n - proxy_cursor, int(ctx.budget_remaining))
+            take = min(
+                oracle_bs,
+                proxy_n - proxy_cursor,
+                int(ctx.budget_remaining),
+            )
             if take <= 0:
                 break
             x = self.proxy_data[proxy_cursor : proxy_cursor + take].to(device)
-            y = self._oracle_hard_labels(ctx, x)
+            y = self._oracle_hard_labels(
+                ctx,
+                self._query_scale_generated_from_unit(x),
+            )
             y_proxy_list.append(y)
             pbar.update(int(take))
             self._publish_substitute()
@@ -676,13 +861,18 @@ class DFMSHL(AttackRunner):
         synth_cursor = 0
         self.generator.eval()
         while synth_cursor < synth_n and ctx.budget_remaining > 0:
-            take = min(oracle_bs, synth_n - synth_cursor, int(ctx.budget_remaining))
+            take = min(
+                oracle_bs,
+                synth_n - synth_cursor,
+                int(ctx.budget_remaining),
+            )
             if take <= 0:
                 break
             z = z_synth[synth_cursor : synth_cursor + take]
             with torch.no_grad():
-                x = tanh_to_unit(self.generator(z))
-            y = self._oracle_hard_labels(ctx, x)
+                x_tanh = self.generator(z)
+                x_query = self._query_scale_generated_from_tanh(x_tanh)
+            y = self._oracle_hard_labels(ctx, x_query)
             y_synth_list.append(y)
             pbar.update(int(take))
             self._publish_substitute()
@@ -709,10 +899,11 @@ class DFMSHL(AttackRunner):
         )
 
         self.logger.info(
-            "[DFMSHL] %s labeled: proxy=%d synth=%d (query_used=%d remaining=%d)",
+            "[DFMSHL] %s labeled: proxy=%d synth=%d target=%d (query_used=%d remaining=%d)",
             str(stage_name),
             int(proxy_labeled),
             int(synth_labeled),
+            int(effective_target),
             int(ctx.query_count),
             int(ctx.budget_remaining),
         )
@@ -809,32 +1000,64 @@ class DFMSHL(AttackRunner):
         # Track substitute for final evaluation.
         self.state.attack_state["substitute"] = self.clone
 
-    def _official_stage_alternate(self, ctx: BenchmarkContext, device: str, *, pbar: tqdm) -> None:
+    def _required_alternate_epochs(self, budget_remaining: int, subset_size: int) -> int:
+        """Return minimum alternate epochs needed to consume the remaining budget."""
+
+        budget = max(0, int(budget_remaining))
+        subset_n = max(1, int(subset_size))
+        if budget <= 0:
+            return 0
+        return int((budget + subset_n - 1) // subset_n)
+
+    def _official_stage_alternate(
+        self,
+        ctx: BenchmarkContext,
+        device: str,
+        *,
+        pbar: tqdm,
+        target_queries: Optional[int] = None,
+        planned_epochs: Optional[int] = None,
+    ) -> None:
         """Stage 5: alternate training (official train_generator_clone.py).
 
         Paper vs official note:
         - Paper writes minimax adversarial term with log(1-D(G(z))) (Eq.(3)), but official
           uses non-saturating BCE(fake->real) for generator updates.
-        - Official code feeds images normalized to [-1,1] into the teacher; this benchmark's
-          oracle contract assumes queries are in [0,1] (no extra normalization). We therefore
-          keep oracle inputs in [0,1] and apply the official-style normalization only inside
-          clone/discriminator training paths.
+        - Official code feeds images normalized to [-1,1] into the teacher.
+        - This implementation follows configurable query routing; with
+          `query_input_scale_mode=tanh`, synthetic queries are sent in tanh space.
+        - Budget-aware epoch scheduling is applied to avoid early termination on
+          small surrogate subsets while preserving the official fixed-stage structure.
         """
 
         if self.generator is None or self.discriminator is None or self.clone is None or self.proxy_data is None:
-            return
-        if int(self.alternate_epochs) <= 0:
             return
 
         subset_n = self._official_proxy_subset_size()
         if subset_n <= 0:
             return
 
+        stage_target = (
+            int(ctx.budget_remaining)
+            if target_queries is None
+            else min(int(target_queries), int(ctx.budget_remaining))
+        )
+        if stage_target <= 0:
+            return
+
+        total_epochs = (
+            int(planned_epochs)
+            if planned_epochs is not None
+            else self._required_alternate_epochs(stage_target, int(subset_n))
+        )
+        if total_epochs <= 0:
+            return
+
         # Reset optimizer/scheduler for alternate stage (keep weights).
         self._reset_clone_for_stage(
             device=device,
             lr=float(self.student_alt_lr),
-            cosine_t_max=int(self.alternate_epochs),
+            cosine_t_max=int(total_epochs),
             keep_weights=True,
         )
 
@@ -844,69 +1067,85 @@ class DFMSHL(AttackRunner):
         self.discriminator.train()
 
         batch_size = int(self.batch_size)
-        for ep in tqdm(
-            range(int(self.alternate_epochs)),
+        stage_remaining = int(stage_target)
+        ep = 0
+        with tqdm(
+            total=int(total_epochs),
             desc="[DFMSHL] Stage 5/5 alternate (epochs)",
             leave=False,
             position=1,
             mininterval=1.0,
-        ):
-            if ctx.budget_remaining <= 0:
-                break
-
-            for real_x in self._iter_proxy_epoch_batches(
-                device=device, batch_size=batch_size, subset_size=subset_n
-            ):
-                if ctx.budget_remaining <= 0:
+        ) as epbar:
+            while stage_remaining > 0 and ctx.budget_remaining > 0:
+                if ep >= int(total_epochs) and self.budget_planner_mode == "legacy_fixed_epochs":
                     break
 
-                # Budget-capped microbatch
-                b = min(int(real_x.size(0)), int(ctx.budget_remaining))
-                if b <= 0:
+                epoch_queries = 0
+
+                for real_x in self._iter_proxy_epoch_batches(
+                    device=device, batch_size=batch_size, subset_size=subset_n
+                ):
+                    if ctx.budget_remaining <= 0 or stage_remaining <= 0:
+                        break
+
+                    # Budget-capped microbatch
+                    b = min(int(real_x.size(0)), int(ctx.budget_remaining), int(stage_remaining))
+                    if b <= 0:
+                        break
+                    real_x = real_x[:b]
+                    if self.proxy_pad_crop:
+                        real_x = self._augment_pad_crop_hflip(real_x)
+
+                    # 1) Generate synthetic batch (keep graph for G update)
+                    z = torch.randn(b, self.noise_dim, device=device)
+                    fake_raw = self.generator(z)
+                    fake_x = tanh_to_unit(fake_raw)
+
+                    # 2) Student/clone update: label with oracle and fit on (optionally) augmented inputs
+                    x_for_student = fake_x.detach()
+                    if use_pad_crop:
+                        x_for_student = self._augment_pad_crop_hflip(x_for_student)
+                    if self.alternate_auto_augment:
+                        x_for_student = self._augment_auto_augment(x_for_student)
+
+                    y = self._oracle_hard_labels(
+                        ctx,
+                        self._query_scale_generated_from_unit(x_for_student),
+                    )
+                    pbar.update(int(b))
+                    self._publish_substitute()
+                    self._maybe_periodic_eval(device)
+                    stage_remaining -= int(b)
+                    epoch_queries += int(b)
+
+                    self.clone.train()
+                    self.clone_optimizer.zero_grad(set_to_none=True)
+                    logits = self.clone(self._unit_to_internal(x_for_student))
+                    loss_s = F.cross_entropy(logits, y)
+                    loss_s.backward()
+                    self.clone_optimizer.step()
+
+                    # 3) Generator update (official order: after student, before discriminator)
+                    self._generator_adv_div_step(
+                        fake_x_01=fake_x,
+                        diversity_weight=float(self.alternate_diversity_weight),
+                    )
+
+                    # 4) Discriminator update
+                    self._train_discriminator(real_x, fake_x)
+
+                # End of epoch: cosine step + warmup (official)
+                if self.clone_scheduler is not None:
+                    self.clone_scheduler.step()
+                if self.use_student_warmup and ep < int(self.student_warmup_epochs):
+                    for param_group in self.clone_optimizer.param_groups:
+                        param_group["lr"] = float(self.student_warmup_init_lr) * float(ep)
+
+                ep += 1
+                epbar.update(1)
+
+                if epoch_queries <= 0:
                     break
-                real_x = real_x[:b]
-                if self.proxy_pad_crop:
-                    real_x = self._augment_pad_crop_hflip(real_x)
-
-                # 1) Generate synthetic batch (keep graph for G update)
-                z = torch.randn(b, self.noise_dim, device=device)
-                fake_raw = self.generator(z)
-                fake_x = tanh_to_unit(fake_raw)
-
-                # 2) Student/clone update: label with oracle and fit on (optionally) augmented inputs
-                x_for_student = fake_x.detach()
-                if use_pad_crop:
-                    x_for_student = self._augment_pad_crop_hflip(x_for_student)
-                if self.alternate_auto_augment:
-                    x_for_student = self._augment_auto_augment(x_for_student)
-
-                y = self._oracle_hard_labels(ctx, x_for_student)
-                pbar.update(int(b))
-                self._publish_substitute()
-                self._maybe_periodic_eval(device)
-
-                self.clone.train()
-                self.clone_optimizer.zero_grad(set_to_none=True)
-                logits = self.clone(self._unit_to_internal(x_for_student))
-                loss_s = F.cross_entropy(logits, y)
-                loss_s.backward()
-                self.clone_optimizer.step()
-
-                # 3) Generator update (official order: after student, before discriminator)
-                self._generator_adv_div_step(
-                    fake_x_01=fake_x,
-                    diversity_weight=float(self.alternate_diversity_weight),
-                )
-
-                # 4) Discriminator update
-                self._train_discriminator(real_x, fake_x)
-
-            # End of epoch: cosine step + warmup (official)
-            if self.clone_scheduler is not None:
-                self.clone_scheduler.step()
-            if self.use_student_warmup and ep < int(self.student_warmup_epochs):
-                for param_group in self.clone_optimizer.param_groups:
-                    param_group["lr"] = float(self.student_warmup_init_lr) * float(ep)
 
         self.state.attack_state["substitute"] = self.clone
 
@@ -919,12 +1158,14 @@ class DFMSHL(AttackRunner):
             k_proxy = k // 2
             k_synth = k - k_proxy
 
-            x_proxy = self._next_proxy_batch(device, batch_size=k_proxy)
+            x_proxy = self._query_scale_generated_from_unit(
+                self._next_proxy_batch(device, batch_size=k_proxy)
+            )
 
             z = torch.randn(k_synth, self.noise_dim, device=device)
             with torch.no_grad():
-                # Generator output is tanh in [-1,1]; oracle expects [0,1] under benchmark contract.
-                x_synth = tanh_to_unit(self.generator(z))
+                x_synth_tanh = self.generator(z)
+                x_synth = self._query_scale_generated_from_tanh(x_synth_tanh)
 
             x = torch.cat([x_proxy, x_synth], dim=0)
             meta = {"phase": phase, "k_proxy": k_proxy, "k_synth": k_synth}
@@ -933,14 +1174,14 @@ class DFMSHL(AttackRunner):
         if phase == "init_retrain_collect":
             z = torch.randn(k, self.noise_dim, device=device)
             with torch.no_grad():
-                x = tanh_to_unit(self.generator(z))
+                x = self._query_scale_generated_from_tanh(self.generator(z))
             meta = {"phase": phase, "synthetic": True}
             return QueryBatch(x=x, meta=meta)
 
         z = torch.randn(k, self.noise_dim, device=device)
         with torch.no_grad():
             x_raw = self.generator(z)
-        x = tanh_to_unit(x_raw)
+        x = self._query_scale_generated_from_tanh(x_raw)
         meta = {"generator_step": state.attack_state["step"], "synthetic": True, "phase": phase}
         return QueryBatch(x=x, meta=meta)
 
