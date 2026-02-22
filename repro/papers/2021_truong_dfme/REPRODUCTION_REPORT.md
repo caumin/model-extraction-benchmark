@@ -3,7 +3,7 @@
 ## Scope
 
 - paper_id: `2021_truong_dfme`
-- status: pipeline-ready (smoke/full profiles)
+- status: revalidation planned (rerun pending)
 
 ## Execution
 
@@ -14,5 +14,6 @@ python repro/run_experiment.py run --paper-id 2021_truong_dfme --profile full --
 
 ## Notes
 
-- Full profile is paperlike-budget oriented and compute-heavy (20M queries).
-- Smoke profile is for local validation of end-to-end reproducibility flow.
+- Previous DFME completion was a project milestone snapshot.
+- Current objective is to rerun verification (smoke and full) and refresh reproduced metrics/comparison outputs.
+- Width note: paper/checkpoint naming uses `ResNet-34-8x`, but this repro fixes `victim.width_mult=1` to match the runnable implementation path.

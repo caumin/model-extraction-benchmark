@@ -123,6 +123,12 @@ assumptions:
   - item: strictness gating on full-budget execution
     reason: victim now uses vendored official checkpoint; strict verdict still requires completing 20M-query full run and checking target tolerance
     impact_check: comparison remains incomplete/fail until full run artifacts are generated
+  - item: width-multiplier interpretation
+    reason: official repo keeps the "ResNet-34-8x" name, but implementation corresponds to standard ResNet-34 width (width_mult=1)
+    impact_check: configs and reports explicitly document width_mult=1 to avoid silent architecture drift
+  - item: generator learning-rate source
+    reason: paper text is often read as lr_G=5e-4, but official DFME repo default (--lr_G) is 1e-4
+    impact_check: reproduction configs pin generator_lr=1e-4 and document this as a repository-default choice
 evidence_index:
   - item_path: attack.query_budget.cifar10
     pdf_page: 4776

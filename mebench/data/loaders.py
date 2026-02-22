@@ -2,10 +2,17 @@
 
 from typing import Dict, Any, Tuple, Optional
 import os
+import csv
+from pathlib import Path
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 import torchvision
 import torchvision.transforms as transforms
+from PIL import Image
+
+
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD = (0.2023, 0.1994, 0.2010)
 
 
 def _get_default_num_workers(*, default: int = 0) -> int:
@@ -19,6 +26,112 @@ def _get_default_num_workers(*, default: int = 0) -> int:
         return int(raw)
     except ValueError:
         return int(default)
+
+
+class BelgiumTSCDataset(Dataset):
+    def __init__(self, root: str = "./data", train: bool = True, transform=None) -> None:
+        self.root = Path(str(root))
+        self.transform = transform
+        self.subdir = "Training" if bool(train) else "Testing"
+        self.base_dir = self.root / "BelgiumTSC" / self.subdir
+        csv_name = "train_data.csv" if bool(train) else "test_data.csv"
+        csv_path = self.base_dir / csv_name
+
+        self.records: list[tuple[Path, int]] = []
+        if csv_path.exists():
+            with csv_path.open("r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if len(row) < 2:
+                        continue
+                    rel_path = str(row[0]).strip()
+                    label_raw = str(row[1]).strip()
+                    if rel_path == "":
+                        continue
+                    try:
+                        label = int(label_raw)
+                    except ValueError:
+                        continue
+                    self.records.append((self.base_dir / rel_path, label))
+        else:
+            if not self.base_dir.exists():
+                raise FileNotFoundError(
+                    f"BelgiumTSC folder not found: {self.base_dir}. "
+                    "Expected official layout under <root>/BelgiumTSC/{Training|Testing}/."
+                )
+            image_exts = {".png", ".jpg", ".jpeg", ".ppm", ".bmp"}
+            for class_dir in sorted(self.base_dir.iterdir()):
+                if not class_dir.is_dir():
+                    continue
+                try:
+                    label = int(class_dir.name)
+                except ValueError:
+                    continue
+                for image_path in sorted(class_dir.iterdir()):
+                    if image_path.is_file() and image_path.suffix.lower() in image_exts:
+                        self.records.append((image_path, label))
+
+        if not self.records:
+            raise ValueError(
+                f"BelgiumTSC has no usable samples under {self.base_dir}. "
+                f"Checked CSV={csv_path.exists()} and class folders."
+            )
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+        img_path, label = self.records[int(idx)]
+        if not img_path.exists():
+            raise FileNotFoundError(f"BelgiumTSC image missing: {img_path}")
+        img = Image.open(img_path).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, int(label)
+
+
+class GTSRBCSVDataset(Dataset):
+    def __init__(self, root: str = "./data", train: bool = True, transform=None) -> None:
+        self.root = Path(str(root))
+        self.transform = transform
+        self.subdir = "trainingset" if bool(train) else "testset"
+        self.base_dir = self.root / "GTSRB" / self.subdir
+        csv_name = "training.csv" if bool(train) else "test.csv"
+        csv_path = self.base_dir / csv_name
+
+        self.records: list[tuple[Path, int]] = []
+        if not csv_path.exists():
+            raise FileNotFoundError(f"GTSRB CSV not found: {csv_path}")
+
+        with csv_path.open("r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) < 2:
+                    continue
+                rel_path = str(row[0]).strip()
+                label_raw = str(row[1]).strip()
+                if rel_path == "":
+                    continue
+                try:
+                    label = int(label_raw)
+                except ValueError:
+                    continue
+                self.records.append((self.base_dir / rel_path, label))
+
+        if not self.records:
+            raise ValueError(f"GTSRB CSV dataset has no records: {csv_path}")
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+        img_path, label = self.records[int(idx)]
+        if not img_path.exists():
+            raise FileNotFoundError(f"GTSRB image missing: {img_path}")
+        img = Image.open(img_path).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, int(label)
 
 
 class SeedDataset(Dataset):
@@ -116,15 +229,26 @@ class SeedDataset(Dataset):
                 download=True,
                 transform=transform,
             )
+        elif name == "BelgiumTSC":
+            size = output_size if output_size is not None else (32, 32)
+            tf = [transforms.Resize(size)]
+            if output_channels is not None and int(output_channels) == 1:
+                tf.append(transforms.Grayscale(num_output_channels=1))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
+            full_dataset = BelgiumTSCDataset(
+                root="./data",
+                train=bool(train_split),
+                transform=transform,
+            )
         else:
             raise ValueError(f"Unknown dataset: {name}")
 
         # Deterministic subset for seed (balanced or by_class)
         if seed_split == "balanced":
             # Handle GTSRB which has different structure
-            if name == "GTSRB":
-                # GTSRB returns (x, y) tuples where y is integer label
-                num_classes = 43  # GTSRB has 43 classes
+            if name in {"GTSRB", "BelgiumTSC"}:
+                num_classes = 43 if name == "GTSRB" else 62
                 samples_per_class = (seed_size + num_classes - 1) // num_classes
                 indices = []
                 
@@ -199,6 +323,7 @@ class SurrogateDataset(Dataset):
         class_subset_seed: int = 42,
         class_subset_names: Optional[list[str]] = None,
         emnist_split: str = "balanced",
+        surrogate_color_jitter: bool = False,
     ):
         """Initialize surrogate dataset.
 
@@ -310,14 +435,42 @@ class SurrogateDataset(Dataset):
             self.dataset = ds
         elif surrogate_name == "GTSRB":
             size = resize if resize is not None else (32, 32)
-            transform = transforms.Compose([
-                transforms.Resize(size),
-                transforms.ToTensor(),
-            ])
-            self.dataset = torchvision.datasets.GTSRB(
-                root="./data",
-                split="train",
-                download=True,
+            tf = [transforms.Resize(size)]
+            if bool(train_split) and bool(surrogate_color_jitter):
+                tf.append(
+                    transforms.ColorJitter(
+                        brightness=0.4,
+                        contrast=0.4,
+                        saturation=0.4,
+                        hue=0.0,
+                    )
+                )
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
+            csv_root = Path(str(root)) / "GTSRB" / "trainingset" / "training.csv"
+            if csv_root.exists():
+                self.dataset = GTSRBCSVDataset(
+                    root=root,
+                    train=bool(train_split),
+                    transform=transform,
+                )
+            else:
+                self.dataset = torchvision.datasets.GTSRB(
+                    root="./data",
+                    split="train" if bool(train_split) else "test",
+                    download=True,
+                    transform=transform,
+                )
+        elif surrogate_name == "BelgiumTSC":
+            size = resize if resize is not None else (32, 32)
+            tf = [transforms.Resize(size)]
+            if output_channels is not None and int(output_channels) == 1:
+                tf.append(transforms.Grayscale(num_output_channels=1))
+            tf.append(transforms.ToTensor())
+            transform = transforms.Compose(tf)
+            self.dataset = BelgiumTSCDataset(
+                root=root,
+                train=bool(train_split),
                 transform=transform,
             )
         elif surrogate_name in {"IMAGENET", "ImageNet", "imagenet", "ILSVRC", "ILSVRC2012"}:
@@ -381,6 +534,7 @@ def get_test_dataloader(
         if input_size is not None:
             tf.append(transforms.Resize(input_size))
         tf.append(transforms.ToTensor())
+        tf.append(transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD))
         transform = transforms.Compose(tf)
         dataset = torchvision.datasets.CIFAR10(
             root="./data",
@@ -422,10 +576,30 @@ def get_test_dataloader(
             transforms.Resize(size),
             transforms.ToTensor(),
         ])
-        dataset = torchvision.datasets.GTSRB(
+        csv_test = Path("./data") / "GTSRB" / "testset" / "test.csv"
+        if csv_test.exists():
+            dataset = GTSRBCSVDataset(
+                root="./data",
+                train=False,
+                transform=transform,
+            )
+        else:
+            dataset = torchvision.datasets.GTSRB(
+                root="./data",
+                split="test",
+                download=True,
+                transform=transform,
+            )
+    elif name == "BelgiumTSC":
+        size = input_size if input_size is not None else (32, 32)
+        tf = [transforms.Resize(size)]
+        if channels is not None and int(channels) == 1:
+            tf.append(transforms.Grayscale(num_output_channels=1))
+        tf.append(transforms.ToTensor())
+        transform = transforms.Compose(tf)
+        dataset = BelgiumTSCDataset(
             root="./data",
-            split="test",
-            download=True,
+            train=False,
             transform=transform,
         )
     else:
@@ -485,6 +659,7 @@ def create_dataloader(
             class_subset_seed=int(config.get("surrogate_class_subset_seed", 42)),
             class_subset_names=config.get("surrogate_class_subset_names"),
             emnist_split=str(config.get("surrogate_split", config.get("emnist_split", "balanced"))),
+            surrogate_color_jitter=bool(config.get("surrogate_color_jitter", False)),
         )
     elif data_mode == "seed":
         dataset = SeedDataset(

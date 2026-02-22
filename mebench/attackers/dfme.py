@@ -52,7 +52,15 @@ class DFME(AttackRunner):
                 "DFME internal_input_scale_mode must be 'unit' or 'tanh', "
                 f"got {self.internal_input_scale_mode!r}"
             )
-        eval_interval_raw = int(config.get("eval_interval_queries", 0))
+        self.query_input_scale_mode = str(
+            config.get("query_input_scale_mode", "tanh")
+        ).strip().lower()
+        if self.query_input_scale_mode not in {"unit", "tanh"}:
+            raise ValueError(
+                "DFME query_input_scale_mode must be 'unit' or 'tanh', "
+                f"got {self.query_input_scale_mode!r}"
+            )
+        eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
         self._next_eval_query = self.eval_interval_queries
         self._periodic_eval_done: set[int] = set()
@@ -115,16 +123,13 @@ class DFME(AttackRunner):
             return torch.clamp(x_tanh, -1.0, 1.0)
         return torch.clamp(x_tanh * 0.5 + 0.5, 0.0, 1.0)
 
-    @staticmethod
-    def _query_scale(x_tanh: torch.Tensor) -> torch.Tensor:
+    def _query_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:
+        if self.query_input_scale_mode == "tanh":
+            return torch.clamp(x_tanh, -1.0, 1.0)
         return torch.clamp(x_tanh * 0.5 + 0.5, 0.0, 1.0)
 
     def _get_substitute_for_eval(self) -> nn.Module:
-        if self.internal_input_scale_mode != "tanh":
-            return self.student
-        if self._eval_substitute is None:
-            self._eval_substitute = _ScaledSubstituteWrapper(self.student, "tanh")
-        return self._eval_substitute
+        return self.student
 
     def _publish_substitute(self) -> None:
         if self.student is None:
@@ -236,6 +241,9 @@ class DFME(AttackRunner):
                 v_all = self._recover_logits(ctx.query(x_query_all).y.to(device))
                 v_out = v_all[:batch]
                 v_pert_all = v_all[batch:].view(self.m, batch, -1)
+
+                self._publish_substitute()
+                self._maybe_periodic_eval(device)
                 num_classes = int(v_out.size(1))
 
                 # Official path (approximate_gradients.py):
@@ -272,6 +280,9 @@ class DFME(AttackRunner):
                 x_student = self._student_scale(x_tanh)
                 x_query = self._query_scale(x_tanh)
                 v_out = self._recover_logits(ctx.query(x_query).y.to(device))
+
+                self._publish_substitute()
+                self._maybe_periodic_eval(device)
                 
                 self.s_opt.zero_grad()
                 # Avoid BatchNorm crashes on tiny final batches (e.g., batch=1)

@@ -9,8 +9,9 @@ benchmark:
 victim:
   victim_id: cifar10_resnet34_8x_official
   arch: resnet34
+  # NOTE: official `resnet34_8x` naming is legacy; implementation is standard ResNet-34 width.
   width_mult: 1
-  input_scale_mode: tanh
+  input_scale_mode: unit
   channels: 3
   num_classes: 10
   input_size: [32, 32]
@@ -35,9 +36,11 @@ attack:
   n_s_steps: 5
   grad_approx_m: 1
   grad_approx_epsilon: 0.001
+  # NOTE: official DFME repo default is lr_G=1e-4 (paper text commonly cites 5e-4).
   generator_lr: 0.0001
   noise_dim: 256
   internal_input_scale_mode: tanh
+  query_input_scale_mode: tanh
 
 substitute:
   arch: resnet18

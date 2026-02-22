@@ -1,9 +1,11 @@
 paper_id: 2022_xie_game
 strict_reproduction:
-  possible_locally: true
-  blockers: []
+  possible_locally: false
+  blockers:
+    - "Pair-2 origin dataset BelgiumTSC is not currently first-class in mebench/repro pipeline"
+    - "Paper attacker architectures half-LeNet/half-AlexNet are not exposed as direct repro aliases"
   caveats:
-    - "Official GAME uses proxy class space larger than victim classes (e.g., CIFAR100->CIFAR10); keep proxy dataset available on remote server"
+    - "Pair-1 (MNIST/FashionMNIST) is configured as closest paper-faithful runnable profile"
 local_fallback_profile:
   config_smoke: repro/papers/2022_xie_game/configs/experiment_smoke.yaml
   config_full: repro/papers/2022_xie_game/configs/experiment.yaml

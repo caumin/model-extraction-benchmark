@@ -7,13 +7,14 @@ benchmark:
   protocol_version: "1.2"
 
 victim:
-  victim_id: cifar10_resnet18
-  arch: resnet18
+  victim_id: cifar10_resnet34_8x_official
+  arch: resnet34
+  width_mult: 1
   input_scale_mode: unit
   channels: 3
   num_classes: 10
   input_size: [32, 32]
-  checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
+  checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt
   output_mode: soft_prob
   temperature: 1.0
 
@@ -27,6 +28,7 @@ attack:
   name: maze
   output_mode: soft_prob
   clone_input_scale_mode: tanh
+  query_input_scale_mode: tanh
   max_budget: 2000
   batch_size: 32
   n_g_steps: 1

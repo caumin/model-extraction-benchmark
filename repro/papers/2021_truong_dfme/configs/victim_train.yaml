@@ -1,6 +1,7 @@
 dataset: CIFAR10
 arch: resnet34
-width_mult: 8
+# NOTE: official `resnet34_8x` naming is legacy; implementation is standard ResNet-34 width.
+width_mult: 1
 seed: 0
 victim_id: cifar10_resnet34_8x_official
 out: runs/victims/cifar10-resnet34_8x.pt

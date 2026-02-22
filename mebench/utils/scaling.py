@@ -47,5 +47,17 @@ def normalize_input_scale(x: torch.Tensor, mode: str = "unit") -> torch.Tensor:
     if mode_norm in {"unit", "0_1", "01"}:
         return clamp_unit(x)
     if mode_norm in {"tanh", "neg1_1", "-1_1", "-11"}:
+        if not torch.isfinite(x).all():
+            return torch.zeros_like(x)
+        if x.numel() == 0:
+            return x
+
+        # If caller already provides tanh-space tensors ([-1, 1]), keep that
+        # scale to avoid accidental double conversion in parity runs.
+        x_min = float(x.detach().amin().item())
+        x_max = float(x.detach().amax().item())
+        if x_min < -1e-6 or x_max > 1.0 + 1e-6:
+            return torch.clamp(x, -1.0, 1.0)
+
         return unit_to_tanh(clamp_unit(x))
     raise ValueError(f"Unsupported input scale mode: {mode!r}")

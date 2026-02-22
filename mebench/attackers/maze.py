@@ -12,7 +12,6 @@ from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
-from mebench.models.gan import DCGANGenerator
 from mebench.models.substitute_factory import create_substitute
 from mebench.utils.scaling import normalize_input_scale
 
@@ -28,6 +27,80 @@ class _ScaledSubstituteWrapper(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_scaled = normalize_input_scale(x, self.input_scale_mode)
         return self.model(x_scaled)
+
+
+class _OfficialMAZEConv3Generator(nn.Module):
+    """Official MAZE conv3_gen architecture.
+
+    Mirrors `official_repo_clones/maze/src/models/conv3_gen.py` while keeping
+    the `return_pre_tanh` interface used by mebench MAZE runner.
+    """
+
+    def __init__(
+        self,
+        z_dim: int,
+        out_channels: int = 3,
+        start_dim: int = 8,
+        output_size: int = 32,
+    ) -> None:
+        super().__init__()
+        self.output_size = int(output_size)
+        self.linear = nn.Linear(int(z_dim), 128 * int(start_dim) ** 2)
+        self.bn0 = nn.BatchNorm2d(128)
+
+        self.up1 = nn.Upsample(scale_factor=2)
+        self.conv1 = nn.Conv2d(128, 128, 3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(128)
+        self.relu1 = nn.LeakyReLU(0.2, inplace=True)
+
+        self.up2 = nn.Upsample(scale_factor=2)
+        self.conv2 = nn.Conv2d(128, 64, 3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.relu2 = nn.LeakyReLU(0.2, inplace=True)
+
+        self.conv3 = nn.Conv2d(64, int(out_channels), 3, stride=1, padding=1)
+        self.bn3 = nn.BatchNorm2d(int(out_channels), affine=True)
+        self.tanh = nn.Tanh()
+        self._start_dim = int(start_dim)
+
+    def forward(
+        self, z: torch.Tensor, return_pre_tanh: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        x = self.linear(z)
+        x = x.view(-1, 128, self._start_dim, self._start_dim)
+        x = self.bn0(x)
+
+        x = self.up1(x)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+
+        x = self.up2(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu2(x)
+
+        x = self.conv3(x)
+        pre_tanh = self.bn3(x)
+        out = self.tanh(pre_tanh)
+
+        if out.shape[-1] != self.output_size:
+            out = F.interpolate(
+                out,
+                size=(self.output_size, self.output_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+            pre_tanh = F.interpolate(
+                pre_tanh,
+                size=(self.output_size, self.output_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        if return_pre_tanh:
+            return pre_tanh, out
+        return out
 
 
 class MAZE(AttackRunner):
@@ -57,7 +130,12 @@ class MAZE(AttackRunner):
             raise ValueError(
                 f"MAZE clone_input_scale_mode must be 'unit' or 'tanh', got {self.clone_input_scale_mode!r}"
             )
-        eval_interval_raw = int(config.get("eval_interval_queries", 0))
+        self.query_input_scale_mode = str(config.get("query_input_scale_mode", "unit")).strip().lower()
+        if self.query_input_scale_mode not in {"unit", "tanh"}:
+            raise ValueError(
+                f"MAZE query_input_scale_mode must be 'unit' or 'tanh', got {self.query_input_scale_mode!r}"
+            )
+        eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
         self._next_eval_query = self.eval_interval_queries
         self._periodic_eval_done: set[int] = set()
@@ -78,11 +156,12 @@ class MAZE(AttackRunner):
         input_shape = state.metadata.get("input_shape", (3, 32, 32))
         num_classes = state.metadata.get("num_classes", 10)
         
-        # Generator: Unconditional DCGAN per Algorithm 1
-        self.generator = DCGANGenerator(
-            noise_dim=self.noise_dim, 
-            output_channels=input_shape[0], 
-            output_size=input_shape[1]
+        # Generator: official MAZE conv3_gen architecture.
+        self.generator = _OfficialMAZEConv3Generator(
+            z_dim=self.noise_dim,
+            out_channels=int(input_shape[0]),
+            start_dim=max(1, int(input_shape[1]) // 4),
+            output_size=int(input_shape[1]),
         ).to(device)
         
         # Paper (Section 5.1): SGD optimizer with lr=1e-4 for G.
@@ -135,11 +214,7 @@ class MAZE(AttackRunner):
             self.c_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.c_opt, T_max=approx_iters)
 
     def _get_substitute_for_eval(self) -> nn.Module:
-        if self.clone_input_scale_mode != "tanh":
-            return self.clone
-        if self._eval_substitute is None:
-            self._eval_substitute = _ScaledSubstituteWrapper(self.clone, "tanh")
-        return self._eval_substitute
+        return self.clone
 
     def _publish_substitute(self) -> None:
         if self.clone is None:
@@ -209,12 +284,13 @@ class MAZE(AttackRunner):
                 batch = min(self.batch_size, ctx.budget_remaining // total_queries)
                 if batch <= 0:
                     break
-                self.generator.train(); self.clone.eval()
+                # Official MAZE keeps both G and S in train mode during the loop.
+                self.generator.train(); self.clone.train()
                 z = torch.randn(batch, self.noise_dim, device=device)
 
                 # Official MAZE perturbs generator pre-tanh activations.
                 pre_tanh, x_base = self.generator(z, return_pre_tanh=True)
-                x_base_01 = torch.clamp((x_base + 1.0) / 2.0, 0.0, 1.0)
+                x_base_query = self._query_scale(x_base)
                 y_c_base = self._clone_probs_eval(x_base)
 
                 # Objective LG: -KL(yT || yC) to maximize disagreement
@@ -230,13 +306,13 @@ class MAZE(AttackRunner):
                     u = torch.randn_like(pre_tanh)
                     u /= (torch.norm(u.view(batch, -1), dim=1).view(-1, 1, 1, 1) + 1e-8)
                     x_pert = torch.tanh(pre_tanh + self.epsilon * u)
-                    x_pert_01 = torch.clamp((x_pert + 1.0) / 2.0, 0.0, 1.0)
+                    x_pert_query = self._query_scale(x_pert)
 
-                    x_pert_01_list.append(x_pert_01)
+                    x_pert_01_list.append(x_pert_query)
                     u_list.append(u)
 
                 # Batch oracle queries: base + perturbed (same total images queried).
-                x_query = torch.cat([x_base_01] + x_pert_01_list, dim=0).detach()
+                x_query = torch.cat([x_base_query] + x_pert_01_list, dim=0).detach()
                 y_t_all = ctx.query(x_query).y
                 if y_t_all.device != x_base.device:
                     y_t_all = y_t_all.to(x_base.device)
@@ -282,11 +358,12 @@ class MAZE(AttackRunner):
                         break
                     z = torch.randn(batch, self.noise_dim, device=device)
                     x_gen = self.generator(z).detach()
-                    y_t = ctx.query(torch.clamp((x_gen + 1.0) / 2.0, 0.0, 1.0)).y
+                    y_t = ctx.query(self._query_scale(x_gen)).y
                     if y_t.device != x_gen.device:
                         y_t = y_t.to(x_gen.device)
 
-                self.generator.eval(); self.clone.train()
+                # Official MAZE samples clone-phase queries with G still in train mode.
+                self.generator.train(); self.clone.train()
 
                 # Avoid BatchNorm crashes on tiny final batches (e.g., batch=1)
                 # while still consuming the remaining query budget.
@@ -375,6 +452,11 @@ class MAZE(AttackRunner):
         with torch.no_grad():
             logits = self.clone(x_in)
         return F.softmax(logits.float(), dim=1)
+
+    def _query_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:
+        if self.query_input_scale_mode == "tanh":
+            return torch.clamp(x_tanh, -1.0, 1.0)
+        return torch.clamp((x_tanh + 1.0) / 2.0, 0.0, 1.0)
 
     def _append_replay(self, x: torch.Tensor, y: torch.Tensor):
         x_cpu = x.detach().cpu()

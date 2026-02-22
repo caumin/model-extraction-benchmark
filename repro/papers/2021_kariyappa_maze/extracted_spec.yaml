@@ -159,6 +159,9 @@ assumptions:
   - item: strictness gating on full-budget execution
     reason: architecture mapping is aligned; strict verdict still requires completing 30M-query full run and checking target tolerance
     impact_check: comparison remains incomplete/fail until full run artifacts are generated
+  - item: width-multiplier interpretation
+    reason: official repo keeps the "ResNet-34-8x" name, but implementation corresponds to standard ResNet-34 width (width_mult=1)
+    impact_check: configs and reports explicitly document width_mult=1 to avoid silent architecture drift
 evidence_index:
   - item_path: attack.hyperparameters.batch_size
     pdf_page: 13819

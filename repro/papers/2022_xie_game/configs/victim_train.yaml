@@ -1,18 +1,18 @@
-dataset: CIFAR10
-arch: resnet34
+dataset: MNIST
+arch: lenet
 input_scale_mode: unit
 seed: 0
-victim_id: cifar10_resnet34_8x_official
-out: runs/victims/cifar10-resnet34_8x.pt
+victim_id: mnist_lenet32_tanh_game_paper
+out: runs/victims/mnist_lenet32_tanh_game_paper.pt
 save_metadata: true
 train:
-  epochs: 20
+  epochs: 15
   batch_size: 1024
-  scheduler: cosine
+  scheduler: none
   dropout_prob: 0.0
   num_workers: 0
   optimizer:
-    name: sgd
-    lr: 0.1
-    momentum: 0.9
-    weight_decay: 0.0005
+    name: adam
+    lr: 0.001
+    momentum: 0.0
+    weight_decay: 0.0

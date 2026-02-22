@@ -36,6 +36,7 @@ if str(project_root) not in sys.path:
 from mebench.core.seed import set_seed
 from mebench.models.substitute_factory import create_substitute
 from mebench.utils.scaling import normalize_input_scale
+from mebench.data.loaders import BelgiumTSCDataset
 
 
 @dataclass(frozen=True)
@@ -112,9 +113,14 @@ def _build_transforms(dataset_name: str, arch: str, train: bool) -> transforms.C
         return transforms.Compose([transforms.ToTensor()])
 
     if dataset_name == "MNIST":
+        if arch in {"lenet", "half_lenet", "half-lenet"}:
+            return transforms.Compose([transforms.Resize(32), transforms.ToTensor()])
         return transforms.Compose([transforms.ToTensor()])
 
-    raise ValueError(f"Unsupported dataset '{dataset_name}'. Supported: MNIST, CIFAR10")
+    if dataset_name == "BelgiumTSC":
+        return transforms.Compose([transforms.Resize((32, 32)), transforms.ToTensor()])
+
+    raise ValueError(f"Unsupported dataset '{dataset_name}'. Supported: MNIST, CIFAR10, BelgiumTSC")
 
 
 def _load_dataset(dataset_name: str, arch: str, train: bool, data_root: Path) -> torch.utils.data.Dataset:
@@ -134,6 +140,12 @@ def _load_dataset(dataset_name: str, arch: str, train: bool, data_root: Path) ->
             download=True,
             transform=transform,
         )
+    if dataset_name == "BelgiumTSC":
+        return BelgiumTSCDataset(
+            root=str(data_root),
+            train=bool(train),
+            transform=transform,
+        )
     raise ValueError(f"Unsupported dataset '{dataset_name}'.")
 
 
@@ -143,6 +155,8 @@ def _infer_dataset_info(dataset_name: str, arch: str) -> Tuple[int, int]:
         return 1, 10
     if dataset_name == "CIFAR10":
         return 3, 10
+    if dataset_name == "BelgiumTSC":
+        return 3, 62
     raise ValueError(f"Unsupported dataset '{dataset_name}'.")
 
 
@@ -274,7 +288,7 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
     dataset = str(dataset)
     arch = str(arch)
 
-    if dataset == "MNIST" and arch == "lenet_mnist":
+    if dataset == "MNIST" and arch in {"lenet_mnist", "lenet"}:
         return VictimTrainRecipe(
             dataset=dataset,
             arch=arch,
@@ -329,6 +343,22 @@ def _default_recipe(dataset: str, arch: str) -> VictimTrainRecipe:
             scheduler="cosine",
             width_mult=1,
             label_smoothing=0.1,
+        )
+
+    if dataset == "BelgiumTSC" and arch in {"alexnet", "alexnet_half", "half_alexnet", "half-alexnet"}:
+        return VictimTrainRecipe(
+            dataset=dataset,
+            arch=arch,
+            epochs=20,
+            batch_size=1024,
+            optimizer="adam",
+            lr=1e-3,
+            momentum=0.9,
+            weight_decay=0.0,
+            scheduler="none",
+            width_mult=1,
+            label_smoothing=0.0,
+            dropout_prob=0.5,
         )
 
     if dataset == "CIFAR10" and arch == "resnet20":
@@ -408,14 +438,14 @@ def train() -> None:
         "--dataset",
         type=str,
         required=False,
-        choices=["MNIST", "CIFAR10"],
+        choices=["MNIST", "CIFAR10", "BelgiumTSC"],
         help="Victim dataset",
     )
     parser.add_argument(
         "--arch",
         type=str,
         required=False,
-        choices=["lenet_mnist", "classifier", "resnet18", "resnet20", "resnet34", "activethief_cnn"],
+        choices=["lenet_mnist", "lenet", "classifier", "resnet18", "resnet20", "resnet34", "activethief_cnn", "alexnet", "alexnet_half", "half_alexnet", "half-alexnet"],
         help="Victim architecture (must match config victim.arch)",
     )
     parser.add_argument(
@@ -512,12 +542,16 @@ def train() -> None:
     save_metadata_cfg = _cfg_get(cfg, "save_metadata", default=False)
     save_metadata = bool(args.save_metadata) if args.save_metadata is not None else bool(save_metadata_cfg)
 
-    # Benchmark defaults: MNIST uses LeNet-5 or Classifier; CIFAR10 uses ResNet18/ResNet20/ActiveThief CNN.
-    if dataset == "MNIST" and arch not in {"lenet_mnist", "classifier"}:
-        raise ValueError("For MNIST victim training, use --arch lenet_mnist or --arch classifier")
+    # Benchmark defaults: MNIST uses LeNet-family or Classifier; CIFAR10 uses ResNet18/ResNet20/ActiveThief CNN.
+    if dataset == "MNIST" and arch not in {"lenet_mnist", "lenet", "classifier"}:
+        raise ValueError("For MNIST victim training, use --arch lenet_mnist, --arch lenet, or --arch classifier")
     if dataset == "CIFAR10" and arch not in {"resnet18", "resnet20", "resnet34", "activethief_cnn"}:
         raise ValueError(
             "For CIFAR10 victim training, use --arch resnet18, --arch resnet20, --arch resnet34, or --arch activethief_cnn"
+        )
+    if dataset == "BelgiumTSC" and arch not in {"alexnet", "alexnet_half", "half_alexnet", "half-alexnet"}:
+        raise ValueError(
+            "For BelgiumTSC victim training, use --arch alexnet, --arch alexnet_half, or --arch half_alexnet"
         )
 
     recipe = _default_recipe(dataset, arch)
