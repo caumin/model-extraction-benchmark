@@ -38,8 +38,11 @@ runs/
 !mebench/data/
 /papers/
 /repro/
+/reproduction_specs/
 /official_repo_clones/
 /archive/
+/oh-my-opencode.json
+/RELEASE_SCOPE.md
 /configs/matrix/
 /configs/paper_mode/
 /configs/tmp_channel_check/

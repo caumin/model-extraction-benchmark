@@ -43,7 +43,7 @@
 | | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | - | 역변환(Inversion) 기반 샘플 복원. |
 | | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | [GitHub](https://github.com/ku-air/SwiftThief) | 대조 학습(Contrastive Learning, SimSiam) + 능동 선택. |
 | **데이터 프리 / 생성형 (Generative)** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | [GitHub](https://github.com/cake-lab/datafree-model-extraction) | GAN 기반 쿼리 합성 (Min-Max 게임). |
-| | **Dual Students (DS)** | Beetham et al. (ICLR 2023) | [GitHub](https://github.com/James-Beetham/dual_students) | 두 학생 모델 간 불일치 기반 데이터 프리 추출. |
+| | **Dual Students (DS)** | [Beetham et al. (2023)](https://arxiv.org/abs/2309.10058) | [GitHub](https://github.com/James-Beetham/dual_students) | 두 학생 모델 간 불일치 기반 데이터 프리 추출. |
 | | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | [GitHub](https://github.com/val-iisc/Hard-Label-Model-Stealing) | 엔트로피 최대화를 통한 다양한 쿼리 합성. |
 | | **DisGUIDE** | [Rosenthal et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | [GitHub](https://github.com/lin-tan/disguide) | 불일치(disagreement) 기반 데이터 프리 추출 + replay/diversity 손실. |
 | | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | [GitHub](https://github.com/sanjaykariyappa/MAZE) | Zeroth-order 기울기 추정 (Gradient Estimation). |
@@ -129,8 +129,6 @@ bash scripts/launch/run_smoke.sh cuda:0
 `papers/`, `repro/`, `official_repo_clones/`는 내부/연구 자산으로
 오픈소스 배포 범위에서 제외됩니다.
 
-명시적 포함/제외 규칙은 `RELEASE_SCOPE.md`를 따릅니다.
-
 ---
 
 ## 📂 디렉토리 구조
@@ -147,8 +145,7 @@ model-extraction-benchmark/
 │   └── reference/
 ├── tests/                   # 계약/회귀 테스트
 ├── generate_configs.py
-├── aggregate_matrix.py
-└── RELEASE_SCOPE.md
+└── aggregate_matrix.py
 ```
 
 ## 공개 배포 범위
@@ -156,7 +153,7 @@ model-extraction-benchmark/
 - 공개 배포는 `mebench` 실험 프레임워크 및 실행/검증에 필요한 자산만 포함합니다.
 - `papers/`, `repro/`, `official_repo_clones/`는 배포 대상에서 제외합니다.
 - `data/`, `runs/`, 로그, 체크포인트, 생성 리포트 등 로컬 런타임 산출물은 배포 대상이 아닙니다.
-- 상세 기준은 `RELEASE_SCOPE.md`를 따릅니다.
+- 비공개 로컬 계획/설정 파일은 `.gitignore`로 배포에서 제외합니다.
 
 ---
 

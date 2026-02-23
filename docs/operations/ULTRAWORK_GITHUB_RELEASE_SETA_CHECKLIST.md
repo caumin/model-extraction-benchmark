@@ -10,7 +10,7 @@
 
 ### A0. Kickoff and Baseline
 
-- [x] Confirm release scope baseline from `RELEASE_SCOPE.md`.
+- [x] Confirm release scope baseline from tracked docs + `.gitignore` policy.
 - [x] Confirm current repository state and key meta files (`README.md`, `.gitignore`, `pyproject.toml`, `LICENSE`).
 - [ ] Snapshot current branch status for release work log (`git status`, `git diff --name-only`).
 
@@ -21,7 +21,7 @@
 - [ ] Finalize MAYBE set with explicit maintainer decisions:
   - [ ] `docs/technical_reports/`
   - [ ] `docs/archive/`
-  - [ ] `reproduction_specs/`
+  - [x] `reproduction_specs/` (excluded from public release)
   - [ ] root compatibility launch wrappers
 - [ ] Document large artifact policy (`*.pt`, `*.pth`, `*.ckpt`): source git exclusion + release artifact strategy.
 
@@ -76,7 +76,7 @@
 
 ### A6. Release Execution
 
-- [ ] Final release audit against `RELEASE_SCOPE.md`.
+- [ ] Final release audit against tracked docs + `.gitignore` policy.
 - [ ] Prepare release notes focusing on framework scope and exclusions.
 - [ ] Tag/release checklist ready (without pushing artifacts into source history).
 

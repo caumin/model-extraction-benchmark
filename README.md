@@ -44,7 +44,7 @@ We support **17 state-of-the-art attacks**, faithfully re-implemented from their
 | | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | - | Inversion-based sample recovery. |
 | | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | [GitHub](https://github.com/ku-air/SwiftThief) | Contrastive learning (SimSiam) + Active selection. |
 | **Data-Free / Generative** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | [GitHub](https://github.com/cake-lab/datafree-model-extraction) | GAN-based query synthesis (Min-Max game). |
-| | **Dual Students (DS)** | Beetham et al. (ICLR 2023) | [GitHub](https://github.com/James-Beetham/dual_students) | Two-student disagreement-driven data-free extraction. |
+| | **Dual Students (DS)** | [Beetham et al. (2023)](https://arxiv.org/abs/2309.10058) | [GitHub](https://github.com/James-Beetham/dual_students) | Two-student disagreement-driven data-free extraction. |
 | | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | [GitHub](https://github.com/val-iisc/Hard-Label-Model-Stealing) | Diverse query synthesis with entropy maximization. |
 | | **DisGUIDE** | [Rosenthal et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | [GitHub](https://github.com/lin-tan/disguide) | Disagreement-guided data-free extraction with replay/diversity losses. |
 | | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | [GitHub](https://github.com/sanjaykariyappa/MAZE) | Zeroth-order gradient estimation. |
@@ -130,8 +130,6 @@ This public distribution is scoped to the `mebench` framework workflows above.
 Private/internal research assets such as `papers/`, `repro/`, and `official_repo_clones/`
 are intentionally excluded from the open-source release.
 
-For explicit include/exclude rules, see `RELEASE_SCOPE.md`.
-
 ---
 
 ## 📂 Directory Structure
@@ -148,8 +146,7 @@ model-extraction-benchmark/
 │   └── reference/
 ├── tests/                   # Contract and regression tests
 ├── generate_configs.py
-├── aggregate_matrix.py
-└── RELEASE_SCOPE.md
+└── aggregate_matrix.py
 ```
 
 ## Public Release Scope
@@ -157,7 +154,7 @@ model-extraction-benchmark/
 - Public release targets only the `mebench` experiment framework and related runnable/testable assets.
 - `papers/`, `repro/`, and `official_repo_clones/` are intentionally excluded from distribution.
 - Local runtime artifacts (`data/`, `runs/`, logs, checkpoints, generated reports) are not part of source distribution.
-- See `RELEASE_SCOPE.md` for full include/exclude rules.
+- Non-public local planning/configuration files are excluded via `.gitignore`.
 
 ---
 

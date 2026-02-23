@@ -28,7 +28,7 @@ Legend:
 | KnockoffNets | https://arxiv.org/abs/1812.02766 | Official repo port | https://github.com/tribhuvanesh/knockoffnets | https://github.com/tribhuvanesh/knockoffnets/blob/master/knockoff/adversary/transfer.py | `mebench/attackers/knockoff_nets.py` |
 | CopycatCNN | https://arxiv.org/abs/1806.05476 | Paper-only | https://github.com/jeiks/Stealing_DL_Models | https://github.com/jeiks/Stealing_DL_Models/blob/master/Copycat_CNN/Scripts/label_dataset.py | `mebench/attackers/copycatcnn.py` |
 | BlackboxRipper | https://arxiv.org/abs/2010.11158 | Paper-only | https://github.com/antoniobarbalau/black-box-ripper | https://github.com/antoniobarbalau/black-box-ripper/blob/master/base_experiment.py | `mebench/attackers/blackbox_ripper.py` |
-| DualStudents (DS) | https://openreview.net/forum?id=VE1s3e5xriA | Official repo port | https://github.com/James-Beetham/dual_students | https://github.com/James-Beetham/dual_students/blob/main/dual_students/train.py | `mebench/attackers/ds.py` |
+| DualStudents (DS) | https://arxiv.org/abs/2309.10058 | Official repo port | https://github.com/James-Beetham/dual_students | https://github.com/James-Beetham/dual_students/blob/main/dual_students/train.py | `mebench/attackers/ds.py` |
 | MARICH | https://arxiv.org/abs/2302.08466 | Official repo port | https://github.com/Debabrota-Basu/marich | https://github.com/Debabrota-Basu/marich/tree/main/lr_cnn_res_marich | `mebench/attackers/marich.py` |
 
 ## Notes
