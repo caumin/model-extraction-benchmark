@@ -9,7 +9,7 @@
 
 **A rigorous, paper-grade benchmark for fair comparison of Model Extraction Attacks.**
 
-[한국어](README-ko.md) • [Documentation](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md) • [Agents Guide](AGENTS.md)
+[한국어](README-ko.md) • [Documentation](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md)
 
 </div>
 
@@ -178,7 +178,7 @@ To ensure fair attribution of performance gains, we enforce **Protocol v1.2** br
 
 ## 🤝 Contributing
 
-We welcome new attacks! Please ensure your implementation follows the [Attack Interface](AGENTS.md#attack-interface) and passes the contract tests.
+We welcome new attacks! Please follow the attack interface under `mebench/attackers/` and pass contract tests.
 
 1.  Implement `BaseAttack` in `mebench/attackers/`.
 2.  Add a config in `configs/debug/`.

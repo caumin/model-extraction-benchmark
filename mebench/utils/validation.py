@@ -8,7 +8,7 @@ import warnings
 class LearningRateValidator:
     """Validates learning rates to ensure compliance with global contract.
     
-    According to AGENTS.md and the global benchmark contract:
+    According to project contract policy:
     - Default substitute learning rate MUST be 0.01 across all experiments
     - This ensures fair comparison between attacks
     - Deviations should only be allowed with explicit justification

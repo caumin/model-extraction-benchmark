@@ -43,6 +43,7 @@ runs/
 /archive/
 /oh-my-opencode.json
 /RELEASE_SCOPE.md
+/AGENTS.md
 /docs/*
 !/docs/reference/
 /docs/reference/*

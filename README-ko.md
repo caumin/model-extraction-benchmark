@@ -9,7 +9,7 @@
 
 **모델 추출 공격(Model Extraction Attacks)의 공정한 비교를 위한 엄밀한 논문급 벤치마크**
 
-[English](README.md) • [문서](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md) • [에이전트 가이드](AGENTS.md)
+[English](README.md) • [문서](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md)
 
 </div>
 
@@ -167,7 +167,7 @@ model-extraction-benchmark/
 
 ## 🤝 기여하기 (Contributing)
 
-새로운 공격 기법의 추가를 환영합니다! 구현 시 **[공격 인터페이스 가이드(AGENTS.md)](AGENTS.md#attack-interface)**를 따르고 계약 테스트를 통과해야 합니다.
+새로운 공격 기법의 추가를 환영합니다! `mebench/attackers/`의 공격 인터페이스를 따르고 계약 테스트를 통과해야 합니다.
 
 1.  `mebench/attackers/`에 `BaseAttack`을 상속받아 구현합니다.
 2.  `configs/debug/`에 테스트용 설정을 추가합니다.
