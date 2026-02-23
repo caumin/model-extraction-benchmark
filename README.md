@@ -44,7 +44,7 @@ We support **17 state-of-the-art attacks**, faithfully re-implemented from their
 | | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | - | Inversion-based sample recovery. |
 | | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | [GitHub](https://github.com/ku-air/SwiftThief) | Contrastive learning (SimSiam) + Active selection. |
 | **Data-Free / Generative** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | [GitHub](https://github.com/cake-lab/datafree-model-extraction) | GAN-based query synthesis (Min-Max game). |
-| | **Dual Students (DS)** | Beetham et al. (ICLR 2023) | - | Two-student disagreement-driven data-free extraction. |
+| | **Dual Students (DS)** | Beetham et al. (ICLR 2023) | [GitHub](https://github.com/James-Beetham/dual_students) | Two-student disagreement-driven data-free extraction. |
 | | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | [GitHub](https://github.com/val-iisc/Hard-Label-Model-Stealing) | Diverse query synthesis with entropy maximization. |
 | | **DisGUIDE** | [Rosenthal et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | [GitHub](https://github.com/lin-tan/disguide) | Disagreement-guided data-free extraction with replay/diversity losses. |
 | | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | [GitHub](https://github.com/sanjaykariyappa/MAZE) | Zeroth-order gradient estimation. |
@@ -52,7 +52,7 @@ We support **17 state-of-the-art attacks**, faithfully re-implemented from their
 | | **GAME** | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | [GitHub](https://github.com/xythink/game-attack) | Adaptive category selection & GAN training. |
 | **Hybrid / Other** | **KnockoffNets** | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | [GitHub](https://github.com/tribhuvanesh/knockoffnets) | Reinforcement learning (Bandit) for class selection. |
 | | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | - | Large-scale offline augmentation of natural data. |
-| | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | - | Latent space evolution on pre-trained GANs. |
+| | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | [GitHub](https://github.com/antoniobarbalau/black-box-ripper) | Latent space evolution on pre-trained GANs. |
 
 ---
 

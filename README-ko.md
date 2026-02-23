@@ -43,7 +43,7 @@
 | | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | - | 역변환(Inversion) 기반 샘플 복원. |
 | | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | [GitHub](https://github.com/ku-air/SwiftThief) | 대조 학습(Contrastive Learning, SimSiam) + 능동 선택. |
 | **데이터 프리 / 생성형 (Generative)** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | [GitHub](https://github.com/cake-lab/datafree-model-extraction) | GAN 기반 쿼리 합성 (Min-Max 게임). |
-| | **Dual Students (DS)** | Beetham et al. (ICLR 2023) | - | 두 학생 모델 간 불일치 기반 데이터 프리 추출. |
+| | **Dual Students (DS)** | Beetham et al. (ICLR 2023) | [GitHub](https://github.com/James-Beetham/dual_students) | 두 학생 모델 간 불일치 기반 데이터 프리 추출. |
 | | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | [GitHub](https://github.com/val-iisc/Hard-Label-Model-Stealing) | 엔트로피 최대화를 통한 다양한 쿼리 합성. |
 | | **DisGUIDE** | [Rosenthal et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | [GitHub](https://github.com/lin-tan/disguide) | 불일치(disagreement) 기반 데이터 프리 추출 + replay/diversity 손실. |
 | | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | [GitHub](https://github.com/sanjaykariyappa/MAZE) | Zeroth-order 기울기 추정 (Gradient Estimation). |
@@ -51,7 +51,7 @@
 | | **GAME** | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | [GitHub](https://github.com/xythink/game-attack) | 적응형 카테고리 선택 및 GAN 학습. |
 | **하이브리드 / 기타** | **KnockoffNets** | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | [GitHub](https://github.com/tribhuvanesh/knockoffnets) | 강화학습(Bandit)을 이용한 클래스 선택. |
 | | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | - | 자연 이미지의 대규모 오프라인 증강(Augmentation). |
-| | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | - | 사전 학습된 GAN의 잠재 공간(Latent Space) 진화. |
+| | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | [GitHub](https://github.com/antoniobarbalau/black-box-ripper) | 사전 학습된 GAN의 잠재 공간(Latent Space) 진화. |
 
 ---
 
