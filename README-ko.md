@@ -33,24 +33,28 @@
 
 원 논문을 충실히 재구현한 **13가지 최신 공격 기법**을 지원합니다:
 
-| 카테고리 | 공격 이름 | 논문 | 핵심 전략 |
-| :--- | :--- | :--- | :--- |
-| **베이스라인** | **Random** | - | 후보 풀(Pool)에서의 균등 무작위 샘플링. |
-| **능동 학습 (Active Learning)** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | 불확실성(Uncertainty), K-Center, DFAL 샘플링 전략. |
-| | **Blackbox Dissector** | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | Grad-CAM 기반 중요 영역 삭제 및 샘플 선택. |
-| | **CloudLeak** | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | 적대적 예제(Adversarial Example) 생성 (FeatureFool). |
-| | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | 역변환(Inversion) 기반 샘플 복원. |
-| | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | 대조 학습(Contrastive Learning, SimSiam) + 능동 선택. |
-| **데이터 프리 / 생성형 (Generative)** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | GAN 기반 쿼리 합성 (Min-Max 게임). |
-| | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | 엔트로피 최대화를 통한 다양한 쿼리 합성. |
-| | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | Zeroth-order 기울기 추정 (Gradient Estimation). |
-| | **ES-Attack** | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | 진화 전략(Evolutionary Strategy)을 통한 쿼리 합성. |
-| | **GAME** | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | 적응형 카테고리 선택 및 GAN 학습. |
-| **하이브리드 / 기타** | **KnockoffNets** | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | 강화학습(Bandit)을 이용한 클래스 선택. |
-| | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | 자연 이미지의 대규모 오프라인 증강(Augmentation). |
-| | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | 사전 학습된 GAN의 잠재 공간(Latent Space) 진화. |
+| 카테고리 | 공격 이름 | 논문 | Official Repo | 핵심 전략 |
+| :--- | :--- | :--- | :--- | :--- |
+| **베이스라인** | **Random** | - | - | 후보 풀(Pool)에서의 균등 무작위 샘플링. |
+| **능동 학습 (Active Learning)** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | - | 불확실성(Uncertainty), K-Center, DFAL 샘플링 전략. |
+| | **Blackbox Dissector** | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | [GitHub](https://github.com/yxwang-10/Blackbox-Dissector) | Grad-CAM 기반 중요 영역 삭제 및 샘플 선택. |
+| | **CloudLeak** | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | [GitHub](https://github.com/yunyuntsai/DNN-Model-Stealing) | 적대적 예제(Adversarial Example) 생성 (FeatureFool). |
+| | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | - | 역변환(Inversion) 기반 샘플 복원. |
+| | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | [GitHub](https://github.com/ku-air/SwiftThief) | 대조 학습(Contrastive Learning, SimSiam) + 능동 선택. |
+| **데이터 프리 / 생성형 (Generative)** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | [GitHub](https://github.com/cake-lab/datafree-model-extraction) | GAN 기반 쿼리 합성 (Min-Max 게임). |
+| | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | [GitHub](https://github.com/val-iisc/Hard-Label-Model-Stealing) | 엔트로피 최대화를 통한 다양한 쿼리 합성. |
+| | **DisGUIDE** | [Rosenthal et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | [GitHub](https://github.com/lin-tan/disguide) | 불일치(disagreement) 기반 데이터 프리 추출 + replay/diversity 손실. |
+| | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | [GitHub](https://github.com/sanjaykariyappa/MAZE) | Zeroth-order 기울기 추정 (Gradient Estimation). |
+| | **ES-Attack** | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | - | 진화 전략(Evolutionary Strategy)을 통한 쿼리 합성. |
+| | **GAME** | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | [GitHub](https://github.com/xythink/game-attack) | 적응형 카테고리 선택 및 GAN 학습. |
+| **하이브리드 / 기타** | **KnockoffNets** | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | [GitHub](https://github.com/tribhuvanesh/knockoffnets) | 강화학습(Bandit)을 이용한 클래스 선택. |
+| | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | - | 자연 이미지의 대규모 오프라인 증강(Augmentation). |
+| | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | - | 사전 학습된 GAN의 잠재 공간(Latent Space) 진화. |
 
 ---
+
+공격별 구현 출처(제안 논문 + 공식 레포 이식 링크)는
+`docs/reference/ATTACK_REFERENCES.md`에서 확인할 수 있습니다.
 
 ## ⚡ 설치 방법
 
@@ -64,6 +68,24 @@ pip install -e .
 # 개발 의존성 설치 (테스트, 린팅 등)
 pip install -e ".[dev]"
 ```
+
+---
+
+## ✅ 빠른 시작 (공개 배포 워크플로우)
+
+```bash
+# 1) 스모크 실행 (권장 시작점)
+bash scripts/launch/run_smoke.sh cuda:0
+
+# 2) 매트릭스 설정 생성
+python generate_configs.py
+
+# 3) 완료된 실행 결과 집계
+python aggregate_matrix.py
+```
+
+릴리즈/실행 체크리스트:
+- `docs/operations/ULTRAWORK_GITHUB_RELEASE_SETA_CHECKLIST.md`
 
 ---
 
@@ -84,7 +106,7 @@ v1.0 벤치마크의 전체 실험(매트릭스 프로토콜)을 재현합니다
 python generate_configs.py
 
 # 2. 실험 실행 (순차 실행 또는 쉘 스크립트로 병렬화 가능)
-bash run_matrix.sh
+bash scripts/launch/run_matrix.sh
 
 # 3. 결과 집계 (CSV/LaTeX 포맷)
 python aggregate_matrix.py
@@ -96,18 +118,16 @@ python aggregate_matrix.py
 ### 3. 스모크 실행 (권장 시작점)
 
 ```bash
-bash run_smoke.sh cuda:0
+bash scripts/launch/run_smoke.sh cuda:0
 ```
 
-### 4. 논문별 재현 파이프라인 실행
+### 4. 공개 배포 범위 안내
 
-```bash
-python repro/run_experiment.py --paper 2020_pal_activethief --profile smoke --device cuda:0
-```
+공개 배포본은 위의 `mebench` 프레임워크 실행 워크플로우에 한정됩니다.
+`papers/`, `repro/`, `official_repo_clones/`는 내부/연구 자산으로
+오픈소스 배포 범위에서 제외됩니다.
 
-참고:
-- Pool 기반 공격은 surrogate 데이터셋에 의존하므로 SET별로 생성됩니다.
-- Data-free(합성) 공격은 surrogate에 의존하지 않으므로 victim별 1회만 생성됩니다.
+명시적 포함/제외 규칙은 `RELEASE_SCOPE.md`를 따릅니다.
 
 ---
 
@@ -115,37 +135,26 @@ python repro/run_experiment.py --paper 2020_pal_activethief --profile smoke --de
 
 ```
 model-extraction-benchmark/
-├── mebench/                 # 핵심 패키지
-│   ├── attackers/           # 공격 구현체 (플러그인)
-│   ├── core/                # 엔진, 상태 관리, 검증 로직 (안정화됨)
-│   ├── models/              # 대체 모델 아키텍처, GAN
-│   ├── oracles/             # 피해 모델(Victim) 래퍼
-│   └── eval/                # 메트릭 및 평가 로직
-├── configs/                 # YAML 설정 파일
-│   ├── matrix/              # 생성된 전체 벤치마크 설정 (런타임 생성)
-│   ├── smoke/               # 추적되는 최소 스모크 설정
-│   └── paper_mode/          # 논문 모드 생성 설정
+├── mebench/                 # 핵심 벤치마크 패키지
+├── configs/
+│   └── smoke/               # 추적되는 최소 설정
 ├── scripts/
-│   ├── launch/              # 공식 실행 런처
-│   └── *.py                 # 유틸리티 스크립트(피해 모델 train/eval 등)
-├── docs/                    # 문서
-├── repro/                   # 논문 재현 워크플로우
-├── papers/
-│   ├── *.pdf                # 참고 논문 PDF
-│   ├── paper_text/          # 로컬 텍스트 추출물(표준 위치)
-│   └── index.csv            # 논문 메타데이터/출처 인덱스
-├── archive/                 # 보류/레거시 파일 아카이브
-├── runs/                    # 실험 결과물 (메트릭, 로그)
-├── data/                    # 데이터셋 (CIFAR, MNIST 등)
-└── tests/                   # 계약 검증 테스트 코드
+│   └── launch/              # 공식 실행 런처
+├── docs/
+│   ├── design/
+│   └── reference/
+├── tests/                   # 계약/회귀 테스트
+├── generate_configs.py
+├── aggregate_matrix.py
+└── RELEASE_SCOPE.md
 ```
 
-## 데이터 및 논문 라이선스 주의사항
+## 공개 배포 범위
 
-- `data/`, `runs/`, 로그, 체크포인트, 임시 실험 산출물은 로컬/런타임 아티팩트이며 기본적으로 Git 추적 대상이 아닙니다.
-- 생성되는 matrix/paper_mode 설정 파일은 런타임 산출물로 간주하며 기본적으로 gitignore 처리됩니다.
-- 논문 full-text 재배포는 출판사 정책에 의해 제한될 수 있으므로, 권한이 확인된 경우에만 `papers/paper_text/`에 보관하세요.
-- 재배포 권한이 불명확하면 full-text 대신 메타데이터와 출처 정보(`papers/index.csv`)를 유지하는 방식을 권장합니다.
+- 공개 배포는 `mebench` 실험 프레임워크 및 실행/검증에 필요한 자산만 포함합니다.
+- `papers/`, `repro/`, `official_repo_clones/`는 배포 대상에서 제외합니다.
+- `data/`, `runs/`, 로그, 체크포인트, 생성 리포트 등 로컬 런타임 산출물은 배포 대상이 아닙니다.
+- 상세 기준은 `RELEASE_SCOPE.md`를 따릅니다.
 
 ---
 
@@ -157,6 +166,7 @@ model-extraction-benchmark/
 1.  **예산 (Budget)**: `1 쿼리` = `1 이미지`. 배치 단위 쿼리는 `batch_size`만큼 예산이 차감됩니다.
 2.  **오라클 (Oracle)**: 기본 `soft_prob` 모드는 온도 `T=1.0`을 사용합니다. `hard_top1`은 라벨을 반환합니다.
 3.  **결정론 (Determinism)**: 피해 모델은 항상 `eval()`/`no_grad()` 상태로 실행됩니다. Track A의 시드는 고정됩니다.
+4.  **BlackBox MLaaS 입력 계약**: 공격자는 Victim의 내부 정규화 정보를 알지 못한다고 가정합니다. 쿼리 이미지는 그대로 전송되며, 런타임 쿼리 경로에서는 wrapper 변환 없이 Victim 추론으로 직접 전달됩니다. Pool 기반 공격은 `[0,1]`, Data-free 공격은 `[-1,1]` 스케일로 쿼리하며 victim 쿼리 경로에서 attacker-side tanh->unit 변환을 하지 않습니다. 평가는 공정 비교를 위해 공통 정규화 test loader를 사용합니다.
 
 ---
 

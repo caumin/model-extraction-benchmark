@@ -34,24 +34,28 @@
 
 We support **13 state-of-the-art attacks**, faithfully re-implemented from their original papers:
 
-| Category | Attack | Paper | Key Strategy |
-| :--- | :--- | :--- | :--- |
-| **Baseline** | **Random** | - | Uniform random sampling from pool. |
-| **Active Learning** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | Uncertainty, K-Center, and DFAL sampling. |
-| | **Blackbox Dissector** | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | Grad-CAM based erasing & selection. |
-| | **CloudLeak** | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | Adversarial example generation (FeatureFool). |
-| | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | Inversion-based sample recovery. |
-| | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | Contrastive learning (SimSiam) + Active selection. |
-| **Data-Free / Generative** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | GAN-based query synthesis (Min-Max game). |
-| | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | Diverse query synthesis with entropy maximization. |
-| | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | Zeroth-order gradient estimation. |
-| | **ES-Attack** | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | Evolutionary strategy for query synthesis. |
-| | **GAME** | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | Adaptive category selection & GAN training. |
-| **Hybrid / Other** | **KnockoffNets** | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | Reinforcement learning (Bandit) for class selection. |
-| | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | Large-scale offline augmentation of natural data. |
-| | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | Latent space evolution on pre-trained GANs. |
+| Category | Attack | Paper | Official Repo | Key Strategy |
+| :--- | :--- | :--- | :--- | :--- |
+| **Baseline** | **Random** | - | - | Uniform random sampling from pool. |
+| **Active Learning** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | - | Uncertainty, K-Center, and DFAL sampling. |
+| | **Blackbox Dissector** | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | [GitHub](https://github.com/yxwang-10/Blackbox-Dissector) | Grad-CAM based erasing & selection. |
+| | **CloudLeak** | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | [GitHub](https://github.com/yunyuntsai/DNN-Model-Stealing) | Adversarial example generation (FeatureFool). |
+| | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | - | Inversion-based sample recovery. |
+| | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | [GitHub](https://github.com/ku-air/SwiftThief) | Contrastive learning (SimSiam) + Active selection. |
+| **Data-Free / Generative** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | [GitHub](https://github.com/cake-lab/datafree-model-extraction) | GAN-based query synthesis (Min-Max game). |
+| | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | [GitHub](https://github.com/val-iisc/Hard-Label-Model-Stealing) | Diverse query synthesis with entropy maximization. |
+| | **DisGUIDE** | [Rosenthal et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | [GitHub](https://github.com/lin-tan/disguide) | Disagreement-guided data-free extraction with replay/diversity losses. |
+| | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | [GitHub](https://github.com/sanjaykariyappa/MAZE) | Zeroth-order gradient estimation. |
+| | **ES-Attack** | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | - | Evolutionary strategy for query synthesis. |
+| | **GAME** | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | [GitHub](https://github.com/xythink/game-attack) | Adaptive category selection & GAN training. |
+| **Hybrid / Other** | **KnockoffNets** | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | [GitHub](https://github.com/tribhuvanesh/knockoffnets) | Reinforcement learning (Bandit) for class selection. |
+| | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | - | Large-scale offline augmentation of natural data. |
+| | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | - | Latent space evolution on pre-trained GANs. |
 
 ---
+
+Implementation provenance (paper + official repo port links) is documented in
+`docs/reference/ATTACK_REFERENCES.md`.
 
 ## ⚡ Installation
 
@@ -65,6 +69,24 @@ pip install -e .
 # Install dev dependencies (testing, linting)
 pip install -e ".[dev]"
 ```
+
+---
+
+## ✅ Quick Start (Public Workflow)
+
+```bash
+# 1) Smoke run (recommended first)
+bash scripts/launch/run_smoke.sh cuda:0
+
+# 2) Generate matrix configs
+python generate_configs.py
+
+# 3) Aggregate completed runs
+python aggregate_matrix.py
+```
+
+For release and execution checklists, see:
+- `docs/operations/ULTRAWORK_GITHUB_RELEASE_SETA_CHECKLIST.md`
 
 ---
 
@@ -85,7 +107,7 @@ Reproduce the full v1.0 benchmark results (Matrix Protocol).
 python generate_configs.py
 
 # 2. Run experiments (sequentially or parallelize via shell)
-bash run_matrix.sh
+bash scripts/launch/run_matrix.sh
 
 # 3. Aggregate results into CSV/LaTeX
 python aggregate_matrix.py
@@ -97,18 +119,16 @@ Root-level `run_*.sh`/`run_*.ps1` files are compatibility wrappers.
 ### 3. Smoke Run (Recommended First)
 
 ```bash
-bash run_smoke.sh cuda:0
+bash scripts/launch/run_smoke.sh cuda:0
 ```
 
-### 4. Reproduction Pipeline (Per Paper)
+### 4. Public Release Note
 
-```bash
-python repro/run_experiment.py --paper 2020_pal_activethief --profile smoke --device cuda:0
-```
+This public distribution is scoped to the `mebench` framework workflows above.
+Private/internal research assets such as `papers/`, `repro/`, and `official_repo_clones/`
+are intentionally excluded from the open-source release.
 
-Notes:
-- Pool-based attacks depend on the surrogate dataset, so they are generated per SET.
-- Data-free (synthetic) attacks do not depend on the surrogate; configs are generated once per victim.
+For explicit include/exclude rules, see `RELEASE_SCOPE.md`.
 
 ---
 
@@ -116,40 +136,26 @@ Notes:
 
 ```
 model-extraction-benchmark/
-├── mebench/                 # Core package
-│   ├── attackers/           # Attack implementations (Plugins)
-│   ├── core/                # Engine, State, Validation (Stable)
-│   ├── models/              # Substitute architectures, GANs
-│   ├── oracles/             # Victim model wrappers
-│   └── eval/                # Metrics & Evaluators
-├── configs/                 # YAML Configuration files
-│   ├── matrix/              # Generated full-benchmark configs (runtime-generated)
-│   ├── smoke/               # Minimal smoke configs (tracked)
-│   └── paper_mode/          # Paper-mode generated configs
+├── mebench/                 # Core benchmark package
+├── configs/
+│   └── smoke/               # Minimal tracked configs
 ├── scripts/
-│   ├── launch/              # Official launcher scripts
-│   └── *.py                 # Utility scripts (victim train/eval, checkpoints)
-├── docs/                    # Documentation
-│   ├── reference/           # Implementation details & notes
-│   ├── technical_reports/   # Analysis & experiment reports
-│   └── archive/             # Archived design documents
-├── repro/                   # Paper reproduction workflows
-├── papers/
-│   ├── *.pdf                # Reference paper PDFs
-│   ├── paper_text/          # Local text extracts (canonical location)
-│   └── index.csv            # Paper metadata/provenance index
-├── archive/                 # Archived legacy/uncertain files
-├── runs/                    # Experiment outputs (metrics, logs)
-├── data/                    # Datasets (CIFAR, MNIST, etc.)
-└── tests/                   # Contract validation tests
+│   └── launch/              # Official launcher scripts
+├── docs/
+│   ├── design/
+│   └── reference/
+├── tests/                   # Contract and regression tests
+├── generate_configs.py
+├── aggregate_matrix.py
+└── RELEASE_SCOPE.md
 ```
 
-## Data and Paper Licensing Notes
+## Public Release Scope
 
-- `data/`, `runs/`, logs, checkpoints, and temporary experiment outputs are local/runtime artifacts and are not intended for Git tracking.
-- Generated matrix/paper-mode configs are runtime artifacts by default and are git-ignored.
-- Paper full-text redistribution may be restricted by publisher terms. Keep local text extracts in `papers/paper_text/` only when usage rights are confirmed.
-- When redistribution rights are unclear, store metadata and retrieval provenance (see `papers/index.csv`) instead of shipping full text.
+- Public release targets only the `mebench` experiment framework and related runnable/testable assets.
+- `papers/`, `repro/`, and `official_repo_clones/` are intentionally excluded from distribution.
+- Local runtime artifacts (`data/`, `runs/`, logs, checkpoints, generated reports) are not part of source distribution.
+- See `RELEASE_SCOPE.md` for full include/exclude rules.
 
 ---
 
@@ -163,7 +169,7 @@ For implementation details of specific attacks, see [docs/reference/](docs/refer
 1.  **Budget**: `1 query` = `1 image`. Batched queries count as `batch_size`.
 2.  **Oracle**: Default `soft_prob` uses Temperature `T=1.0`. `hard_top1` returns labels.
 3.  **Determinism**: Victims run in `eval()`/`no_grad()`. Seeds are fixed for Track A.
-4.  **Input Scaling (Benchmark-Wide)**: The benchmark contract assumes **all oracle/eval inputs are in `[0, 1]`** and applies **no dataset mean/std normalization**. Attacks must keep `[0,1]` as the canonical image scale. If an attack uses a generator with `tanh` outputs in `[-1, 1]`, convert exactly once via `(x * 0.5 + 0.5)` and clamp to `[0,1]` (DFME-style). If a paper/official repo normalizes to `[-1,1]` (e.g., `(x-0.5)/0.5`), our implementations may deviate and will note it in code comments to preserve benchmark consistency.
+4.  **BlackBox MLaaS Input Contract**: The attacker does not know victim normalization. Query images are sent as-is and forwarded directly to victim inference (no runtime wrapper transform at query time). Pool-based attacks query in `[0,1]`; data-free attacks query in `[-1,1]` and must not apply attacker-side tanh->unit conversion on the victim query path. Evaluation uses a shared, normalized test loader for fair comparison.
 
 ### 🔄 Protocol v1.2: Track Logic & Control Experiments
 To ensure fair attribution of performance gains, we enforce **Protocol v1.2** branching rules:
