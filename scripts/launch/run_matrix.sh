@@ -8,8 +8,13 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 MATRIX_DIR="${MATRIX_DIR:-configs/matrix}"
 MATRIX_PATTERN="${MATRIX_PATTERN:-*.yaml}"
 MEBENCH_DEVICE="${MEBENCH_DEVICE:-cuda:0}"
-POOL_BUDGET="${POOL_BUDGET:-20000}"
-SYNTHETIC_BUDGET="${SYNTHETIC_BUDGET:-20000000}"
+SET_A_POOL_BUDGET="${SET_A_POOL_BUDGET:-10000}"
+SET_A_SYNTHETIC_BUDGET="${SET_A_SYNTHETIC_BUDGET:-10000000}"
+SET_B_POOL_BUDGET="${SET_B_POOL_BUDGET:-20000}"
+SET_B_SYNTHETIC_BUDGET="${SET_B_SYNTHETIC_BUDGET:-20000000}"
+# Optional legacy global overrides
+POOL_BUDGET="${POOL_BUDGET:-}"
+SYNTHETIC_BUDGET="${SYNTHETIC_BUDGET:-}"
 MATRIX_LIMIT="${MATRIX_LIMIT:-0}"
 GENERATE_CONFIGS="${GENERATE_CONFIGS:-1}"
 INCLUDE_BOTH_HARD="${INCLUDE_BOTH_HARD:-1}"
@@ -19,9 +24,17 @@ if [[ "$GENERATE_CONFIGS" != "0" ]]; then
     generate_configs.py
     --out "$MATRIX_DIR"
     --device "$MEBENCH_DEVICE"
-    --pool-budget "$POOL_BUDGET"
-    --synthetic-budget "$SYNTHETIC_BUDGET"
+    --set-a-pool-budget "$SET_A_POOL_BUDGET"
+    --set-a-synthetic-budget "$SET_A_SYNTHETIC_BUDGET"
+    --set-b-pool-budget "$SET_B_POOL_BUDGET"
+    --set-b-synthetic-budget "$SET_B_SYNTHETIC_BUDGET"
   )
+  if [[ -n "$POOL_BUDGET" ]]; then
+    args+=(--pool-budget "$POOL_BUDGET")
+  fi
+  if [[ -n "$SYNTHETIC_BUDGET" ]]; then
+    args+=(--synthetic-budget "$SYNTHETIC_BUDGET")
+  fi
   if [[ "$INCLUDE_BOTH_HARD" != "0" ]]; then
     args+=(--include-both-hard)
   fi

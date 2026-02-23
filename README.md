@@ -28,6 +28,18 @@
   - **Track B (Attacker Original)**: Preserves the *native loop* (online/active) dynamics for fidelity.
 - **🧪 Reproducibility**: Deterministic seeds for initialization, data sampling, and victim inference.
 
+### Experiment Sets (Current)
+
+| Set | Victim | Substitute | Surrogate | Input | Query Budget |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **SET-A1** | LeNet on MNIST (trained in-project) | LeNet | ILSVRC2012 train (ImageNet) | `1x28x28` | `10k` (pool/hybrid), `10m` (synthetic) |
+| **SET-B1** | ResNet34 on CIFAR10 (DFAD official checkpoint) | ResNet18 | ILSVRC2012 train (ImageNet) | `3x32x32` | `20k` (pool/hybrid), `20m` (synthetic) |
+
+Notes:
+- Seeds default to `0,1,2` in matrix generation.
+- `SET-B1` victim checkpoint follows DFAD: `https://github.com/VainF/Data-Free-Adversarial-Distillation`.
+- Matrix configs are generated from `generate_configs.py` into `configs/matrix/`.
+
 ---
 
 ## 🛡️ Supported Attacks (v1.0)

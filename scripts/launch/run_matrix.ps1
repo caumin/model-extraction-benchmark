@@ -23,8 +23,12 @@ try {
     $pythonBin = Get-EnvOrDefault -Name "PYTHON_BIN" -Default "python"
 
     [int]$maxRuns = [int](Get-EnvOrDefault -Name "MATRIX_LIMIT" -Default "0")
-    [int]$poolBudget = [int](Get-EnvOrDefault -Name "POOL_BUDGET" -Default "20000")
-    [int]$syntheticBudget = [int](Get-EnvOrDefault -Name "SYNTHETIC_BUDGET" -Default "20000000")
+    [int]$setAPoolBudget = [int](Get-EnvOrDefault -Name "SET_A_POOL_BUDGET" -Default "10000")
+    [int]$setASyntheticBudget = [int](Get-EnvOrDefault -Name "SET_A_SYNTHETIC_BUDGET" -Default "10000000")
+    [int]$setBPoolBudget = [int](Get-EnvOrDefault -Name "SET_B_POOL_BUDGET" -Default "20000")
+    [int]$setBSyntheticBudget = [int](Get-EnvOrDefault -Name "SET_B_SYNTHETIC_BUDGET" -Default "20000000")
+    $poolBudgetOverride = [System.Environment]::GetEnvironmentVariable("POOL_BUDGET")
+    $syntheticBudgetOverride = [System.Environment]::GetEnvironmentVariable("SYNTHETIC_BUDGET")
     [int]$generateConfigs = [int](Get-EnvOrDefault -Name "GENERATE_CONFIGS" -Default "1")
     [int]$includeBothHard = [int](Get-EnvOrDefault -Name "INCLUDE_BOTH_HARD" -Default "1")
 
@@ -33,9 +37,17 @@ try {
             "generate_configs.py",
             "--out", $matrixDir,
             "--device", $device,
-            "--pool-budget", "$poolBudget",
-            "--synthetic-budget", "$syntheticBudget"
+            "--set-a-pool-budget", "$setAPoolBudget",
+            "--set-a-synthetic-budget", "$setASyntheticBudget",
+            "--set-b-pool-budget", "$setBPoolBudget",
+            "--set-b-synthetic-budget", "$setBSyntheticBudget"
         )
+        if (-not [string]::IsNullOrWhiteSpace($poolBudgetOverride)) {
+            $args += @("--pool-budget", "$poolBudgetOverride")
+        }
+        if (-not [string]::IsNullOrWhiteSpace($syntheticBudgetOverride)) {
+            $args += @("--synthetic-budget", "$syntheticBudgetOverride")
+        }
         if ($includeBothHard -ne 0) {
             $args += "--include-both-hard"
         }

@@ -27,6 +27,18 @@
   - **Track B (공격자 원본 프로토콜)**: 온라인/능동 학습 등 공격 고유의 *네이티브 루프* 동적 특성을 보존하여 평가합니다.
 - **🧪 재현성**: 초기화, 데이터 샘플링, 피해 모델(Victim) 추론에 대해 결정론적(Deterministic) 시드를 사용합니다.
 
+### 실험 세트 (현재 기준)
+
+| Set | Victim | Substitute | Surrogate | 입력 | Query Budget |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **SET-A1** | MNIST LeNet (프로젝트 내 스크립트로 학습) | LeNet | ILSVRC2012 train (ImageNet) | `1x28x28` | `10k` (pool/hybrid), `10m` (synthetic) |
+| **SET-B1** | CIFAR10 ResNet34 (DFAD 공식 체크포인트) | ResNet18 | ILSVRC2012 train (ImageNet) | `3x32x32` | `20k` (pool/hybrid), `20m` (synthetic) |
+
+참고:
+- 매트릭스 생성 기본 시드는 `0,1,2` 입니다.
+- `SET-B1` victim 체크포인트는 DFAD 레포 기준입니다: `https://github.com/VainF/Data-Free-Adversarial-Distillation`.
+- 매트릭스 설정은 `generate_configs.py`가 `configs/matrix/`에 생성합니다.
+
 ---
 
 ## 🛡️ 지원되는 공격 (v1.0)

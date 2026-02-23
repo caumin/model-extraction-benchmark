@@ -97,8 +97,12 @@ def generate_configs(
     out_dir: Path,
     device: str,
     seeds: List[int],
-    pool_budget: int,
-    synthetic_budget: int,
+    pool_budget: Optional[int],
+    synthetic_budget: Optional[int],
+    set_a_pool_budget: int,
+    set_a_synthetic_budget: int,
+    set_b_pool_budget: int,
+    set_b_synthetic_budget: int,
     include_both_hard: bool,
     clean: bool,
     pool_num_workers: int,
@@ -106,6 +110,20 @@ def generate_configs(
     substitute_train_num_workers: Optional[int],
     substitute_val_num_workers: Optional[int],
 ) -> int:
+    set_budgets: Dict[str, Dict[str, int]] = {
+        "SET-A1": {
+            "pool": int(set_a_pool_budget),
+            "synthetic": int(set_a_synthetic_budget),
+        },
+        "SET-B1": {
+            "pool": int(set_b_pool_budget),
+            "synthetic": int(set_b_synthetic_budget),
+        },
+    }
+
+    global_pool_budget = int(pool_budget) if pool_budget is not None else None
+    global_synthetic_budget = int(synthetic_budget) if synthetic_budget is not None else None
+
     setups = [
         Setup(
             set_id="SET-A1",
@@ -285,7 +303,24 @@ def generate_configs(
                 canonical = synthetic_canonical_by_victim.get(victim_key)
                 if canonical is not None and setup.set_id != canonical.set_id:
                     continue
-            max_budget = _budget_for_kind(attack.kind, pool_budget=pool_budget, synthetic_budget=synthetic_budget)
+            set_budget_cfg = set_budgets.get(setup.set_id)
+            if set_budget_cfg is None:
+                raise ValueError(f"Missing budget policy for setup: {setup.set_id}")
+
+            if attack.kind == "pool":
+                max_budget = (
+                    int(global_pool_budget)
+                    if global_pool_budget is not None
+                    else int(set_budget_cfg["pool"])
+                )
+            elif attack.kind == "synthetic":
+                max_budget = (
+                    int(global_synthetic_budget)
+                    if global_synthetic_budget is not None
+                    else int(set_budget_cfg["synthetic"])
+                )
+            else:
+                raise ValueError(f"Unknown attack kind: {attack.kind}")
             checkpoints = _checkpoints_for_budget(max_budget)
 
             victim_id = _victim_id(setup)
@@ -1226,8 +1261,22 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--out", type=str, default="configs/matrix")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
-    parser.add_argument("--pool-budget", type=int, default=30_000)
-    parser.add_argument("--synthetic-budget", type=int, default=30_000_000)
+    parser.add_argument(
+        "--pool-budget",
+        type=int,
+        default=None,
+        help="Global pool budget override for all sets (default: use per-set budgets)",
+    )
+    parser.add_argument(
+        "--synthetic-budget",
+        type=int,
+        default=None,
+        help="Global synthetic budget override for all sets (default: use per-set budgets)",
+    )
+    parser.add_argument("--set-a-pool-budget", type=int, default=10_000)
+    parser.add_argument("--set-a-synthetic-budget", type=int, default=10_000_000)
+    parser.add_argument("--set-b-pool-budget", type=int, default=20_000)
+    parser.add_argument("--set-b-synthetic-budget", type=int, default=20_000_000)
     parser.add_argument(
         "--include-both-hard",
         action="store_true",
@@ -1269,8 +1318,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         out_dir=out_dir,
         device=str(args.device),
         seeds=list(args.seeds),
-        pool_budget=int(args.pool_budget),
-        synthetic_budget=int(args.synthetic_budget),
+        pool_budget=(int(args.pool_budget) if args.pool_budget is not None else None),
+        synthetic_budget=(int(args.synthetic_budget) if args.synthetic_budget is not None else None),
+        set_a_pool_budget=int(args.set_a_pool_budget),
+        set_a_synthetic_budget=int(args.set_a_synthetic_budget),
+        set_b_pool_budget=int(args.set_b_pool_budget),
+        set_b_synthetic_budget=int(args.set_b_synthetic_budget),
         include_both_hard=bool(args.include_both_hard),
         clean=(not args.no_clean),
         pool_num_workers=int(args.pool_num_workers),
