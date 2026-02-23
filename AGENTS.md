@@ -314,7 +314,9 @@ class BaseAttack:
 class Oracle:
     def query(self, x_batch: torch.Tensor) -> OracleOutput:
         """Query victim model with batch of images."""
-        # Apply normalization, run in eval/no_grad, enforce output mode
+        # Treat x_batch as external MLaaS input and apply victim-side
+        # preprocessing/normalization internally before inference.
+        # Run in eval/no_grad and enforce output mode.
         # Decrement budget by x_batch.shape[0]
         ...
 ```
@@ -657,10 +659,12 @@ End
 | Set ID | Victim (Data/Arch) | Surrogate Dataset | Substitute Arch | Budget | Seeds |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **SET-A1** | MNIST / LeNet-5 | **ImageNet (ImageFolder, 100k subset; grayscale+28x28)** | LeNet-5 | Pool: 20k / Data-free: 20m | 0, 1, 2 |
-| **SET-B1** | CIFAR10 / ResNet18 | **ImageNet (ImageFolder, 100k subset; RGB+32x32)** | ResNet18 | Pool: 20k / Data-free: 20m | 0, 1, 2 |
+| **SET-B1** | CIFAR10 / ResNet34_8x (DFAD official checkpoint) | **ImageNet (ImageFolder, 100k subset; RGB+32x32)** | ResNet18 | Pool: 20k / Data-free: 20m | 0, 1, 2 |
 
 ### 2. Global Contract Updates
-- **Normalization**: Additional mean/std normalization has been **removed**. All inputs are assumed to be in **[0, 1] scale** to ensure compatibility with Data-Free attacks (DFME, MAZE, etc.).
+- **BlackBox MLaaS Input Contract**: The attacker does not know victim-internal normalization. Query images are sent as-is to the victim endpoint, the victim applies its own internal preprocessing/normalization before inference, and then returns responses.
+- **Substitute Input Scale Policy**: Pool-based attacks query and train substitutes on `[0,1]` tensors; data-free attacks query and train substitutes on `[-1,1]` tensors. Data-free victim query path must keep tanh tensors as-is (no attacker-side tanh->unit conversion). Runtime victim query path uses direct model input (no wrapper-side query normalization), while evaluation uses a shared normalized test loader.
+- **SET-B Victim Checkpoint**: Use the same victim as `repro/papers/2021_truong_dfme/` (`victim_id: cifar10_resnet34_8x_official`, `checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt`).
 - **Learning Rate**: Default substitute LR is fixed to **0.01** across all experiments.
 - **Data Loaders**:
   - ImageNet surrogate is loaded via `ImageFolder` and deterministically subsampled to 100k images.

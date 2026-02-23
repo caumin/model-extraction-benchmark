@@ -98,7 +98,18 @@ An experiment selects exactly **one** victim dataset profile:
 | Sewer-ML | 224×224 | 3 |
 
 ### 2.2 Normalization / Preprocessing Assumption
-The attacker is assumed to know and use the **same preprocessing/normalization** as the victim.
+This benchmark assumes a **BlackBox MLaaS** victim interface:
+- The attacker does **not** know the victim's internal preprocessing/normalization.
+- The attacker sends an image query as-is.
+- The MLaaS victim applies its own internal preprocessing/normalization, runs inference, and returns the response.
+
+Scale policy at the attacker boundary:
+- Pool-based attacks query images in `[0,1]` scale.
+- Data-free attacks query synthesized images in `[-1,1]` scale.
+- Data-free victim query path must not apply attacker-side tanh->unit conversion.
+- Runtime victim query path uses direct model input (no wrapper-side query normalization).
+- Evaluation uses a shared normalized test loader for fair comparison.
+- The queried images are used **as-is** for substitute training data (no victim-normalization reconstruction at benchmark boundary).
 
 ---
 
@@ -151,7 +162,7 @@ Each run MUST include victim metadata fields:
 Substitute architecture is configurable per run (e.g., LeNet / ResNet / MobileNet / VGG).
 
 Rules:
-- Preprocessing/normalization MUST match the victim profile.
+- Substitute training uses attacker-visible query tensors as collected (`[0,1]` for pool-based, `[-1,1]` for data-free), unless an attack explicitly defines an internal conversion step.
 - Training augmentations are **disallowed by default**, unless an attack definition explicitly requires them (future extensions).
 
 ---
@@ -363,7 +374,7 @@ Normalize oracle output to a single container:
 - `oracle.query(x_batch) -> OracleOutput`
 
 Mandatory oracle behavior:
-- Apply victim preprocessing/normalization per profile
+- Treat query tensors as external MLaaS inputs; apply victim preprocessing/normalization internally before inference
 - Enforce output mode
 - Run victim in `eval()` and `no_grad()` (see §4.1)
 - Budget accounting is image-count based
@@ -510,4 +521,3 @@ To prevent silent contract violations:
 - Transferability metrics (FGSM/PGD/CW)
 - Defenses as oracle wrappers
 - Standardized surrogate sources for Sewer-ML
-

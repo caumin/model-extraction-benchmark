@@ -36,6 +36,10 @@ coverage.xml
 runs/
 /data/
 !mebench/data/
+/papers/
+/repro/
+/official_repo_clones/
+/archive/
 /configs/matrix/
 /configs/paper_mode/
 /configs/tmp_channel_check/
@@ -43,10 +47,6 @@ analysis_results/
 logs/
 checkpoints/
 /*.pdf
-papers/*.pdf
-papers/*.txt
-!papers/README.md
-!papers/paper_text/README.md
 *.log
 *.pt
 *.pth
@@ -71,13 +71,8 @@ temp/
 temp_configs/
 temp_*/
 TEMP_*/
-official_repo_clones/
 .paper_text/
 /paper_text/
-papers/paper_text/*.txt
-!papers/paper_text/
-!papers/paper_text/README.md
-archive/papers_duplicates/*.txt
 NUL
 %TEMP%/
 %TMPDIR%/
