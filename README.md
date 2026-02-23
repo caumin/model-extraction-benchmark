@@ -113,7 +113,6 @@ python aggregate_matrix.py
 ```
 
 Official launcher scripts are in `scripts/launch/`.
-Root-level `run_*.sh`/`run_*.ps1` files are compatibility wrappers.
 
 ### 3. Smoke Run (Recommended First)
 

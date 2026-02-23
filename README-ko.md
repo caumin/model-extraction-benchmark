@@ -112,7 +112,6 @@ python aggregate_matrix.py
 ```
 
 공식 런처 스크립트는 `scripts/launch/`에 정리되어 있습니다.
-루트의 `run_*.sh`/`run_*.ps1` 파일은 하위 호환을 위한 wrapper입니다.
 
 ### 3. 스모크 실행 (권장 시작점)
 
