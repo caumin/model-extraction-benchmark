@@ -14,8 +14,8 @@ Potentially redundant root wrappers (public docs already prefer `scripts/launch/
 - `run_parallel.ps1`
 - `run_swiftthief.ps1`
 
-Proposed action:
-- Keep one compatibility wrapper per platform or remove all root wrappers and keep only `scripts/launch/`.
+Status:
+- Root-level legacy wrappers were removed; launch entrypoints are now only under `scripts/launch/`.
 
 ## 2) Analysis Scripts Scope Clarification
 

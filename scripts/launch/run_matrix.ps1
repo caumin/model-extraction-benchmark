@@ -12,68 +12,86 @@ function Get-EnvOrDefault {
     return $value
 }
 
-$matrixDir = Get-EnvOrDefault -Name "MATRIX_DIR" -Default "configs/matrix"
-$device = Get-EnvOrDefault -Name "MEBENCH_DEVICE" -Default "cuda:0"
-$pattern = Get-EnvOrDefault -Name "MATRIX_PATTERN" -Default "*.yaml"
-$pythonBin = Get-EnvOrDefault -Name "PYTHON_BIN" -Default "python"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
 
-[int]$maxRuns = [int](Get-EnvOrDefault -Name "MATRIX_LIMIT" -Default "0")
-[int]$poolBudget = [int](Get-EnvOrDefault -Name "POOL_BUDGET" -Default "20000")
-[int]$syntheticBudget = [int](Get-EnvOrDefault -Name "SYNTHETIC_BUDGET" -Default "20000000")
-[int]$generateConfigs = [int](Get-EnvOrDefault -Name "GENERATE_CONFIGS" -Default "1")
-[int]$includeBothHard = [int](Get-EnvOrDefault -Name "INCLUDE_BOTH_HARD" -Default "1")
+Push-Location $repoRoot
+try {
+    $matrixDir = Get-EnvOrDefault -Name "MATRIX_DIR" -Default "configs/matrix"
+    $device = Get-EnvOrDefault -Name "MEBENCH_DEVICE" -Default "cuda:0"
+    $pattern = Get-EnvOrDefault -Name "MATRIX_PATTERN" -Default "*.yaml"
+    $pythonBin = Get-EnvOrDefault -Name "PYTHON_BIN" -Default "python"
 
-if ($generateConfigs -ne 0) {
-    $args = @(
-        "generate_configs.py",
-        "--out", $matrixDir,
-        "--device", $device,
-        "--pool-budget", "$poolBudget",
-        "--synthetic-budget", "$syntheticBudget"
-    )
-    if ($includeBothHard -ne 0) {
-        $args += "--include-both-hard"
+    [int]$maxRuns = [int](Get-EnvOrDefault -Name "MATRIX_LIMIT" -Default "0")
+    [int]$poolBudget = [int](Get-EnvOrDefault -Name "POOL_BUDGET" -Default "20000")
+    [int]$syntheticBudget = [int](Get-EnvOrDefault -Name "SYNTHETIC_BUDGET" -Default "20000000")
+    [int]$generateConfigs = [int](Get-EnvOrDefault -Name "GENERATE_CONFIGS" -Default "1")
+    [int]$includeBothHard = [int](Get-EnvOrDefault -Name "INCLUDE_BOTH_HARD" -Default "1")
+
+    if ($generateConfigs -ne 0) {
+        $args = @(
+            "generate_configs.py",
+            "--out", $matrixDir,
+            "--device", $device,
+            "--pool-budget", "$poolBudget",
+            "--synthetic-budget", "$syntheticBudget"
+        )
+        if ($includeBothHard -ne 0) {
+            $args += "--include-both-hard"
+        }
+
+        & $pythonBin @args
+        if ($LASTEXITCODE -ne 0) {
+            throw "Config generation failed with exit code $LASTEXITCODE"
+        }
     }
 
-    & $pythonBin @args
-    if ($LASTEXITCODE -ne 0) {
-        throw "Config generation failed with exit code $LASTEXITCODE"
+    if (-not (Test-Path $matrixDir)) {
+        throw "Matrix directory not found: $matrixDir"
+    }
+
+    $configs = Get-ChildItem -Path $matrixDir -Filter $pattern -File | Sort-Object Name
+    if ($configs.Count -eq 0) {
+        Write-Host "No configs found in $matrixDir matching $pattern"
+        exit 0
+    }
+
+    Write-Host "Running matrix from $matrixDir on $device"
+    Write-Host "Total configs: $($configs.Count)"
+
+    $attempted = 0
+    $failed = 0
+    foreach ($config in $configs) {
+        $name = [System.IO.Path]::GetFileNameWithoutExtension($config.Name)
+
+        $summaryPattern = Join-Path -Path "runs" -ChildPath "$name/*/seed_*/summary.json"
+        if (Test-Path $summaryPattern) {
+            Write-Host "[SKIP] $name"
+            continue
+        }
+
+        Write-Host "[RUN ] $name"
+        & $pythonBin "-m" "mebench" "run" "--config" $config.FullName "--device" $device
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[ OK ] $name"
+        }
+        else {
+            Write-Host "[FAIL] $name"
+            $failed += 1
+        }
+
+        $attempted += 1
+        if ($maxRuns -gt 0 -and $attempted -ge $maxRuns) {
+            Write-Host "MATRIX_LIMIT reached: $maxRuns"
+            break
+        }
+    }
+
+    Write-Host "Matrix run finished. attempted=$attempted failed=$failed"
+    if ($failed -gt 0) {
+        exit 1
     }
 }
-
-if (-not (Test-Path $matrixDir)) {
-    throw "Matrix directory not found: $matrixDir"
+finally {
+    Pop-Location
 }
-
-$configs = Get-ChildItem -Path $matrixDir -Filter $pattern -File | Sort-Object Name
-
-Write-Host "Starting Experimental Matrix Execution..."
-Write-Host "Total experiments: $($configs.Count)"
-
-$count = 0
-foreach ($config in $configs) {
-    $name = [System.IO.Path]::GetFileNameWithoutExtension($config.Name)
-
-    $summaryPattern = Join-Path -Path "runs" -ChildPath "$name/*/seed_*/summary.json"
-    if (Test-Path $summaryPattern) {
-        Write-Host "[SKIP] $name already completed."
-        continue
-    }
-
-    Write-Host "=========================================================="
-    Write-Host "Running: $name"
-    Write-Host "=========================================================="
-
-    & $pythonBin "-m" "mebench" "run" "--config" $config.FullName "--device" $device
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[ERROR] $name failed."
-    }
-
-    $count += 1
-    if ($maxRuns -gt 0 -and $count -ge $maxRuns) {
-        Write-Host "[INFO] MATRIX_LIMIT reached ($maxRuns)."
-        break
-    }
-}
-
-Write-Host "Matrix execution complete."

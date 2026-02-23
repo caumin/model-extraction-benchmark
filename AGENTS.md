@@ -676,7 +676,7 @@ End
 - `generate_configs.py`: Generates the full YAML matrix in `configs/matrix/`.
 - NOTE: Data-free (synthetic) attacks are generated **once per victim** (they do not depend on the surrogate dataset).
 - Current default: MNIST synthetic configs are generated under `SET-A1`, CIFAR10 synthetic configs under `SET-B1`.
-- `run_matrix.sh`: Sequentially executes experiments with a skip-if-exists logic.
+- `scripts/launch/run_matrix.sh`: Sequentially executes experiments with a skip-if-exists logic.
 - `aggregate_matrix.py`: Aggregates seed results into Mean ± Std format (LaTeX/CSV/Markdown).
 
 Planned schedule:
@@ -696,7 +696,7 @@ Planned schedule:
 python generate_configs.py
 
 # 2. Run all experiments
-bash run_matrix.sh
+bash scripts/launch/run_matrix.sh
 
 # 3. View aggregated results
 python aggregate_matrix.py
