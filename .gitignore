@@ -43,6 +43,10 @@ runs/
 /archive/
 /oh-my-opencode.json
 /RELEASE_SCOPE.md
+/docs/*
+!/docs/reference/
+/docs/reference/*
+!/docs/reference/ATTACK_REFERENCES.md
 /configs/matrix/
 /configs/paper_mode/
 /configs/tmp_channel_check/

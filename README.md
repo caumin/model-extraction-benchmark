@@ -87,9 +87,6 @@ python generate_configs.py
 python aggregate_matrix.py
 ```
 
-For release and execution checklists, see:
-- `docs/operations/ULTRAWORK_GITHUB_RELEASE_SETA_CHECKLIST.md`
-
 ---
 
 ## 🚀 Usage
@@ -142,7 +139,6 @@ model-extraction-benchmark/
 ├── scripts/
 │   └── launch/              # Official launcher scripts
 ├── docs/
-│   ├── design/
 │   └── reference/
 ├── tests/                   # Contract and regression tests
 ├── generate_configs.py
@@ -162,7 +158,7 @@ model-extraction-benchmark/
 
 For a deep dive into the benchmark's philosophy, precise budget definitions, and "Track A vs Track B" protocol, please read the **[Contract & Implementation Guide](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md)**.
 
-For implementation details of specific attacks, see [docs/reference/](docs/reference/).
+For implementation details and provenance of specific attacks, see `docs/reference/ATTACK_REFERENCES.md`.
 
 ### Key Rules
 1.  **Budget**: `1 query` = `1 image`. Batched queries count as `batch_size`.
@@ -176,7 +172,7 @@ To ensure fair attribution of performance gains, we enforce **Protocol v1.2** br
 - **Track B (System Focus)**: Attacks with tightly coupled generation/training loops (e.g., Data-Free GANs) retain their native loop.
 - **Control Experiments**: All Track B/Hybrid attacks **must** report a "Loop Contribution" control experiment (Standard Loop vs. Native Loop) to isolate the benefit of custom training recipes from the query strategy itself.
 
-*See [Benchmark Protocol v1.2](docs/design/BENCHMARK_PROTOCOL.md) and [Substitute Training Unification](docs/design/SUBSTITUTE_TRAINING_UNIFICATION.md) for details.*
+*Protocol branch rules are summarized above and enforced in code/config validation.*
 
 ---
 

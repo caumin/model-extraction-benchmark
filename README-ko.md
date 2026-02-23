@@ -86,9 +86,6 @@ python generate_configs.py
 python aggregate_matrix.py
 ```
 
-릴리즈/실행 체크리스트:
-- `docs/operations/ULTRAWORK_GITHUB_RELEASE_SETA_CHECKLIST.md`
-
 ---
 
 ## 🚀 사용법
@@ -141,7 +138,6 @@ model-extraction-benchmark/
 ├── scripts/
 │   └── launch/              # 공식 실행 런처
 ├── docs/
-│   ├── design/
 │   └── reference/
 ├── tests/                   # 계약/회귀 테스트
 ├── generate_configs.py
