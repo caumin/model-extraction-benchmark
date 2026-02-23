@@ -1,11 +1,11 @@
-"""Shared scaling helpers for the benchmark input contract.
+"""Shared scaling helpers for benchmark input-scale handling.
 
-Benchmark contract (v1.x):
-- Oracle inputs are assumed to be in [0, 1] scale.
-- No additional dataset mean/std normalization is applied by the Oracle.
+Benchmark contract:
+- Pool-based query paths use unit-scale tensors ([0,1]).
+- Data-free query paths use tanh-scale tensors ([-1,1]) at oracle boundary.
 
-To reduce accidental inconsistencies across attacks, we centralize common scale
-conversions here.
+To reduce accidental inconsistencies across attacks, common conversions are
+centralized here.
 """
 
 from __future__ import annotations
@@ -45,6 +45,17 @@ def normalize_input_scale(x: torch.Tensor, mode: str = "unit") -> torch.Tensor:
 
     mode_norm = str(mode).strip().lower()
     if mode_norm in {"unit", "0_1", "01"}:
+        if not torch.isfinite(x).all():
+            return torch.zeros_like(x)
+        if x.numel() == 0:
+            return x
+
+        # Heuristic conversion used by callers that explicitly request unit scale.
+        # - If incoming tensor is tanh-space (contains negatives), convert to unit.
+        # - Otherwise, treat input as unit and clamp.
+        x_min = float(x.detach().amin().item())
+        if x_min < -1e-6:
+            return tanh_to_unit(torch.clamp(x, -1.0, 1.0))
         return clamp_unit(x)
     if mode_norm in {"tanh", "neg1_1", "-1_1", "-11"}:
         if not torch.isfinite(x).all():

@@ -18,6 +18,21 @@ _KNOWN_GENERATORS = {
 }
 
 
+def _resolve_checkpoint_path(checkpoint_path: str) -> Path:
+    path = Path(checkpoint_path)
+    if path.exists():
+        return path
+    if path.suffix:
+        raise FileNotFoundError(f"Generator checkpoint not found at {checkpoint_path}")
+
+    for suffix in (".pth", ".pt"):
+        candidate = path.with_suffix(suffix)
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(f"Generator checkpoint not found at {checkpoint_path}")
+
+
 def create_blackbox_ripper_generator(
     name: str,
     device: str,
@@ -44,9 +59,7 @@ def load_blackbox_ripper_generator_weights(
     *,
     strict: bool = True,
 ) -> None:
-    path = Path(checkpoint_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Generator checkpoint not found at {checkpoint_path}")
+    path = _resolve_checkpoint_path(checkpoint_path)
 
     # Prefer a safe load (PyTorch 2.0+). The official checkpoints are state_dict files.
     try:

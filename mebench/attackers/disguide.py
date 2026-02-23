@@ -10,7 +10,7 @@ This implementation keeps the core loop structure from the official code:
 
 Benchmark adaptations:
 - All victim queries go through `ctx.query` for strict image-based budget accounting.
-- Oracle inputs remain canonical [0, 1].
+- Data-free query tensors remain tanh-scale at oracle boundary.
 - Internal clone input scale is configurable (`tanh` or `unit`).
 """
 
@@ -28,19 +28,18 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DFMEGenerator
 from mebench.models.substitute_factory import create_substitute
-from mebench.utils.scaling import normalize_input_scale, tanh_to_unit
+from mebench.utils.scaling import normalize_input_scale
 
 
 class _ScaledSubstituteWrapper(nn.Module):
     """Apply input scaling before substitute forward for evaluation."""
 
-    def __init__(self, model: nn.Module, input_scale_mode: str) -> None:
+    def __init__(self, model: nn.Module) -> None:
         super().__init__()
         self.model = model
-        self.input_scale_mode = str(input_scale_mode)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_scaled = normalize_input_scale(x, self.input_scale_mode)
+        x_scaled = normalize_input_scale(x, "tanh")
         return self.model(x_scaled)
 
 
@@ -171,15 +170,6 @@ class DisGUIDE(AttackRunner):
         if self.output_mode == "hard_top1" and self.loss_mode != "hl":
             raise ValueError("DisGUIDE hard_top1 mode requires loss='hl'")
 
-        self.internal_input_scale_mode = str(
-            config.get("internal_input_scale_mode", "tanh")
-        ).strip().lower()
-        if self.internal_input_scale_mode not in {"unit", "tanh"}:
-            raise ValueError(
-                "DisGUIDE internal_input_scale_mode must be 'unit' or 'tanh', "
-                f"got {self.internal_input_scale_mode!r}"
-            )
-
         self.lr_decay_gamma = float(config.get("lr_decay_gamma", config.get("scale", 0.3)))
         self.lr_decay_ratios = [
             float(v) for v in config.get("lr_decay_milestones_ratio", config.get("step", [0.4, 0.8]))
@@ -263,9 +253,7 @@ class DisGUIDE(AttackRunner):
             raise ValueError(f"Unknown replay mode: {self.replay_mode}")
 
     def _student_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:
-        if self.internal_input_scale_mode == "tanh":
-            return torch.clamp(x_tanh, -1.0, 1.0)
-        return tanh_to_unit(x_tanh)
+        return torch.clamp(x_tanh, -1.0, 1.0)
 
     @staticmethod
     def _recover_logits_from_probs(probs: torch.Tensor) -> torch.Tensor:
@@ -290,10 +278,8 @@ class DisGUIDE(AttackRunner):
     def _get_substitute_for_eval(self) -> nn.Module:
         if self.student_ensemble is None:
             raise RuntimeError("DisGUIDE student ensemble is not initialized")
-        if self.internal_input_scale_mode != "tanh":
-            return self.student_ensemble
         if self._eval_substitute is None:
-            self._eval_substitute = _ScaledSubstituteWrapper(self.student_ensemble, "tanh")
+            self._eval_substitute = _ScaledSubstituteWrapper(self.student_ensemble)
         return self._eval_substitute
 
     def _publish_substitute(self) -> None:
@@ -452,7 +438,7 @@ class DisGUIDE(AttackRunner):
                 fake_tanh = self.generator(z)
                 fake_tanh = self._apply_grayscale(fake_tanh, self.grayscale_freq)
             x_student = self._student_scale(fake_tanh).detach()
-            x_query = tanh_to_unit(fake_tanh).detach()
+            x_query = torch.clamp(fake_tanh, -1.0, 1.0).detach()
 
             oracle_output = ctx.query(
                 x_query,

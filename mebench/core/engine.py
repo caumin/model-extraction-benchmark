@@ -16,9 +16,11 @@ from mebench.attackers.runner import AttackRunner
 from mebench.attackers.activethief import ActiveThief
 from mebench.attackers.blackbox_dissector import BlackboxDissector
 from mebench.attackers.blackbox_ripper import BlackboxRipper
+from mebench.attackers.marich import MARICH
 from mebench.attackers.cloudleak import CloudLeak
 from mebench.attackers.copycatcnn import CopycatCNN
 from mebench.attackers.dfme import DFME
+from mebench.attackers.ds import DualStudents
 from mebench.attackers.dfms import DFMSHL
 from mebench.attackers.disguide import DisGUIDE
 from mebench.attackers.es_attack import ESAttack
@@ -51,6 +53,8 @@ def create_runner(
         return DFME(config["attack"], state)
     elif attack_name == "maze":
         return MAZE(config["attack"], state)
+    elif attack_name == "ds":
+        return DualStudents(config["attack"], state)
     elif attack_name == "dfms":
         return DFMSHL(config["attack"], state)
     elif attack_name == "disguide":
@@ -69,6 +73,8 @@ def create_runner(
         return CloudLeak(config["attack"], state)
     elif attack_name == "blackbox_ripper":
         return BlackboxRipper(config["attack"], state)
+    elif attack_name == "marich":
+        return MARICH(config["attack"], state)
     elif attack_name == "copycatcnn":
         return CopycatCNN(config["attack"], state)
     elif attack_name == "inversenet":
@@ -138,7 +144,7 @@ def run_experiment(
 
         # Optional: verify victim accuracy on the public test set.
         # Disabled by default to avoid accidental dataset downloads in CI/unit tests.
-        if bool(config.get("benchmark", {}).get("verify_victim_accuracy", False)):
+        if bool(config.get("benchmark", {}).get("verify_victim_accuracy", True)):
             dataset_name = config.get("dataset", {}).get("name", "CIFAR10")
             victim_cfg = config.get("victim", {})
             input_size = victim_cfg.get("input_size")

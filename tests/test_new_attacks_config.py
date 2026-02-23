@@ -194,3 +194,46 @@ def test_disguide_allows_hard_top1():
         "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
     }
     validate_config(config)
+
+
+def test_ds_allows_soft_prob() -> None:
+    """Dual Students supports soft_prob output mode."""
+    config = {
+        "run": {"name": "test", "seeds": [0]},
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0},
+        "dataset": {"data_mode": "data_free"},
+        "attack": {"name": "ds", "output_mode": "soft_prob"},
+        "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
+    }
+    validate_config(config)
+
+
+def test_ds_allows_hard_top1() -> None:
+    """Dual Students supports hard_top1 output mode."""
+    config = {
+        "run": {"name": "test", "seeds": [0]},
+        "victim": {"output_mode": "hard_top1", "temperature": 1.0},
+        "dataset": {"data_mode": "data_free"},
+        "attack": {"name": "ds", "output_mode": "hard_top1"},
+        "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
+    }
+    validate_config(config)
+
+
+def test_marich_requires_hard_top1():
+    """MARICH is evaluated under hard_top1 only."""
+    ok = {
+        "run": {"name": "test", "seeds": [0]},
+        "victim": {"output_mode": "hard_top1", "temperature": 1.0},
+        "dataset": {"data_mode": "surrogate", "seed_size": 10000, "seed_name": "CIFAR10"},
+        "attack": {"name": "marich", "output_mode": "hard_top1"},
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 10000, "checkpoints": [1000, 10000]},
+    }
+    validate_config(ok)
+
+    bad = dict(ok)
+    bad["victim"] = {"output_mode": "soft_prob", "temperature": 1.0}
+    bad["attack"] = {"name": "marich", "output_mode": "soft_prob"}
+    with pytest.raises(ValueError, match="marich requires hard_top1"):
+        validate_config(bad)

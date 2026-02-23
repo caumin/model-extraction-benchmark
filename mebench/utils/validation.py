@@ -44,6 +44,11 @@ class LearningRateValidator:
             "generator_lr": 1e-4,
             "justification": "Generator and clone optimizers follow DisGUIDE training dynamics",
         },
+        "ds": {
+            "student_lr": 0.01,
+            "generator_lr": 1e-4,
+            "justification": "Dual Students uses separate Adam generator and SGD student optimizers",
+        },
         "es_attack": {
             "substitute_lr": 0.01,  # Must follow contract
             "justification": "Uses standard classifier training"
@@ -279,11 +284,6 @@ class LearningRateValidator:
                                f"{lr_value} → {self.CONTRACT_LR}")
         
         return fixed_config
-
-
-# Global validator instance
-_global_validator = LearningRateValidator(strict_mode=False)
-
 
 def validate_learning_rates(
     attack_name: str, 

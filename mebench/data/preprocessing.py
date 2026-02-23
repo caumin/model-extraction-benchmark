@@ -86,6 +86,21 @@ def _profile_map() -> Dict[str, OfficialPreprocess]:
                 ]
             ),
         ),
+        # MARICH image branch (official_repo_clones/MARICH/lr_cnn_res_al/data.py)
+        # uses ImageNet32 pool tensors normalized with these channel stats.
+        "marich_imagenet32_cifar10_query": OfficialPreprocess(
+            name="marich_imagenet32_cifar10_query",
+            steps=[
+                "clamp[0,1]",
+                "normalize(mean=(0.473,0.450,0.401), std=(0.258,0.251,0.265))",
+            ],
+            transform=_compose(
+                [
+                    _identity_clamp(),
+                    Normalize((0.473, 0.450, 0.401), (0.258, 0.251, 0.265)),
+                ]
+            ),
+        ),
         # knockoffnets/knockoff/utils/transforms.py:26-30
         "knockoffnets_default_test": OfficialPreprocess(
             name="knockoffnets_default_test",

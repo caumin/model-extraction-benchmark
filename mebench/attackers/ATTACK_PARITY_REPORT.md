@@ -17,12 +17,12 @@ This report tracks official-to-internal parity status for attack ports.
 
 | Attack | Official reference | mebench implementation | Preprocess parity | Output type parity | Hyperparameter parity | Seed/repro parity | Notes |
 |---|---|---|---|---|---|---|---|
-| DFME | `official_repo_clones/datafree-model-extraction/dfme/train.py` | `mebench/attackers/dfme.py` | CLOSE (`dfme_cifar10_test` profile) | SAME (`soft_prob`) | SAME core defaults (`batch_size`, `n_g`, `n_s`, `lr_S`) | SAME (global seed + torch/numpy path) | Benchmark contract keeps canonical [0,1] input before optional profile |
+| DFME | `official_repo_clones/datafree-model-extraction/dfme/train.py` | `mebench/attackers/dfme.py` | CLOSE (`dfme_cifar10_test` profile) | SAME (`soft_prob`) | SAME core defaults (`batch_size`, `n_g`, `n_s`, `lr_S`) | SAME (global seed + torch/numpy path) | Data-free query path keeps tanh-scale tensors at oracle boundary |
 | MAZE | `official_repo_clones/maze/src/attacks/maze.py` | `mebench/attackers/maze.py` | CLOSE (`maze_rgb_test` profile) | SAME (`soft_prob`) | CLOSE (cosine schedule + iter semantics aligned) | SAME | Query path remains strict image-budgeted |
 | KnockoffNets | `official_repo_clones/knockoffnets/knockoff/adversary/transfer.py` | `mebench/attackers/knockoff_nets.py` | CLOSE (`knockoffnets_default_test` profile) | SAME (`soft_prob`) | CLOSE (`batch_size`, policy behavior, transfer semantics) | SAME | Official transfer-set filesystem flow adapted to framework tensors |
 | SwiftThief | `official_repo_clones/swiftthief/swiftthief.py` | `mebench/attackers/swiftthief.py` | CLOSE (`swiftthief_cifar_test` profile) | SAME (supports `soft_prob` and `hard_top1`) | CLOSE (10% seed, `sl_aug_interval`, 5-way imbalance round) | SAME | Uses framework pool loaders instead of `unlabeled_dataset.pt` blob |
 | GAME | `official_repo_clones/game_attack/attack.py` | `mebench/attackers/game.py` | CLOSE (contract default + optional profile) | SAME (`soft_prob`) | SAME defaults (`batch_size=1024`, `querybudget=2000`, `attack_train_epoch=40`) | SAME | Official baseline-only script structure wrapped into AttackRunner |
-| DFMS-HL | `official_repo_clones/dfms_hl/code/train_student/train_student.py` | `mebench/attackers/dfms.py` | CLOSE (`dfms_hl_train_student` profile) | SAME (`hard_top1`) | CLOSE (stage-wise loop and key defaults preserved) | SAME | Internal canonical [0,1] + explicit internal scale mode controls |
+| DFMS-HL | `official_repo_clones/dfms_hl/code/train_student/train_student.py` | `mebench/attackers/dfms.py` | CLOSE (`dfms_hl_train_student` profile) | SAME (`hard_top1`) | CLOSE (stage-wise loop and key defaults preserved) | SAME | Query path fixed to tanh-scale; internal model scale remains configurable |
 | DisGUIDE | `official_repo_clones/disguide/disguide/train.py` | `mebench/attackers/disguide.py` | CLOSE (official transform assumptions documented) | SAME (`soft_prob` or `hard_top1` with HL loss) | CLOSE (ensemble/replay/diversity defaults) | SAME | Hard-mode guard enforced in attack config validation |
 | CloudLeak | `official_repo_clones/cloudleak/optimize.py` | `mebench/attackers/cloudleak.py` | CLOSE (Caffe preprocessing adapted to contract) | SAME (`soft_prob`) | CLOSE (FeatureFool optimization defaults) | SAME | Channel/order conversions explicitly handled in implementation |
 | BlackboxDissector | `official_repo_clones/blackbox-dissector/attack.py` | `mebench/attackers/blackbox_dissector.py` | CLOSE (official normalize notes documented) | SAME (`hard_top1`) | CLOSE (iterative split + erase-rate behavior aligned) | SAME | Transfer-set file workflow adapted to in-memory query storage |
@@ -36,9 +36,9 @@ This report tracks official-to-internal parity status for attack ports.
 ## Accepted differences (and why they are allowed)
 
 1. Input normalization baseline:
-   - Benchmark contract keeps oracle/eval inputs in `[0,1]` by default.
-   - Some official repos assume dataset normalization or tanh-space training.
-   - Resolution: keep contract default and expose explicit official preprocess profiles for parity runs.
+   - Benchmark contract keeps pool-based oracle/eval inputs in `[0,1]` and data-free query inputs in `[-1,1]`.
+   - Some official repos assume dataset normalization or additional transforms.
+   - Resolution: keep contract defaults and expose explicit official preprocess profiles for parity runs.
 
 2. Script-to-framework adaptation:
    - Official code is often standalone multi-script training logic.

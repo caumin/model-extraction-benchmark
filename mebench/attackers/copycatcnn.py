@@ -373,14 +373,3 @@ class CopycatCNN(AttackRunner):
         self.logger.info("CopycatCNN substitute trained.")
         self._evaluate_current_substitute(self.substitute, device)
 
-    def _get_current_lr(self, epoch: int, total_epochs: int) -> float:
-        """Deprecated: legacy schedule retained for reference only."""
-        base_lr = self.substitute_lr
-
-        if epoch >= int(total_epochs * 0.9):
-            return base_lr * 0.001
-        if epoch >= int(total_epochs * 0.6):
-            return base_lr * 0.01
-        if epoch >= int(total_epochs * 0.3):
-            return base_lr * 0.1
-        return base_lr

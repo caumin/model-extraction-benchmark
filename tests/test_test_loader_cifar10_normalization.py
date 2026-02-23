@@ -7,7 +7,7 @@ from typing import Callable
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from mebench.data.loaders import CIFAR10_MEAN, CIFAR10_STD, get_test_dataloader
+from mebench.data.loaders import get_test_dataloader
 
 
 class _DummyCIFAR10(Dataset):
@@ -21,7 +21,7 @@ class _DummyCIFAR10(Dataset):
         raise RuntimeError("This dataset should not be iterated in this test")
 
 
-def test_get_test_dataloader_applies_cifar10_normalization(monkeypatch) -> None:
+def test_get_test_dataloader_keeps_raw_cifar10_tensor(monkeypatch) -> None:
     def _fake_cifar10(*args, **kwargs):
         return _DummyCIFAR10(transform=kwargs.get("transform"))
 
@@ -33,8 +33,4 @@ def test_get_test_dataloader_applies_cifar10_normalization(monkeypatch) -> None:
     assert isinstance(transform, transforms.Compose)
 
     normalize_ops = [op for op in transform.transforms if isinstance(op, transforms.Normalize)]
-    assert len(normalize_ops) == 1
-
-    normalize = normalize_ops[0]
-    assert tuple(float(x) for x in normalize.mean) == CIFAR10_MEAN
-    assert tuple(float(x) for x in normalize.std) == CIFAR10_STD
+    assert len(normalize_ops) == 0

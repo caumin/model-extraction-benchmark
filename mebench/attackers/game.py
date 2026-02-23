@@ -1,7 +1,6 @@
 """GAME (Generative-Based Adaptive Model Extraction) attack."""
 
-from typing import Dict, Any, List, Tuple, Optional, Callable
-import logging
+from typing import Any, Optional, Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,17 +15,7 @@ from mebench.models.gan import DCGANGenerator, DCGANDiscriminator, ACGANGenerato
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
-from mebench.utils.scaling import tanh_to_unit, clamp_unit, unit_to_tanh, normalize_input_scale
-
-
-class _ScaledInputWrapper(nn.Module):
-    def __init__(self, model: nn.Module, mode: str) -> None:
-        super().__init__()
-        self.model = model
-        self.mode = str(mode)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(normalize_input_scale(x, self.mode))
+from mebench.utils.scaling import clamp_unit, unit_to_tanh
 
 
 class GAME(AttackRunner):
@@ -76,12 +65,6 @@ class GAME(AttackRunner):
             config.get("agu_loss_terms", config.get("loss_items", ["res", "bou", "dif"]))
         )
         self.agu_update_discriminator = bool(config.get("agu_update_discriminator", False))
-        self.repro_input_scale_mode = str(config.get("repro_input_scale_mode", "unit")).strip().lower()
-        if self.repro_input_scale_mode not in {"unit", "tanh"}:
-            raise ValueError(
-                "GAME repro_input_scale_mode must be 'unit' or 'tanh', "
-                f"got {self.repro_input_scale_mode!r}"
-            )
         self.use_acgan = bool(config.get("use_acgan", True))
 
         self.generator: nn.Module | None = None
@@ -93,17 +76,14 @@ class GAME(AttackRunner):
         self._student_opt_config: dict[str, Any] = {}
         self.proxy_data: torch.Tensor | None = None
         self.proxy_loader = None
-        self._proxy_iter = None
         self.tdl_done = False
         # Cache for normalization tensors.
         # NOTE (Benchmark scaling unification vs GAME.pdf): The benchmark contract enforces
-        # oracle/eval inputs in [0,1] and ignores dataset mean/std normalization. For
-        # benchmark-wide consistency, GAME uses identity normalization (mean=0,std=1).
-        # We keep the cache to avoid per-step tensor allocs.
+        # GAME keeps identity normalization tensors (mean=0,std=1) and fixed tanh
+        # query/internal paths. Cache avoids per-step tensor allocations.
         self._norm_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._ctx: Optional[BenchmarkContext] = None
         self._query_fn: Optional[Callable[..., OracleOutput]] = None
-        self._pending_query_k: Optional[int] = None
         self.sampler_weights: Optional[torch.Tensor] = None
         eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
@@ -241,24 +221,16 @@ class GAME(AttackRunner):
         return norm_mean, norm_std
 
     def _proxy_to_internal_scale(self, x: torch.Tensor) -> torch.Tensor:
-        if self.repro_input_scale_mode == "tanh":
-            return unit_to_tanh(clamp_unit(x))
-        return clamp_unit(x)
+        return unit_to_tanh(clamp_unit(x))
 
     def _generator_to_internal_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:
-        if self.repro_input_scale_mode == "tanh":
-            return torch.clamp(x_tanh, -1.0, 1.0)
-        return tanh_to_unit(x_tanh)
+        return torch.clamp(x_tanh, -1.0, 1.0)
 
     def _internal_to_oracle_scale(self, x_internal: torch.Tensor) -> torch.Tensor:
-        if self.repro_input_scale_mode == "tanh":
-            return torch.clamp(x_internal, -1.0, 1.0)
-        return clamp_unit(x_internal)
+        return torch.clamp(x_internal, -1.0, 1.0)
 
     def _oracle_to_internal_scale(self, x_oracle: torch.Tensor) -> torch.Tensor:
-        if self.repro_input_scale_mode == "tanh":
-            return torch.clamp(x_oracle, -1.0, 1.0)
-        return clamp_unit(x_oracle)
+        return torch.clamp(x_oracle, -1.0, 1.0)
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
@@ -384,11 +356,6 @@ class GAME(AttackRunner):
         else:
             victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
 
-        with torch.no_grad():
-            norm_mean, norm_std = self._get_norm_tensors(str(device))
-            student_logits_now = self.student((x_internal - norm_mean) / norm_std)
-            student_probs_now = F.softmax(student_logits_now, dim=1)
-
         qx = state.attack_state.setdefault("query_data_x", [])
         qy = state.attack_state.setdefault("query_data_y", [])
         qx.append(x_internal.detach().cpu())
@@ -400,11 +367,9 @@ class GAME(AttackRunner):
         round_epochs = max(1, int(self.round_train_epochs))
         self._train_student_from_buffer(round_epochs)
         self._agu_phase(
-            x_internal,
             victim_probs,
             device,
             meta.get("z"),
-            meta.get("y_g"),
         )
 
         state.attack_state["step"] += 1
@@ -413,8 +378,6 @@ class GAME(AttackRunner):
     def _initialize_state(self, state: BenchmarkState) -> None:
         self.proxy_num_classes = self._resolve_proxy_num_classes(state)
         state.attack_state["step"] = 0
-        state.attack_state["class_score_sum"] = torch.zeros(self.proxy_num_classes)
-        state.attack_state["class_score_count"] = torch.zeros(self.proxy_num_classes)
         state.attack_state["query_data_x"] = []
         state.attack_state["query_data_y"] = []
 
@@ -520,13 +483,23 @@ class GAME(AttackRunner):
                 # Fallback to surrogate if not specified (Track B)
                 proxy_config = state.metadata.get("dataset_config", {}).copy()
                 proxy_config["data_mode"] = "surrogate"
-                # Ensure we have a valid surrogate config
-                if "surrogate_name" not in proxy_config:
-                    # Try to infer or fail
-                    pass
-            
+
             if proxy_config:
                 proxy_config = dict(proxy_config)
+                if "surrogate_name" not in proxy_config:
+                    fallback_name = str(
+                        proxy_config.get("name")
+                        or state.metadata.get("dataset_config", {}).get("name")
+                        or ""
+                    ).strip()
+                    if fallback_name:
+                        proxy_config["surrogate_name"] = fallback_name
+
+                if "surrogate_name" not in proxy_config:
+                    raise ValueError(
+                        "GAME requires proxy_dataset.surrogate_name (or dataset name fallback) "
+                        "to initialize proxy data loader."
+                    )
 
                 input_shape = state.metadata.get("input_shape", (3, 32, 32))
                 proxy_config.setdefault("channels", int(input_shape[0]))
@@ -538,7 +511,6 @@ class GAME(AttackRunner):
                         batch_size=self.batch_size,
                         shuffle=True,
                     )
-                    self._proxy_iter = iter(self.proxy_loader)
 
                 if self.proxy_data is None:
                     self.proxy_data = load_pool_to_memory(
@@ -557,23 +529,6 @@ class GAME(AttackRunner):
         indices = torch.randint(0, self.proxy_data.size(0), (self.batch_size,), device=self.proxy_data.device)
         x_batch = self.proxy_data[indices].to(device)
         return self._proxy_to_internal_scale(x_batch)
-
-    def _next_proxy_batch_with_labels(self, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.proxy_loader is None:
-            raise ValueError("GAME TDL requires a labeled proxy_dataset (proxy_loader is None)")
-
-        if self._proxy_iter is None:
-            self._proxy_iter = iter(self.proxy_loader)
-
-        try:
-            x_batch, y_batch = next(self._proxy_iter)
-        except StopIteration:
-            self._proxy_iter = iter(self.proxy_loader)
-            x_batch, y_batch = next(self._proxy_iter)
-
-        x_batch = self._proxy_to_internal_scale(x_batch.to(device))
-        y_batch = y_batch.to(device).long()
-        return x_batch, y_batch
 
     def _tdl_phase(self, device: str) -> None:
         """Target Distribution Learning (TDL): pre-train G/D on proxy data.
@@ -694,55 +649,6 @@ class GAME(AttackRunner):
 
         self.tdl_done = True
 
-    def _compute_class_distribution(self, state: BenchmarkState, device: str) -> torch.Tensor:
-        """Compute generator conditioning distribution over proxy classes."""
-        if self.student is None or self.generator is None:
-            return torch.full((self.proxy_num_classes,), 1.0 / self.proxy_num_classes, device=device)
-        # Benchmark scaling unification: identity normalization (mean=0,std=1).
-        norm_mean, norm_std = self._get_norm_tensors(device)
-
-        def _norm(img: torch.Tensor) -> torch.Tensor:
-            # NOTE: `img` here is already in [0,1]. Do NOT apply an extra *0.5+0.5.
-            # The benchmark uses identity normalization.
-            return (img - norm_mean) / norm_std
-
-        if self.acs_strategy == "random":
-            return torch.full((self.proxy_num_classes,), 1.0 / self.proxy_num_classes, device=device)
-
-        if self.acs_strategy != "deviation":
-            # Uncertainty-based selection (default): Prefer classes where student is uncertain
-            z = torch.randn(self.proxy_num_classes, self.noise_dim, device=device)
-            class_ids = torch.arange(self.proxy_num_classes, device=device)
-            with torch.no_grad():
-                # We need ACGAN to control class generation. If DCGAN, class_ids ignored.
-                # GAME assumes ACGAN for class-conditional generation.
-                x_gen_raw = self.generator(z, class_ids)
-                x_gen = self._generator_to_internal_scale(x_gen_raw)
-                student_logits = self.student(_norm(x_gen))
-                student_probs = F.softmax(student_logits, dim=1)
-            
-            # Uncertainty: 1 - max_prob (or entropy)
-            # Higher uncertainty -> Higher selection probability
-            score = 1.0 - student_probs.max(dim=1).values
-        else:
-            # Deviation strategy uses running per-proxy-class disagreement statistics.
-            score_sum = state.attack_state.get("class_score_sum")
-            score_count = state.attack_state.get("class_score_count")
-            if score_sum is None or score_count is None:
-                return torch.full((self.proxy_num_classes,), 1.0 / self.proxy_num_classes, device=device)
-
-            score_sum = score_sum.to(device)
-            score_count = score_count.to(device)
-            score = score_sum / score_count.clamp_min(1.0)
-            unseen = score_count <= 0
-            if torch.any(unseen):
-                score = score.clone()
-                score[unseen] = score[~unseen].mean() if torch.any(~unseen) else 1.0
-
-        score = score - score.min()
-        score = score + 1e-6
-        return score / score.sum()
-
     def _train_student_from_buffer(self, epochs: int) -> None:
         if self.student is None or self.student_optimizer is None:
             return
@@ -802,52 +708,14 @@ class GAME(AttackRunner):
 
         self.student_optimizer = local_optimizer
 
-    def _update_victim_stats(
-        self,
-        state: BenchmarkState,
-        probs: torch.Tensor,
-        y_g: Optional[torch.Tensor],
-        student_probs: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Update per-proxy-class discrepancy statistics for ACS."""
-        if y_g is None:
-            return
-
-        score_sum = state.attack_state.get("class_score_sum")
-        score_count = state.attack_state.get("class_score_count")
-        if score_sum is None or score_count is None:
-            state.attack_state["class_score_sum"] = torch.zeros(self.proxy_num_classes)
-            state.attack_state["class_score_count"] = torch.zeros(self.proxy_num_classes)
-            score_sum = state.attack_state["class_score_sum"]
-            score_count = state.attack_state["class_score_count"]
-
-        if student_probs is None:
-            sample_score = probs.max(dim=1).values
-        else:
-            sample_score = F.kl_div(
-                torch.log(student_probs + 1e-10),
-                probs,
-                reduction="none",
-            ).sum(dim=1)
-
-        for i, c in enumerate(y_g):
-            c_idx = int(c.item())
-            if c_idx < 0 or c_idx >= self.proxy_num_classes:
-                continue
-
-            score_sum[c_idx] += float(sample_score[i].detach().cpu().item())
-            score_count[c_idx] += 1.0
-
     def _agu_phase(
-        self, 
-        x_query: torch.Tensor, 
-        victim_probs: torch.Tensor, 
-        device: str, 
+        self,
+        victim_probs: torch.Tensor,
+        device: str,
         z: Optional[torch.Tensor],
-        y_g: Optional[torch.Tensor],
     ) -> None:
         """Adversarial Generator Update (AGU)."""
-        if z is None or y_g is None:
+        if z is None:
             return
 
         active_loss_terms = set(self.agu_loss_terms)
@@ -1020,53 +888,3 @@ class GAME(AttackRunner):
 
         self.sampler_weights = torch.nan_to_num(self.sampler_weights, nan=1.0)
         self.sampler_weights = torch.clamp(self.sampler_weights, min=1e-9)
-
-    def _gmd_phase(
-        self,
-        x_query: torch.Tensor,
-        victim_probs: torch.Tensor,
-        *,
-        include_round_retrain: bool,
-    ) -> None:
-        """Gradient Maximization Discrepancy (GMD) / Student Training."""
-        if self.student is None:
-            return
-        if self._student_opt_config:
-            self.student_optimizer = self._build_optimizer(
-                self.student.parameters(),
-                self._student_opt_config,
-            )
-        if self.student_optimizer is None:
-            return
-
-        device = x_query.device
-        
-        # Train Student
-        self.student.train()
-        self.student_optimizer.zero_grad()
-        
-        norm_mean, norm_std = self._get_norm_tensors(device)
-        
-        student_in = (x_query - norm_mean) / norm_std
-        student_logits = self.student(student_in)
-        student_probs = F.softmax(student_logits, dim=1)
-        
-        # L_res: distillation loss.
-        # Use KL(teacher || student): KLDiv(log(student), teacher)
-        loss_res = F.kl_div(torch.log(student_probs + 1e-10), victim_probs, reduction="batchmean")
-        
-        # L_dif: Diff Loss (make S different from V?)
-        # Wait, GMD is usually for Generator.
-        # In GAME paper, S is trained to minimize loss_res.
-        # G is trained to maximize discrepancy.
-        # This function is called _gmd_phase but actually trains STUDENT.
-        # So it should minimize match loss.
-        
-        # Paper/official implementation train attacker with plain distillation loss.
-        # beta1 belongs to generator-side L_res, not student optimization.
-        loss = loss_res
-        loss.backward()
-        self.student_optimizer.step()
-
-        # Round retrain is handled directly in _handle_oracle_output() to mirror
-        # official query->train->AGU ordering.

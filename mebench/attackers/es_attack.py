@@ -15,7 +15,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DCGANGenerator, ACGANGenerator
 from mebench.models.substitute_factory import create_substitute
-from mebench.utils.scaling import tanh_to_unit, clamp_unit
+from mebench.utils.scaling import clamp_unit
 
 
 class ESAttack(AttackRunner):
@@ -102,8 +102,8 @@ class ESAttack(AttackRunner):
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             c, h, w = int(input_shape[0]), int(input_shape[1]), int(input_shape[2])
             z_img = torch.randn(k, c, h, w, device=device)
-            # Benchmark scaling unification: oracle inputs are [0,1].
-            x_query = clamp_unit(z_img * 0.5 + 0.5)
+            # Data-free query policy: send tanh-space tensors directly.
+            x_query = torch.clamp(z_img, -1.0, 1.0)
             meta = {"synthetic": True, "mode": "init_gaussian", "step": 0}
             return QueryBatch(x=x_query, meta=meta)
 
@@ -111,7 +111,7 @@ class ESAttack(AttackRunner):
             input_shape = state.metadata.get("input_shape", (3, 32, 32))
             x_init = self._sample_syn_batch(k, device, input_shape)
             x_opt = self._optimize_syn_batch(x_init, device)
-            x_query = tanh_to_unit(x_opt)
+            x_query = torch.clamp(x_opt, -1.0, 1.0)
             meta = {"synthetic": True, "mode": "opt_syn"}
             return QueryBatch(x=x_query, meta=meta)
 
@@ -131,7 +131,7 @@ class ESAttack(AttackRunner):
                 x_raw = self.generator(z)
                 meta = {"synthetic": True, "mode": "dnn_syn", "z": z.cpu()}
 
-        x_query = tanh_to_unit(x_raw)
+        x_query = torch.clamp(x_raw, -1.0, 1.0)
         return QueryBatch(x=x_query, meta=meta)
 
     def _handle_oracle_output(

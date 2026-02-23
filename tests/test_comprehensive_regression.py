@@ -17,7 +17,7 @@ from typing import Dict, Any
 from mebench.attackers import (
     RandomBaseline, ActiveThief, DFME, MAZE, KnockoffNets,
     BlackboxDissector, CloudLeak, InverseNet, SwiftThief,
-    DFMS, ESAttack, GAME, CopycatCNN, BlackboxRipper, DisGUIDE
+    DFMS, ESAttack, GAME, CopycatCNN, BlackboxRipper, DisGUIDE, MARICH, DualStudents
 )
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
@@ -38,11 +38,13 @@ class TestAttackInterface:
         "inversenet",
         "swiftthief",
         "dfms",
+        "ds",
         "disguide",
         "es_attack",
         "game",
         "copycatcnn",
-        "blackbox_ripper"
+        "blackbox_ripper",
+        "marich",
     ])
     def attack_name(self, request):
         return request.param
@@ -67,6 +69,15 @@ class TestAttackInterface:
             config.update({
                 "student_lr": 0.01,
                 "generator_lr": 5e-4
+            })
+        elif attack_name == "ds":
+            config.update({
+                "student_lr": 0.01,
+                "generator_lr": 1e-4,
+                "num_students": 2,
+                "g_iter": 1,
+                "d_iter": 1,
+                "loss": "l1",
             })
         elif attack_name == "maze":
             config.update({
@@ -94,6 +105,10 @@ class TestAttackInterface:
             "num_classes": 10,
             "input_shape": (3, 32, 32),
             "surrogate_name": "CIFAR10",
+            "dataset_config": {
+                "name": "CIFAR10",
+                "surrogate_name": "CIFAR10",
+            },
             "substitute_config": {
                 "arch": "resnet18",
                 "optimizer": {"lr": 0.01, "momentum": 0.9}
@@ -112,11 +127,13 @@ class TestAttackInterface:
             "inversenet": InverseNet,
             "swiftthief": SwiftThief,
             "dfms": DFMS,
+            "ds": DualStudents,
             "disguide": DisGUIDE,
             "es_attack": ESAttack,
             "game": GAME,
             "copycatcnn": CopycatCNN,
-            "blackbox_ripper": BlackboxRipper
+            "blackbox_ripper": BlackboxRipper,
+            "marich": MARICH,
         }
         
         attack_class = attack_map.get(attack_name)
@@ -170,10 +187,17 @@ class TestAttackInterface:
                 meta={"test": True}
             )
             
-            oracle_output = OracleOutput(
-                kind="soft_prob",
-                y=torch.rand(32, 10),
-            )
+            hard_label_attacks = {"inversenet", "blackbox_dissector", "marich"}
+            if attack_name in hard_label_attacks:
+                oracle_output = OracleOutput(
+                    kind="hard_top1",
+                    y=torch.randint(low=0, high=10, size=(32,)),
+                )
+            else:
+                oracle_output = OracleOutput(
+                    kind="soft_prob",
+                    y=torch.rand(32, 10),
+                )
             
             state = attack_instance.state
             if not hasattr(attack_instance, "observe"):
@@ -202,7 +226,7 @@ class TestLearningRateCompliance:
             },
             "dfme": {
                 "student_lr": 0.01,
-                "generator_lr": 5e-4
+                "generator_lr": 1e-4
             },
             "maze": {
                 "clone_lr": 0.01,
@@ -225,6 +249,10 @@ class TestLearningRateCompliance:
                 "substitute_lr": 0.01,
                 "generator_lr": 1e-4
             },
+            "ds": {
+                "student_lr": 0.01,
+                "generator_lr": 1e-4,
+            },
             "disguide": {
                 "student_lr": 0.01,
                 "generator_lr": 1e-4,
@@ -243,6 +271,9 @@ class TestLearningRateCompliance:
                 "substitute_lr": 0.01
             },
             "blackbox_dissector": {
+                "substitute_lr": 0.01
+            },
+            "marich": {
                 "substitute_lr": 0.01
             }
         }
@@ -376,14 +407,10 @@ class TestChunkedProcessing:
         """Test that chunked processing utilities can be imported."""
         from mebench.utils.chunked import (
             ChunkedProcessor,
-            create_chunked_dataloader,
             memory_efficient_cat,
-            chunked_inference
         )
         assert ChunkedProcessor is not None
-        assert callable(create_chunked_dataloader)
         assert callable(memory_efficient_cat)
-        assert callable(chunked_inference)
     
     def test_memory_efficient_cat(self):
         """Test memory-efficient concatenation."""

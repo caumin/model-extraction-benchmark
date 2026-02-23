@@ -11,20 +11,6 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DFMEGenerator
 from mebench.models.substitute_factory import create_substitute
-from mebench.utils.scaling import normalize_input_scale
-
-
-class _ScaledSubstituteWrapper(nn.Module):
-    """Apply input scaling before substitute forward for evaluation."""
-
-    def __init__(self, model: nn.Module, input_scale_mode: str) -> None:
-        super().__init__()
-        self.model = model
-        self.input_scale_mode = str(input_scale_mode)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_scaled = normalize_input_scale(x, self.input_scale_mode)
-        return self.model(x_scaled)
 
 class DFME(AttackRunner):
     """DFME implementation strictly aligned with Truong et al. (2021).
@@ -44,22 +30,6 @@ class DFME(AttackRunner):
         self.m = int(config.get("grad_approx_m", 1))
         self.noise_dim = int(config.get("noise_dim", 256))
         self.generator_lr = float(config.get("generator_lr", config.get("lr_G", 1e-4)))
-        self.internal_input_scale_mode = str(
-            config.get("internal_input_scale_mode", "unit")
-        ).strip().lower()
-        if self.internal_input_scale_mode not in {"unit", "tanh"}:
-            raise ValueError(
-                "DFME internal_input_scale_mode must be 'unit' or 'tanh', "
-                f"got {self.internal_input_scale_mode!r}"
-            )
-        self.query_input_scale_mode = str(
-            config.get("query_input_scale_mode", "tanh")
-        ).strip().lower()
-        if self.query_input_scale_mode not in {"unit", "tanh"}:
-            raise ValueError(
-                "DFME query_input_scale_mode must be 'unit' or 'tanh', "
-                f"got {self.query_input_scale_mode!r}"
-            )
         eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
         self._next_eval_query = self.eval_interval_queries
@@ -119,14 +89,10 @@ class DFME(AttackRunner):
         return log_p - log_p.mean(dim=1, keepdim=True)
 
     def _student_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:
-        if self.internal_input_scale_mode == "tanh":
-            return torch.clamp(x_tanh, -1.0, 1.0)
-        return torch.clamp(x_tanh * 0.5 + 0.5, 0.0, 1.0)
+        return torch.clamp(x_tanh, -1.0, 1.0)
 
     def _query_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:
-        if self.query_input_scale_mode == "tanh":
-            return torch.clamp(x_tanh, -1.0, 1.0)
-        return torch.clamp(x_tanh * 0.5 + 0.5, 0.0, 1.0)
+        return torch.clamp(x_tanh, -1.0, 1.0)
 
     def _get_substitute_for_eval(self) -> nn.Module:
         return self.student
@@ -189,15 +155,19 @@ class DFME(AttackRunner):
         while ctx.budget_remaining > 0:
             # Check for LR decay
             current_queries = self.state.query_count
-            if self.current_milestone_idx < len(self.milestones):
-                if current_queries >= self.milestones[self.current_milestone_idx]:
-                    # Decay LR
-                    for param_group in self.g_opt.param_groups:
-                        param_group['lr'] *= gamma
-                    for param_group in self.s_opt.param_groups:
-                        param_group['lr'] *= gamma
-                    self.logger.info(f"[DFME] Decayed LR at {current_queries} queries (Milestone {self.milestones[self.current_milestone_idx]})")
-                    self.current_milestone_idx += 1
+            while (
+                self.current_milestone_idx < len(self.milestones)
+                and current_queries >= self.milestones[self.current_milestone_idx]
+            ):
+                for param_group in self.g_opt.param_groups:
+                    param_group['lr'] *= gamma
+                for param_group in self.s_opt.param_groups:
+                    param_group['lr'] *= gamma
+                self.logger.info(
+                    f"[DFME] Decayed LR at {current_queries} queries "
+                    f"(Milestone {self.milestones[self.current_milestone_idx]})"
+                )
+                self.current_milestone_idx += 1
 
             total_queries = 1 + self.m
             max_g_batch = min(self.batch_size, ctx.budget_remaining // total_queries)

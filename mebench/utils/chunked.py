@@ -3,6 +3,18 @@
 import torch
 from typing import Iterator, List, Callable, Any, Optional
 import logging
+import warnings
+
+
+DEPRECATION_TARGET_VERSION = "v1.4"
+DEPRECATION_MESSAGE_STREAM = (
+    "ChunkedProcessor.stream_dataset_items is deprecated and scheduled for removal in "
+    f"{DEPRECATION_TARGET_VERSION}. Use explicit DataLoader iteration in callers."
+)
+DEPRECATION_MESSAGE_ACCUMULATE = (
+    "ChunkedProcessor.accumulate_chunks is deprecated and scheduled for removal in "
+    f"{DEPRECATION_TARGET_VERSION}. Use task-specific accumulation logic in callers."
+)
 
 
 class ChunkedProcessor:
@@ -91,13 +103,16 @@ class ChunkedProcessor:
         process_fn: Callable[[Any], None],
         max_items: Optional[int] = None
     ) -> None:
-        """Stream dataset items in chunks without materializing full dataset.
+        """Deprecated in v1.3, remove in v1.4.
+
+        Stream dataset items in chunks without materializing full dataset.
         
         Args:
             dataset: Dataset-like object with __len__ and __getitem__
             process_fn: Function to call on each item
             max_items: Maximum number of items to process (None for all)
         """
+        warnings.warn(DEPRECATION_MESSAGE_STREAM, DeprecationWarning, stacklevel=2)
         total_items = min(len(dataset), max_items) if max_items else len(dataset)
         
         if self.verbose:
@@ -119,7 +134,9 @@ class ChunkedProcessor:
         process_fn: Callable[[torch.Tensor], torch.Tensor],
         accumulate_fn: Callable[[List[torch.Tensor]], torch.Tensor]
     ) -> torch.Tensor:
-        """Accumulate processed chunks from data loader without memory explosion.
+        """Deprecated in v1.3, remove in v1.4.
+
+        Accumulate processed chunks from data loader without memory explosion.
         
         Args:
             data_loader: DataLoader providing batches
@@ -129,6 +146,7 @@ class ChunkedProcessor:
         Returns:
             Accumulated result
         """
+        warnings.warn(DEPRECATION_MESSAGE_ACCUMULATE, DeprecationWarning, stacklevel=2)
         processed_chunks = []
         
         if self.verbose:
@@ -158,65 +176,6 @@ class ChunkedProcessor:
             return result
         else:
             raise ValueError("No chunks to accumulate")
-
-
-def create_chunked_dataloader(
-    dataset,
-    batch_size: int,
-    chunk_size: int = 1000,
-    shuffle: bool = True,
-    num_workers: int = 0,
-    device: Optional[str] = None
-):
-    """Create a chunked data loader for memory-efficient processing.
-    
-    Args:
-        dataset: Dataset to load
-        batch_size: Batch size for individual batches
-        chunk_size: Number of samples to load at once
-        shuffle: Whether to shuffle data
-        num_workers: Number of worker processes
-        device: Device to move batches to
-        
-    Yields:
-        Tuple of (batch, chunk_info) for each chunk
-    """
-    from torch.utils.data import DataLoader, Subset
-    
-    total_size = len(dataset)
-    
-    # Create indices
-    indices = list(range(total_size))
-    if shuffle:
-        import random
-        random.shuffle(indices)
-    
-    # Process in chunks
-    for chunk_start in range(0, total_size, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, total_size)
-        chunk_indices = indices[chunk_start:chunk_end]
-        
-        # Create subset for this chunk
-        chunk_dataset = Subset(dataset, chunk_indices)
-        
-        # Create data loader for this chunk
-        chunk_loader = DataLoader(
-            chunk_dataset,
-            batch_size=batch_size,
-            shuffle=False,  # Already shuffled
-            num_workers=num_workers,
-            drop_last=False
-        )
-        
-        chunk_info = {
-            "chunk_id": chunk_start // chunk_size,
-            "chunk_start": chunk_start,
-            "chunk_end": chunk_end,
-            "chunk_size": len(chunk_indices),
-            "total_chunks": (total_size - 1) // chunk_size + 1
-        }
-        
-        yield chunk_loader, chunk_info
 
 
 def memory_efficient_cat(
@@ -259,52 +218,3 @@ def memory_efficient_cat(
     right = memory_efficient_cat(tensors[mid:], dim, max_memory_mb)
     
     return torch.cat([left, right], dim=dim)
-
-
-def chunked_inference(
-    model,
-    data_loader,
-    device: str,
-    chunk_size: int = 1000,
-    max_memory_mb: int = 1000
-) -> torch.Tensor:
-    """Perform memory-efficient inference on large datasets.
-    
-    Args:
-        model: Neural network model for inference
-        data_loader: DataLoader providing input batches
-        device: Device to run inference on
-        chunk_size: Number of samples to process at once
-        max_memory_mb: Maximum memory for storing results
-        
-    Returns:
-        Concatenated model outputs
-    """
-    model.eval()
-    outputs = []
-    
-    with torch.no_grad():
-        for i, batch in enumerate(data_loader):
-            # Handle different batch formats
-            if isinstance(batch, (list, tuple)):
-                x_batch = batch[0].to(device)
-            else:
-                x_batch = batch.to(device)
-            
-            # Forward pass
-            batch_output = model(x_batch)
-            outputs.append(batch_output.cpu())
-            
-            # Periodically concatenate to manage memory
-            if len(outputs) >= chunk_size // data_loader.batch_size:
-                if len(outputs) > 1:
-                    outputs = [memory_efficient_cat(outputs, dim=0, max_memory_mb=max_memory_mb)]
-        
-        # Final concatenation
-        if outputs:
-            return memory_efficient_cat(outputs, dim=0, max_memory_mb=max_memory_mb)
-        else:
-            # Return empty tensor with correct shape
-            return torch.empty((0, *batch_output.shape[1:]))
-    
-    return memory_efficient_cat(outputs, dim=0, max_memory_mb=max_memory_mb)

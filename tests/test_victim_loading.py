@@ -115,5 +115,55 @@ def test_load_victim_nonexistent_checkpoint():
         load_victim_from_config(config, device="cpu")
 
 
+def test_load_victim_checkpoint_ignores_official_preprocess_profile():
+    """Victim inference uses direct model input without runtime wrapper transforms."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = create_substitute(arch="resnet18", num_classes=10, input_channels=3)
+        model.eval()
+        checkpoint_path = Path(tmpdir) / "victim_preprocess.pt"
+        torch.save(model.state_dict(), checkpoint_path)
+
+        wrapped = load_victim_checkpoint(
+            checkpoint_path=str(checkpoint_path),
+            arch="resnet18",
+            num_classes=10,
+            input_channels=3,
+            official_preprocess_profile="dfme_cifar10_test",
+            device="cpu",
+        )
+
+        x = torch.rand(2, 3, 32, 32)
+        with torch.no_grad():
+            y_wrapped = wrapped(x)
+            y_ref = model(x)
+
+        assert torch.allclose(y_wrapped, y_ref, atol=1e-6, rtol=1e-5)
+
+
+def test_load_victim_checkpoint_preserves_tanh_queries() -> None:
+    """Victim path no longer converts tanh-scale queries to unit scale."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = create_substitute(arch="resnet18", num_classes=10, input_channels=3)
+        model.eval()
+        checkpoint_path = Path(tmpdir) / "victim_unit_wrapper.pt"
+        torch.save(model.state_dict(), checkpoint_path)
+
+        wrapped = load_victim_checkpoint(
+            checkpoint_path=str(checkpoint_path),
+            arch="resnet18",
+            num_classes=10,
+            input_channels=3,
+            official_preprocess_profile=None,
+            device="cpu",
+        )
+
+        x_tanh = torch.empty(2, 3, 32, 32).uniform_(-1.0, 1.0)
+        with torch.no_grad():
+            y_wrapped = wrapped(x_tanh)
+            y_ref = model(x_tanh)
+
+        assert torch.allclose(y_wrapped, y_ref, atol=1e-6, rtol=1e-5)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

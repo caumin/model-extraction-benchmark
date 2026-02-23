@@ -4,7 +4,7 @@ run:
   - 0
   device: cuda:0
 benchmark:
-  protocol_version: "1.2"
+  protocol_version: '1.2'
 victim:
   victim_id: mnist_lenet
   arch: lenet_mnist

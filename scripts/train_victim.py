@@ -204,7 +204,6 @@ def _evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: str,
-    input_scale_mode: str = "unit",
     show_progress: bool = False,
     progress_desc: str = "eval",
 ) -> Tuple[float, float]:
@@ -224,7 +223,7 @@ def _evaluate(
     for x, y in iterator:
         x = x.to(device)
         y = y.to(device)
-        x = normalize_input_scale(x, input_scale_mode)
+        x = normalize_input_scale(x, "unit")
         logits = model(x)
         loss = criterion(logits, y)
         total_loss += float(loss.item()) * int(y.size(0))
@@ -242,7 +241,6 @@ def _train_one_epoch(
     optimizer: optim.Optimizer,
     device: str,
     label_smoothing: float = 0.0,
-    input_scale_mode: str = "unit",
     show_progress: bool = True,
     progress_desc: str = "train",
 ) -> Tuple[float, float]:
@@ -262,7 +260,7 @@ def _train_one_epoch(
     for x, y in iterator:
         x = x.to(device)
         y = y.to(device)
-        x = normalize_input_scale(x, input_scale_mode)
+        x = normalize_input_scale(x, "unit")
 
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
@@ -497,13 +495,6 @@ def train() -> None:
         help="Override model dropout probability (default: recipe default)",
     )
     parser.add_argument(
-        "--input-scale-mode",
-        type=str,
-        default=None,
-        choices=["unit", "tanh"],
-        help="Input scale mode before victim forward pass",
-    )
-    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable tqdm batch progress bars",
@@ -593,12 +584,6 @@ def train() -> None:
         if args.dropout_prob is not None
         else float(_cfg_get(train_cfg, "dropout_prob", default=recipe.dropout_prob))
     )
-    input_scale_mode = str(
-        args.input_scale_mode
-        if args.input_scale_mode is not None
-        else _cfg_get(cfg, "input_scale_mode", default="unit")
-    ).lower()
-
     device = _default_device(args.device)
     print(f"[INFO] Device: {device}")
 
@@ -672,7 +657,6 @@ def train() -> None:
                 "weight_decay": float(weight_decay),
                 "scheduler": scheduler_name,
                 "dropout_prob": float(dropout_prob),
-                "input_scale_mode": str(input_scale_mode),
                 "num_workers": int(num_workers),
                 "out": str(out_path),
             },
@@ -691,7 +675,6 @@ def train() -> None:
             optimizer,
             device,
             label_smoothing=label_smoothing,
-            input_scale_mode=input_scale_mode,
             show_progress=show_progress,
             progress_desc=f"train {epoch}/{epochs}",
         )
@@ -699,7 +682,6 @@ def train() -> None:
             model,
             test_loader,
             device,
-            input_scale_mode=input_scale_mode,
             show_progress=show_progress,
             progress_desc=f"eval  {epoch}/{epochs}",
         )
@@ -735,7 +717,6 @@ def train() -> None:
             "seed": int(seed),
             "best_epoch": int(best_epoch),
             "best_acc": float(best_acc),
-            "input_scale_mode": str(input_scale_mode),
             "recipe": asdict(
                 VictimTrainRecipe(
                     dataset=dataset,

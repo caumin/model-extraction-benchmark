@@ -91,8 +91,6 @@ def test_dfms_official_stage_alternate_consumes_full_budget() -> None:
             "alternate_epochs": 2,
             "alternate_auto_augment": False,
             "clone_arch": "lenet",
-            "query_input_scale_mode": "unit",
-            "internal_input_scale_mode": "unit",
             "budget_planner": {"mode": "paper_fair", "enforce_exact_budget": False},
         },
         state,

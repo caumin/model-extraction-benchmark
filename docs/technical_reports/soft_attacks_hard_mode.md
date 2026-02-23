@@ -22,7 +22,7 @@ if attack in soft_only_attacks and attack_mode != "soft_prob":
 # but may have performance degradation compared to soft mode
 # InverseNet kept as soft-only due to its inversion-based nature
 soft_only_attacks = {"inversenet"}  # Removed cloudleak, swiftthief
-hard_only_attacks = set()  # Removed "blackbox_dissector" to allow soft evaluation metrics
+hard_only_attacks = {"blackbox_dissector"}
 if attack in soft_only_attacks and attack_mode != "soft_prob":
     raise ValueError(f"{attack} requires soft_prob output mode")
 if attack in hard_only_attacks and attack_mode != "hard_top1":

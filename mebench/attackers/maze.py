@@ -13,20 +13,6 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.substitute_factory import create_substitute
-from mebench.utils.scaling import normalize_input_scale
-
-
-class _ScaledSubstituteWrapper(nn.Module):
-    """Apply input scaling before substitute forward for evaluation."""
-
-    def __init__(self, model: nn.Module, input_scale_mode: str) -> None:
-        super().__init__()
-        self.model = model
-        self.input_scale_mode = str(input_scale_mode)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_scaled = normalize_input_scale(x, self.input_scale_mode)
-        return self.model(x_scaled)
 
 
 class _OfficialMAZEConv3Generator(nn.Module):
@@ -125,16 +111,6 @@ class MAZE(AttackRunner):
         self.lr_schedule = str(config.get("lr_schedule", "cosine")).lower()
         if self.lr_schedule not in {"multistep", "cosine"}:
             raise ValueError(f"MAZE lr_schedule must be 'multistep' or 'cosine', got {self.lr_schedule!r}")
-        self.clone_input_scale_mode = str(config.get("clone_input_scale_mode", "unit")).strip().lower()
-        if self.clone_input_scale_mode not in {"unit", "tanh"}:
-            raise ValueError(
-                f"MAZE clone_input_scale_mode must be 'unit' or 'tanh', got {self.clone_input_scale_mode!r}"
-            )
-        self.query_input_scale_mode = str(config.get("query_input_scale_mode", "unit")).strip().lower()
-        if self.query_input_scale_mode not in {"unit", "tanh"}:
-            raise ValueError(
-                f"MAZE query_input_scale_mode must be 'unit' or 'tanh', got {self.query_input_scale_mode!r}"
-            )
         eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
         self._next_eval_query = self.eval_interval_queries
@@ -440,11 +416,8 @@ class MAZE(AttackRunner):
         return None
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Prepare clone input according to configured scale mode."""
-        if self.clone_input_scale_mode == "tanh":
-            return torch.clamp(x, -1.0, 1.0)
-        x_01 = (x + 1.0) / 2.0
-        return torch.clamp(x_01, 0.0, 1.0)
+        """Prepare clone input in fixed tanh scale."""
+        return torch.clamp(x, -1.0, 1.0)
 
     def _clone_probs_eval(self, x: torch.Tensor) -> torch.Tensor:
         """Clone inference for generator-phase zeroth-order estimation."""
@@ -454,9 +427,7 @@ class MAZE(AttackRunner):
         return F.softmax(logits.float(), dim=1)
 
     def _query_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:
-        if self.query_input_scale_mode == "tanh":
-            return torch.clamp(x_tanh, -1.0, 1.0)
-        return torch.clamp((x_tanh + 1.0) / 2.0, 0.0, 1.0)
+        return torch.clamp(x_tanh, -1.0, 1.0)
 
     def _append_replay(self, x: torch.Tensor, y: torch.Tensor):
         x_cpu = x.detach().cpu()

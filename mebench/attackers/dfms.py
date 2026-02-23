@@ -125,18 +125,6 @@ class DFMSHL(AttackRunner):
 
         # Query chunk size for oracle labeling; budget is counted per-image.
         self.oracle_batch_size = int(config.get("oracle_batch_size", self.batch_size))
-        self.internal_input_scale_mode = str(config.get("internal_input_scale_mode", "unit")).strip().lower()
-        if self.internal_input_scale_mode not in {"unit", "tanh"}:
-            raise ValueError(
-                "DFMS-HL internal_input_scale_mode must be 'unit' or 'tanh', "
-                f"got {self.internal_input_scale_mode!r}"
-            )
-        self.query_input_scale_mode = str(config.get("query_input_scale_mode", "tanh")).strip().lower()
-        if self.query_input_scale_mode not in {"unit", "tanh"}:
-            raise ValueError(
-                "DFMS-HL query_input_scale_mode must be 'unit' or 'tanh', "
-                f"got {self.query_input_scale_mode!r}"
-            )
 
         self.use_official_dcgan_arch = bool(config.get("use_official_dcgan_arch", True))
         self.proxy_pad_crop = bool(config.get("proxy_pad_crop", True))
@@ -167,35 +155,22 @@ class DFMSHL(AttackRunner):
 
         self._initialize_state(state)
 
-    # NOTE (DFMS scaling modes):
-    # - Official DFMS scripts commonly normalize model-training paths to [-1,1].
-    # - `internal_input_scale_mode` controls clone/discriminator/model-internal scale:
-    #     * "unit": keep internal paths on [0,1]
-    #     * "tanh": convert internal paths to [-1,1]
-    # - `query_input_scale_mode` controls synthetic query scale at oracle boundary.
-
     def _unit_to_internal(self, x: torch.Tensor) -> torch.Tensor:
-        """Convert canonical [0,1] tensors to DFMS internal model scale."""
+        """Convert canonical [0,1] tensors to fixed tanh internal scale."""
 
         x_unit = clamp_unit(x)
-        if self.internal_input_scale_mode == "tanh":
-            return unit_to_tanh(x_unit)
-        return x_unit
+        return unit_to_tanh(x_unit)
 
     def _query_scale_generated_from_unit(self, x_unit: torch.Tensor) -> torch.Tensor:
-        """Map generated unit-scale tensors to configured oracle-query scale."""
+        """Map generated unit-scale tensors to fixed tanh oracle-query scale."""
 
         x_01 = clamp_unit(x_unit)
-        if self.query_input_scale_mode == "tanh":
-            return torch.clamp(unit_to_tanh(x_01), -1.0, 1.0)
-        return x_01
+        return torch.clamp(unit_to_tanh(x_01), -1.0, 1.0)
 
     def _query_scale_generated_from_tanh(self, x_tanh: torch.Tensor) -> torch.Tensor:
-        """Map generated tanh tensors to configured oracle-query scale."""
+        """Map generated tanh tensors to fixed tanh oracle-query scale."""
 
-        if self.query_input_scale_mode == "tanh":
-            return torch.clamp(x_tanh, -1.0, 1.0)
-        return tanh_to_unit(x_tanh)
+        return torch.clamp(x_tanh, -1.0, 1.0)
 
     def _get_substitute_for_eval(self) -> nn.Module | None:
         if self.clone is None:
@@ -632,7 +607,7 @@ class DFMSHL(AttackRunner):
                 dropout_prob=dropout_prob,
             ).to(device)
 
-            # Clone internal scale follows `internal_input_scale_mode`.
+            # Clone internal path uses fixed tanh scale.
             self.clone = base_clone
             self._eval_substitute = None
 
@@ -1024,8 +999,7 @@ class DFMSHL(AttackRunner):
         - Paper writes minimax adversarial term with log(1-D(G(z))) (Eq.(3)), but official
           uses non-saturating BCE(fake->real) for generator updates.
         - Official code feeds images normalized to [-1,1] into the teacher.
-        - This implementation follows configurable query routing; with
-          `query_input_scale_mode=tanh`, synthetic queries are sent in tanh space.
+        - This implementation uses fixed tanh query routing for synthetic queries.
         - Budget-aware epoch scheduling is applied to avoid early termination on
           small surrogate subsets while preserving the official fixed-stage structure.
         """
@@ -1316,7 +1290,7 @@ class DFMSHL(AttackRunner):
                 dropout_prob=dropout_prob,
             ).to(device)
 
-            # Clone internal scale follows `internal_input_scale_mode`.
+            # Clone internal path uses fixed tanh scale.
             self.clone = base_clone
             self._eval_substitute = None
 
@@ -1376,7 +1350,7 @@ class DFMSHL(AttackRunner):
     def _train_discriminator(self, real_x: torch.Tensor, fake_x: torch.Tensor) -> None:
         self.discriminator_optimizer.zero_grad()
 
-        # Discriminator scale follows `internal_input_scale_mode`.
+        # Discriminator path uses fixed tanh scale.
         real_logits = self.discriminator(self._unit_to_internal(real_x))
         fake_logits = self.discriminator(self._unit_to_internal(fake_x.detach()))
         real_labels = torch.ones_like(real_logits)

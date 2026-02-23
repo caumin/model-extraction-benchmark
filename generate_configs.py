@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -120,7 +120,7 @@ def generate_configs(
         Setup(
             set_id="SET-B1",
             victim_dataset="CIFAR10",
-            victim_arch="resnet18",
+            victim_arch="resnet34",
             surrogate_name="ImageNet",
             substitute_arch="resnet18",
             channels=3,
@@ -138,6 +138,22 @@ def generate_configs(
         AttackSpec("cloudleak", kind="pool", label_capability="soft_only"),
         AttackSpec("inversenet", kind="pool", label_capability="hard_only"),
         AttackSpec("blackbox_dissector", kind="pool", label_capability="hard_only"),
+        AttackSpec(
+            "marich",
+            kind="pool",
+            label_capability="hard_only",
+            extra={
+                "sampling": "all_elg",
+                "init_points": 1000,
+                "budget": 300,
+                "gamma1": 0.8,
+                "gamma2": 0.8,
+                "rounds": 20,
+                "epochs": 20,
+                "budget_growth": 1.01,
+                "epochs_growth": 1.02,
+            },
+        ),
 
         AttackSpec(
             "activethief",
@@ -197,6 +213,7 @@ def generate_configs(
         # - MultiStepLR (Handled in code now, not config)
         
         AttackSpec("dfme", kind="synthetic", label_capability="soft_only"),
+        AttackSpec("ds", kind="synthetic", label_capability="both"),
         AttackSpec("maze", kind="synthetic", label_capability="soft_only"),
         AttackSpec("disguide", kind="synthetic", label_capability="both"),
         # NOTE: GAME is temporarily excluded from the default matrix because its
@@ -323,20 +340,34 @@ def generate_configs(
                             else:
                                 substitute_config[k] = v
 
+                    victim_config: Dict[str, Any] = {
+                        "victim_id": victim_id,
+                        "arch": setup.victim_arch,
+                        "channels": setup.channels,
+                        "num_classes": setup.num_classes,
+                        "input_size": [setup.size, setup.size],
+                        "checkpoint_ref": f"runs/victims/{victim_id}_seed0.pt",
+                        "normalization": None,
+                        "output_mode": output_mode,
+                        "temperature": 1.0,
+                    }
+
+                    if setup.set_id == "SET-B1":
+                        victim_config.update(
+                            {
+                                "inference_policy": "benchmark",
+                                "victim_id": "cifar10_resnet34_8x_official",
+                                "arch": "resnet34",
+                                "width_mult": 1,
+                                "official_preprocess_profile": "dfme_cifar10_test",
+                                "checkpoint_ref": "runs/victims/cifar10-resnet34_8x.pt",
+                            }
+                        )
+
                     cfg: Dict[str, Any] = {
                         "run": {"name": run_name, "seeds": [seed], "device": device},
                         "benchmark": {"protocol_version": protocol_version},
-                        "victim": {
-                            "victim_id": victim_id,
-                            "arch": setup.victim_arch,
-                            "channels": setup.channels,
-                            "num_classes": setup.num_classes,
-                            "input_size": [setup.size, setup.size],
-                            "checkpoint_ref": f"runs/victims/{victim_id}_seed0.pt",
-                            "normalization": None,
-                            "output_mode": output_mode,
-                            "temperature": 1.0,
-                        },
+                        "victim": victim_config,
                         "dataset": {
                             "name": setup.victim_dataset,
                             "data_mode": data_mode,
@@ -414,7 +445,7 @@ def generate_configs(
                     # loops. Keep oracle outputs on-device to avoid unnecessary
                     # GPU->CPU->GPU transfers while preserving the 1-query=1-image
                     # contract.
-                    if attack.name in {"dfms", "dfme", "disguide"}:
+                    if attack.name in {"dfms", "dfme", "ds", "disguide"}:
                         cfg["victim"]["return_outputs_on_cpu"] = False
 
                     if attack.name == "blackbox_ripper":
@@ -569,6 +600,79 @@ def generate_paperlike_configs(
         }
         return cfg
 
+    def _paper_surrogate_dataset(base_name: str, seed: int, *, name: str) -> Dict[str, Any]:
+        dataset_cfg: Dict[str, Any] = {
+            "name": str(name),
+            "data_mode": "surrogate",
+            "surrogate_name": str(base_name),
+            "num_workers": int(pool_num_workers),
+            "train_split": True,
+            "channels": cifar10_setup.channels,
+            "input_size": [cifar10_setup.size, cifar10_setup.size],
+        }
+        if str(base_name).lower() == "imagenet":
+            dataset_cfg.update(
+                {
+                    "surrogate_root": "<FILL_ME>",
+                    "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
+                    "surrogate_max_samples": 100_000,
+                    "surrogate_subset_seed": int(seed),
+                }
+            )
+        return dataset_cfg
+
+    def _paper_pool_base_config(
+        *,
+        run_name: str,
+        seed: int,
+        victim_arch: str,
+        victim_output_mode: str,
+        max_budget: int,
+        attack_cfg: Dict[str, Any],
+        substitute_cfg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        cfg: Dict[str, Any] = {
+            "run": {"name": run_name, "seeds": [int(seed)], "device": device},
+            "benchmark": {"protocol_version": protocol_version},
+            "victim": {
+                "victim_id": f"cifar10_{victim_arch}",
+                "arch": str(victim_arch),
+                "channels": cifar10_setup.channels,
+                "num_classes": cifar10_setup.num_classes,
+                "input_size": [cifar10_setup.size, cifar10_setup.size],
+                "checkpoint_ref": f"runs/victims/cifar10_{victim_arch}_seed0.pt",
+                "normalization": None,
+                "output_mode": victim_output_mode,
+                "temperature": 1.0,
+            },
+            "dataset": _paper_surrogate_dataset(
+                base_name=cifar10_setup.surrogate_name,
+                seed=int(seed),
+                name=cifar10_setup.victim_dataset,
+            ),
+            "attack": dict(attack_cfg),
+            "substitute": dict(substitute_cfg),
+            "budget": {
+                "max_budget": int(max_budget),
+                "checkpoints": _checkpoints_for_budget(int(max_budget)),
+            },
+            "cache": {
+                "enabled": True,
+                "policy": "temporary",
+                "delete_on_finish": True,
+            },
+        }
+        return cfg
+
+    def _blackbox_ripper_generator_cfg(victim_dataset: str) -> Tuple[str, str]:
+        if str(victim_dataset).upper() == "CIFAR10":
+            gen_name = "cifar_100_6_classes_gan"
+            gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}"
+            return gen_name, gen_ckpt
+        gen_name = "cifar_10_gan"
+        gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}.pth"
+        return gen_name, gen_ckpt
+
     count = 0
     for seed in seeds:
         # InverseNet paper-like profile (MNIST hard-label):
@@ -638,6 +742,232 @@ def generate_paperlike_configs(
         }
         (out_dir / f"{inversenet_run_name}.yaml").write_text(
             yaml.safe_dump(inversenet_cfg, sort_keys=False),
+            encoding="utf-8",
+        )
+        count += 1
+
+        # MARICH paper-like profile (CIFAR-10 hard-label):
+        # - victim: ResNet-34-8x official checkpoint
+        # - query pool: ImageNet surrogate
+        # - staged selector (all_elg)
+        # - budget: 30k
+        marich_budget = 30_000
+        marich_run_name = (
+            f"{cifar10_setup.set_id}_marich_paper_hard_{_budget_suffix(marich_budget)}_seed{seed}"
+        )
+        marich_attack = {
+            "name": "marich",
+            "output_mode": "hard_top1",
+            "max_budget": int(marich_budget),
+            "pool_num_workers": int(pool_num_workers),
+            "sampling": "all_elg",
+            "init_points": 1_000,
+            "budget": 300,
+            "gamma1": 0.8,
+            "gamma2": 0.8,
+            "rounds": 20,
+            "epochs": 20,
+            "budget_growth": 1.01,
+            "epochs_growth": 1.02,
+            "batch_size": 128,
+            "selection_batch_size": 128,
+            "lr": 0.01,
+            "weight_decay": 5e-4,
+            "patience": 20,
+        }
+        marich_substitute = _paper_substitute_config(
+            arch="resnet18",
+            seed=int(seed),
+            optimizer_lr=0.01,
+            width_mult=1,
+            scheduler_name="multistep",
+        )
+        marich_cfg: Dict[str, Any] = {
+            "run": {"name": marich_run_name, "seeds": [int(seed)], "device": device},
+            "benchmark": {"protocol_version": protocol_version},
+            "victim": {
+                "victim_id": "cifar10_resnet34_8x_official",
+                "arch": "resnet34",
+                "width_mult": 1,
+                "channels": cifar10_setup.channels,
+                "num_classes": cifar10_setup.num_classes,
+                "input_size": [cifar10_setup.size, cifar10_setup.size],
+                "checkpoint_ref": "runs/victims/cifar10-resnet34_8x.pt",
+                "output_mode": "hard_top1",
+                "temperature": 1.0,
+                "inference_policy": "benchmark",
+                "official_preprocess_profile": "dfme_cifar10_test",
+            },
+            "dataset": {
+                "name": cifar10_setup.victim_dataset,
+                "data_mode": "surrogate",
+                "surrogate_name": "ImageNet",
+                "surrogate_root": "<FILL_ME>",
+                "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
+                "surrogate_max_samples": 100_000,
+                "surrogate_subset_seed": 42,
+                "num_workers": int(pool_num_workers),
+                "train_split": True,
+                "channels": cifar10_setup.channels,
+                "input_size": [cifar10_setup.size, cifar10_setup.size],
+            },
+            "attack": marich_attack,
+            "substitute": marich_substitute,
+            "budget": {
+                "max_budget": int(marich_budget),
+                "checkpoints": [1_000, 5_000, 10_000, 20_000, 30_000],
+            },
+            "cache": {
+                "enabled": True,
+                "policy": "temporary",
+                "delete_on_finish": True,
+            },
+        }
+        (out_dir / f"{marich_run_name}.yaml").write_text(
+            yaml.safe_dump(marich_cfg, sort_keys=False),
+            encoding="utf-8",
+        )
+        count += 1
+
+        # BlackboxDissector paper-like profile (CIFAR-10 hard-label):
+        # - victim: ResNet-34-8x official checkpoint
+        # - query pool: ImageNet surrogate
+        # - erase variants N=10, erase_rate=0.25
+        # - iterative budgets up to 30k
+        dissector_budget = 30_000
+        dissector_run_name = (
+            f"{cifar10_setup.set_id}_blackbox_dissector_paper_hard_{_budget_suffix(dissector_budget)}_seed{seed}"
+        )
+        dissector_attack = {
+            "name": "blackbox_dissector",
+            "output_mode": "hard_top1",
+            "max_budget": int(dissector_budget),
+            "pool_num_workers": int(pool_num_workers),
+            "batch_size": 128,
+            "n_variants": 10,
+            "erase_rate": 0.25,
+            "iterative_budgets": [1_000, 5_000, 10_000, 20_000, 30_000],
+            "lr": 0.02,
+            "momentum": 0.9,
+            "max_epochs": 200,
+            "patience": 20,
+            "l2_reg": 5e-4,
+            "selection_batch_size": 256,
+            "sl": 0.02,
+            "sh": 0.4,
+            "r1": 0.3,
+            "r2": 3.3,
+            "fill_min": 0.0,
+            "fill_max": 1.0,
+        }
+        dissector_substitute = _paper_substitute_config(
+            arch="resnet34",
+            seed=int(seed),
+            optimizer_lr=0.02,
+            width_mult=1,
+            scheduler_name="multistep",
+        )
+        dissector_cfg: Dict[str, Any] = {
+            "run": {"name": dissector_run_name, "seeds": [int(seed)], "device": device},
+            "benchmark": {"protocol_version": protocol_version},
+            "victim": {
+                "victim_id": "cifar10_resnet34_8x_official",
+                "arch": "resnet34",
+                "width_mult": 1,
+                "channels": cifar10_setup.channels,
+                "num_classes": cifar10_setup.num_classes,
+                "input_size": [cifar10_setup.size, cifar10_setup.size],
+                "checkpoint_ref": "runs/victims/cifar10-resnet34_8x.pt",
+                "output_mode": "hard_top1",
+                "temperature": 1.0,
+                "inference_policy": "benchmark",
+                "official_preprocess_profile": "dfme_cifar10_test",
+            },
+            "dataset": {
+                "name": cifar10_setup.victim_dataset,
+                "data_mode": "surrogate",
+                "surrogate_name": "ImageNet",
+                "surrogate_root": "<FILL_ME>",
+                "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
+                "surrogate_max_samples": 100_000,
+                "surrogate_subset_seed": 42,
+                "num_workers": int(pool_num_workers),
+                "train_split": True,
+                "channels": cifar10_setup.channels,
+                "input_size": [cifar10_setup.size, cifar10_setup.size],
+            },
+            "attack": dissector_attack,
+            "substitute": dissector_substitute,
+            "budget": {
+                "max_budget": int(dissector_budget),
+                "checkpoints": [1_000, 5_000, 10_000, 20_000, 30_000],
+            },
+            "cache": {
+                "enabled": True,
+                "policy": "temporary",
+                "delete_on_finish": True,
+            },
+        }
+        (out_dir / f"{dissector_run_name}.yaml").write_text(
+            yaml.safe_dump(dissector_cfg, sort_keys=False),
+            encoding="utf-8",
+        )
+        count += 1
+
+        # BlackboxRipper paper-like profile (CIFAR-10 soft-label):
+        # - victim: ResNet-34-8x official checkpoint
+        # - data-free evolutionary latent optimization loop
+        # - budget: 30k
+        ripper_budget = 30_000
+        ripper_run_name = (
+            f"{cifar10_setup.set_id}_blackbox_ripper_paper_soft_{_budget_suffix(ripper_budget)}_seed{seed}"
+        )
+        ripper_attack = {
+            "name": "blackbox_ripper",
+            "output_mode": "soft_prob",
+            "max_budget": int(ripper_budget),
+            "generator_name": "cifar_progan",
+            "generator_checkpoint": "checkpoints/blackbox_ripper/official/cifar_100_6_classes_gan",
+            "generator_output_range": "tanh",
+            "population_size": 30,
+            "elite_size": 10,
+            "latent_bound": 3.0,
+            "mutation_scale": 1.0,
+            "fitness_threshold": 0.02,
+            "max_evolve_iters": 10,
+            "substitute_epochs": 200,
+            "train_batch_size": 64,
+            "batches_per_epoch": 1_000,
+            "substitute_lr": 0.01,
+            "momentum": 0.9,
+            "weight_decay": 5e-4,
+            "log_interval": 25,
+        }
+        ripper_substitute = _paper_substitute_config(
+            arch="resnet18",
+            seed=int(seed),
+            optimizer_lr=0.01,
+            width_mult=1,
+            scheduler_name="multistep",
+        )
+        ripper_cfg = _paper_base_config(
+            run_name=ripper_run_name,
+            seed=int(seed),
+            victim_arch="resnet34",
+            victim_output_mode="soft_prob",
+            max_budget=int(ripper_budget),
+            attack_cfg=ripper_attack,
+            substitute_cfg=ripper_substitute,
+        )
+        ripper_cfg["victim"]["victim_id"] = "cifar10_resnet34_8x_official"
+        ripper_cfg["victim"]["width_mult"] = 1
+        ripper_cfg["victim"]["checkpoint_ref"] = "runs/victims/cifar10-resnet34_8x.pt"
+        ripper_cfg["victim"]["inference_policy"] = "benchmark"
+        ripper_cfg["victim"]["normalization"] = None
+        ripper_cfg["victim"]["official_preprocess_profile"] = "dfme_cifar10_test"
+
+        (out_dir / f"{ripper_run_name}.yaml").write_text(
+            yaml.safe_dump(ripper_cfg, sort_keys=False),
             encoding="utf-8",
         )
         count += 1
@@ -712,7 +1042,6 @@ def generate_paperlike_configs(
             "ensemble_size": 2,
             "grayscale_freq": 8,
             "lambda_div": 0.2,
-            "internal_input_scale_mode": "tanh",
             "strict_iteration_budget": True,
             "lr_decay_milestones_ratio": [0.4, 0.8],
             "lr_decay_gamma": 0.3,
@@ -735,12 +1064,63 @@ def generate_paperlike_configs(
         )
         disguide_cfg["victim"]["victim_id"] = "cifar10_resnet34_8x_official"
         disguide_cfg["victim"]["width_mult"] = 1
-        disguide_cfg["victim"]["input_scale_mode"] = "tanh"
         disguide_cfg["victim"]["checkpoint_ref"] = "runs/victims/cifar10-resnet34_8x.pt"
         disguide_cfg["victim"]["return_outputs_on_cpu"] = False
 
         (out_dir / f"{disguide_run_name}.yaml").write_text(
             yaml.safe_dump(disguide_cfg, sort_keys=False),
+            encoding="utf-8",
+        )
+        count += 1
+
+        # Dual Students paper-like profile (CIFAR-10 soft-label):
+        # - victim: ResNet-34-8x official checkpoint
+        # - budget: 20M
+        # - batch_size=256, num_students=2
+        # - g_iter=1, d_iter=5
+        ds_budget = 20_000_000
+        ds_run_name = f"{cifar10_setup.set_id}_ds_paper_soft_{_budget_suffix(ds_budget)}_seed{seed}"
+        ds_attack = {
+            "name": "ds",
+            "output_mode": "soft_prob",
+            "max_budget": int(ds_budget),
+            "pool_num_workers": int(pool_num_workers),
+            "batch_size": 256,
+            "noise_dim": 256,
+            "g_iter": 1,
+            "d_iter": 5,
+            "num_students": 2,
+            "loss": "l1",
+            "generator_loss": "l1",
+            "student_lr": 0.3,
+            "generator_lr": 1e-4,
+            "strict_iteration_budget": True,
+            "lr_decay_milestones_ratio": [0.1, 0.3, 0.5],
+            "lr_decay_gamma": 0.3,
+        }
+        ds_substitute = _paper_substitute_config(
+            arch="resnet18",
+            seed=int(seed),
+            optimizer_lr=0.3,
+            width_mult=1,
+            scheduler_name="multistep",
+        )
+        ds_cfg = _paper_base_config(
+            run_name=ds_run_name,
+            seed=int(seed),
+            victim_arch="resnet34",
+            victim_output_mode="soft_prob",
+            max_budget=int(ds_budget),
+            attack_cfg=ds_attack,
+            substitute_cfg=ds_substitute,
+        )
+        ds_cfg["victim"]["victim_id"] = "cifar10_resnet34_8x_official"
+        ds_cfg["victim"]["width_mult"] = 1
+        ds_cfg["victim"]["checkpoint_ref"] = "runs/victims/cifar10-resnet34_8x.pt"
+        ds_cfg["victim"]["return_outputs_on_cpu"] = False
+
+        (out_dir / f"{ds_run_name}.yaml").write_text(
+            yaml.safe_dump(ds_cfg, sort_keys=False),
             encoding="utf-8",
         )
         count += 1

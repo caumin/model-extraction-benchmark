@@ -15,7 +15,7 @@ import yaml
 from mebench.core.seed import set_seed
 from mebench.data.loaders import get_test_dataloader
 from mebench.eval.metrics import compute_accuracy
-from mebench.oracles.victim_loader import load_victim_checkpoint
+from mebench.oracles.victim_loader import load_victim_from_config
 
 
 def _cfg_get(config: dict[str, Any], *path: str, default: Any = None) -> Any:
@@ -66,9 +66,6 @@ def main() -> None:
     dropout_prob = float(
         _cfg_get(victim_cfg, "dropout_prob", default=_cfg_get(cfg, "dropout_prob", default=0.0))
     )
-    input_scale_mode = str(
-        _cfg_get(victim_cfg, "input_scale_mode", default=_cfg_get(cfg, "input_scale_mode", default="unit"))
-    ).lower()
     dataset_name = str(_cfg_get(dataset_cfg, "name", default=_cfg_get(cfg, "dataset", default="CIFAR10")))
     batch_size = int(_cfg_get(cfg, "batch_size", default=128))
     num_workers = int(_cfg_get(cfg, "num_workers", default=0))
@@ -79,16 +76,15 @@ def main() -> None:
         input_size = (int(input_size_raw[0]), int(input_size_raw[1]))
 
     device = _resolve_device(args.device, cfg)
-    model = load_victim_checkpoint(
-        checkpoint_path=checkpoint,
-        arch=arch,
-        num_classes=num_classes,
-        input_channels=channels,
-        width_mult=width_mult,
-        dropout_prob=dropout_prob,
-        input_scale_mode=input_scale_mode,
-        device=device,
-    )
+    victim_cfg_runtime = dict(victim_cfg)
+    victim_cfg_runtime.setdefault("checkpoint_ref", checkpoint)
+    victim_cfg_runtime.setdefault("arch", arch)
+    victim_cfg_runtime.setdefault("num_classes", num_classes)
+    victim_cfg_runtime.setdefault("channels", channels)
+    victim_cfg_runtime.setdefault("width_mult", width_mult)
+    victim_cfg_runtime.setdefault("dropout_prob", dropout_prob)
+
+    model = load_victim_from_config(victim_cfg_runtime, device=device)
     test_loader = get_test_dataloader(
         name=dataset_name,
         batch_size=batch_size,
@@ -106,7 +102,6 @@ def main() -> None:
         "checkpoint": checkpoint,
         "num_classes": num_classes,
         "channels": channels,
-        "input_scale_mode": input_scale_mode,
         "batch_size": batch_size,
         "num_workers": num_workers,
         "device": device,

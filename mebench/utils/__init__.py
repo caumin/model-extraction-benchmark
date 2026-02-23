@@ -3,9 +3,7 @@
 from .adversarial import deepfool_vectorized, deepfool_distance_vectorized, DeepFoolAttack
 from .chunked import (
     ChunkedProcessor, 
-    create_chunked_dataloader, 
-    memory_efficient_cat, 
-    chunked_inference
+    memory_efficient_cat,
 )
 from .validation import (
     LearningRateValidator,
@@ -18,9 +16,7 @@ __all__ = [
     "deepfool_distance_vectorized", 
     "DeepFoolAttack",
     "ChunkedProcessor",
-    "create_chunked_dataloader", 
-    "memory_efficient_cat", 
-    "chunked_inference",
+    "memory_efficient_cat",
     "LearningRateValidator",
     "validate_learning_rates",
     "auto_fix_learning_rates"

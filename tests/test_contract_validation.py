@@ -87,5 +87,73 @@ def test_valid_config_passes():
     validate_config(config)
 
 
+def test_benchmark_policy_allows_missing_preprocess_declaration():
+    """Benchmark inference policy no longer requires preprocess declaration."""
+    config = {
+        "attack": {"name": "random", "output_mode": "soft_prob"},
+        "dataset": {"data_mode": "seed", "seed_name": "MNIST"},
+        "victim": {
+            "output_mode": "soft_prob",
+            "temperature": 1.0,
+            "inference_policy": "benchmark",
+        },
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000]},
+    }
+
+    validate_config(config)
+
+
+def test_unknown_official_profile_does_not_fail_validation():
+    """Unknown official profile is ignored when wrapper preprocessing is disabled."""
+    config = {
+        "attack": {"name": "random", "output_mode": "soft_prob"},
+        "dataset": {"data_mode": "seed", "seed_name": "MNIST"},
+        "victim": {
+            "output_mode": "soft_prob",
+            "temperature": 1.0,
+            "official_preprocess_profile": "unknown_profile",
+        },
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000]},
+    }
+
+    validate_config(config)
+
+
+def test_benchmark_policy_allows_explicit_no_normalization():
+    """Benchmark policy accepts explicit 'no normalization' declaration."""
+    config = {
+        "attack": {"name": "random", "output_mode": "soft_prob"},
+        "dataset": {"data_mode": "seed", "seed_name": "MNIST"},
+        "victim": {
+            "output_mode": "soft_prob",
+            "temperature": 1.0,
+            "inference_policy": "benchmark",
+            "normalization": None,
+        },
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000]},
+    }
+
+    validate_config(config)
+
+
+def test_data_free_does_not_require_input_scale_mode_key():
+    config = {
+        "attack": {"name": "dfme", "output_mode": "soft_prob"},
+        "dataset": {"data_mode": "data_free"},
+        "victim": {
+            "output_mode": "soft_prob",
+            "temperature": 1.0,
+            "inference_policy": "benchmark",
+            "normalization": None,
+        },
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000]},
+    }
+
+    validate_config(config)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

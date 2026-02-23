@@ -16,7 +16,7 @@ def compute_accuracy(model: nn.Module, loader: DataLoader, device: str) -> float
     with torch.no_grad():
         for x, y in loader:
             x, y = x.to(device), y.to(device)
-            # Contract: Inputs in [0, 1].
+            # Evaluation uses shared normalized test loader inputs.
             outputs = model(x)
             _, predicted = torch.max(outputs.data, 1)
             total += y.size(0)
@@ -37,7 +37,7 @@ def compute_agreement(
     with torch.no_grad():
         for x, _ in loader:
             x = x.to(device)
-            # Contract: Inputs in [0, 1].
+            # Evaluation uses shared normalized test loader inputs.
             out_sub = substitute(x)
             out_vic = victim(x)
 
@@ -66,7 +66,7 @@ def compute_kl_divergence(
     with torch.no_grad():
         for x, _ in loader:
             x = x.to(device)
-            # Contract: Inputs in [0, 1].
+            # Evaluation uses shared normalized test loader inputs.
             
             # Get probability distributions
             sub_logits = substitute(x) / temperature
@@ -102,7 +102,7 @@ def compute_l1_distance(
     with torch.no_grad():
         for x, _ in loader:
             x = x.to(device)
-            # Contract: Inputs in [0, 1].
+            # Evaluation uses shared normalized test loader inputs.
             
             sub_probs = F.softmax(substitute(x) / temperature, dim=1)
             victim_probs = F.softmax(victim(x) / temperature, dim=1)

@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader, Dataset, Subset
-from sklearn.metrics import f1_score
 from tqdm import tqdm
 
 from mebench.attackers.runner import AttackRunner
@@ -25,7 +24,6 @@ from mebench.utils.dataloader import (
     resolve_train_num_workers,
     resolve_val_num_workers,
 )
-from mebench.eval.metrics import evaluate_substitute
 
 
 class _PseudoLabelDataset(Dataset):
@@ -1245,38 +1243,3 @@ class BlackboxDissector(AttackRunner):
         # Round Evaluation
         # self._evaluate_current_substitute(model, device)
 
-    def _compute_f1(
-        self,
-        model: nn.Module,
-        val_loader: DataLoader,
-        device: str,
-        norm_mean: torch.Tensor,
-        norm_std: torch.Tensor,
-    ) -> float:
-        """Compute F1 score on validation set.
-
-        Args:
-            model: Model to evaluate
-            val_loader: Validation data loader
-            device: Device to use
-
-        Returns:
-            F1 score (macro average)
-        """
-        model.eval()
-        all_preds = []
-        all_targets = []
-
-        with torch.no_grad():
-            for x_batch, y_batch in val_loader:
-                x_batch = x_batch.to(device)
-                x_norm = (x_batch - norm_mean) / norm_std
-                outputs = model(x_norm)
-
-                preds = torch.argmax(outputs, dim=1).cpu().numpy()
-                all_preds.extend(preds)
-
-                targets = y_batch.cpu().numpy()
-                all_targets.extend(targets)
-
-        return f1_score(all_targets, all_preds, average="macro")

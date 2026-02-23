@@ -1,7 +1,6 @@
 """Config validation logic."""
 
 from typing import Dict, Any
-from mebench.data.preprocessing import list_official_preprocess_profiles
 
 
 def _require_positive_int(config: Dict[str, Any], path: str) -> int:
@@ -36,6 +35,7 @@ def validate_config(config: Dict[str, Any]) -> None:
     # Data-free attacks must be in data_free mode; pool-based attacks must have a valid seed/surrogate config
     data_free_attacks = {
         "dfme",
+        "ds",
         "maze",
         "dfms",
         "disguide",
@@ -60,6 +60,7 @@ def validate_config(config: Dict[str, Any]) -> None:
     pool_supervised_attacks = {
         "random",
         "activethief",
+        "marich",
         "knockoff_nets",
         "cloudleak",
         "copycatcnn",
@@ -89,12 +90,14 @@ def validate_config(config: Dict[str, Any]) -> None:
         "inversenet",
         "dfms",  # DFMS-HL
         "blackbox_dissector",
+        "marich",
     }
     both_attacks = {
         # Works under both soft_prob and hard_top1.
         "activethief",
         "swiftthief",
         "disguide",
+        "ds",
         "es",
     }
 
@@ -122,22 +125,13 @@ def validate_config(config: Dict[str, Any]) -> None:
     if config["victim"]["temperature"] != 1.0:
         raise ValueError("Default oracle requires T=1.0 in v1.0")
 
-    # Optional victim input scaling mode for strict-paper reproduction profiles.
-    input_scale_mode = str(config.get("victim", {}).get("input_scale_mode", "unit")).lower()
-    valid_scale_modes = {"unit", "0_1", "01", "tanh", "neg1_1", "-1_1", "-11"}
-    if input_scale_mode not in valid_scale_modes:
+    # Victim inference policy key validation.
+    inference_policy = str(config.get("victim", {}).get("inference_policy", "paper_repro")).lower()
+    if inference_policy not in {"benchmark", "paper_repro"}:
         raise ValueError(
-            f"victim.input_scale_mode must be one of {sorted(valid_scale_modes)}, got {input_scale_mode!r}"
+            "victim.inference_policy must be 'benchmark' or 'paper_repro', "
+            f"got {inference_policy!r}"
         )
-
-    official_profile = config.get("victim", {}).get("official_preprocess_profile")
-    if official_profile is not None:
-        names = set(list_official_preprocess_profiles())
-        if str(official_profile) not in names:
-            raise ValueError(
-                "victim.official_preprocess_profile must be one of "
-                f"{sorted(names)}, got {official_profile!r}"
-            )
 
     # Check budget checkpoints
     checkpoints = config["budget"]["checkpoints"]

@@ -13,6 +13,10 @@ from PIL import Image
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2023, 0.1994, 0.2010)
+SVHN_MEAN = (0.43768206, 0.44376972, 0.47280434)
+SVHN_STD = (0.19803014, 0.20101564, 0.19703615)
+MNIST_MEAN = (0.1307,)
+MNIST_STD = (0.3081,)
 
 
 def _get_default_num_workers(*, default: int = 0) -> int:
@@ -549,6 +553,10 @@ def get_test_dataloader(
         if channels is not None and int(channels) == 3:
             tf.append(transforms.Grayscale(num_output_channels=3))
         tf.append(transforms.ToTensor())
+        if channels is not None and int(channels) == 3:
+            tf.append(transforms.Normalize((MNIST_MEAN[0],) * 3, (MNIST_STD[0],) * 3))
+        else:
+            tf.append(transforms.Normalize(MNIST_MEAN, MNIST_STD))
         transform = transforms.Compose(tf)
         dataset = torchvision.datasets.MNIST(
             root="./data",
@@ -563,6 +571,10 @@ def get_test_dataloader(
         if channels is not None and int(channels) == 3:
             tf.append(transforms.Grayscale(num_output_channels=3))
         tf.append(transforms.ToTensor())
+        if channels is not None and int(channels) == 3:
+            tf.append(transforms.Normalize((MNIST_MEAN[0],) * 3, (MNIST_STD[0],) * 3))
+        else:
+            tf.append(transforms.Normalize(MNIST_MEAN, MNIST_STD))
         transform = transforms.Compose(tf)
         dataset = torchvision.datasets.FashionMNIST(
             root="./data",
@@ -575,6 +587,7 @@ def get_test_dataloader(
         transform = transforms.Compose([
             transforms.Resize(size),
             transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
         ])
         csv_test = Path("./data") / "GTSRB" / "testset" / "test.csv"
         if csv_test.exists():
@@ -596,6 +609,10 @@ def get_test_dataloader(
         if channels is not None and int(channels) == 1:
             tf.append(transforms.Grayscale(num_output_channels=1))
         tf.append(transforms.ToTensor())
+        if channels is not None and int(channels) == 1:
+            tf.append(transforms.Normalize(MNIST_MEAN, MNIST_STD))
+        else:
+            tf.append(transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD))
         transform = transforms.Compose(tf)
         dataset = BelgiumTSCDataset(
             root="./data",

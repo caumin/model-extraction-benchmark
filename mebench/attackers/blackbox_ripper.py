@@ -17,28 +17,30 @@ from mebench.models.blackbox_ripper import (
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
-from mebench.utils.scaling import tanh_to_unit, clamp_unit
+from mebench.utils.scaling import clamp_unit
 
 
-def _to_benchmark_unit_range(x: torch.Tensor, *, mode: str) -> torch.Tensor:
-    """Convert generator outputs to the benchmark [0,1] input contract.
+def _to_oracle_query_range(x: torch.Tensor, *, mode: str) -> torch.Tensor:
+    """Map generator outputs to the configured oracle query scale.
 
-    Benchmark-wide scaling unification (DFME-style): treat [0,1] as canonical image scale.
-
-    Notes on papers/upstream (blackbox-ripper.pdf):
-    - The vendored CIFAR SNGAN generator ends with tanh, so outputs are in [-1,1]
-      (see `mebench/models/blackbox_ripper/cifar_sngan.py`).
-    - Some generators/checkpoints may emit values that are not strictly bounded.
-    - For benchmark consistency we avoid per-batch heuristics (which can compress already
-      [0,1] values if any negative value exists in the batch).
+    Data-free benchmark contract uses tanh-space query tensors as-is for victim
+    querying (no attacker-side tanh->unit conversion).
     """
 
     mode_l = str(mode).lower().strip()
     if mode_l in {"tanh", "m11"}:
-        return tanh_to_unit(x)
+        if not torch.isfinite(x).all():
+            return torch.zeros_like(x)
+        return torch.clamp(x, -1.0, 1.0)
     if mode_l in {"unit", "01"}:
         return clamp_unit(x)
     raise ValueError(f"Unsupported generator_output_range='{mode}'. Use 'tanh' or 'unit'.")
+
+
+def _clamp_to_unit_range(x: torch.Tensor, *, mode: str = "tanh") -> torch.Tensor:
+    """Backward-compatible alias for legacy helper naming."""
+
+    return _to_oracle_query_range(x, mode=mode)
 
 
 def _match_input_shape(x: torch.Tensor, input_shape: tuple[int, int, int]) -> torch.Tensor:
@@ -87,7 +89,7 @@ class BlackboxRipper(AttackRunner):
 
     Benchmark adaptation:
     - All oracle queries go through `ctx.query` so budget is respected (1 image = 1 query).
-    - Generator outputs are clamped/rescaled to [0,1] to satisfy the global contract.
+    - Data-free query tensors remain tanh-scale by default at oracle boundary.
     """
 
     def __init__(self, config: Dict[str, Any], state: BenchmarkState) -> None:
@@ -104,10 +106,13 @@ class BlackboxRipper(AttackRunner):
         self.generator_checkpoint = config.get("generator_checkpoint") or config.get("generator_ckpt")
         self.generator_strict_load = bool(config.get("generator_strict_load", True))
 
-        # Scaling unification (DFME-style): oracle inputs are [0,1].
-        # Upstream generators often output tanh-scaled [-1,1]. We default to treating
-        # generator outputs as tanh-scaled and explicitly convert to [0,1].
+        # Data-free query policy: keep generator outputs in tanh space for victim
+        # querying (no attacker-side conversion to unit scale).
         self.generator_output_range = str(config.get("generator_output_range", "tanh"))
+        if str(self.generator_output_range).strip().lower() not in {"tanh", "m11"}:
+            raise ValueError(
+                "BlackboxRipper generator_output_range must be 'tanh' under current data-free scale contract"
+            )
 
         # Evolutionary search hyperparameters (upstream defaults).
         self.population_size = int(config.get("population_size", 30))
@@ -350,8 +355,8 @@ class BlackboxRipper(AttackRunner):
 
             with torch.no_grad():
                 x_raw = self.generator(population)
-                # Benchmark scaling unification: convert generator outputs to [0,1] deterministically.
-                x = _to_benchmark_unit_range(x_raw, mode=self.generator_output_range)
+                # Data-free query policy: keep tanh-space query tensors as-is.
+                x = _to_oracle_query_range(x_raw, mode=self.generator_output_range)
                 x = _match_input_shape(x, input_shape)
 
             oracle_out = ctx.query(
