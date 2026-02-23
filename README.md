@@ -37,7 +37,7 @@ We support **17 state-of-the-art attacks**, faithfully re-implemented from their
 | Category | Attack | Paper | Official Repo | Key Strategy |
 | :--- | :--- | :--- | :--- | :--- |
 | **Baseline** | **Random** | - | - | Uniform random sampling from pool. |
-| **Active Learning** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | - | Uncertainty, K-Center, and DFAL sampling. |
+| **Active Learning** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | [GitHub](https://github.com/iisc-seal/activethief) | Uncertainty, K-Center, and DFAL sampling. |
 | | **MARICH** | [Basu et al. (2023)](https://arxiv.org/abs/2302.08466) | [GitHub](https://github.com/Debabrota-Basu/marich) | Multi-stage active querying (entropy/loss/gradient). |
 | | **Blackbox Dissector** | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | [GitHub](https://github.com/yxwang-10/Blackbox-Dissector) | Grad-CAM based erasing & selection. |
 | | **CloudLeak** | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | [GitHub](https://github.com/yunyuntsai/DNN-Model-Stealing) | Adversarial example generation (FeatureFool). |
@@ -51,7 +51,7 @@ We support **17 state-of-the-art attacks**, faithfully re-implemented from their
 | | **ES-Attack** | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | - | Evolutionary strategy for query synthesis. |
 | | **GAME** | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | [GitHub](https://github.com/xythink/game-attack) | Adaptive category selection & GAN training. |
 | **Hybrid / Other** | **KnockoffNets** | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | [GitHub](https://github.com/tribhuvanesh/knockoffnets) | Reinforcement learning (Bandit) for class selection. |
-| | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | - | Large-scale offline augmentation of natural data. |
+| | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | [GitHub](https://github.com/jeiks/Stealing_DL_Models) | Large-scale offline augmentation of natural data. |
 | | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | [GitHub](https://github.com/antoniobarbalau/black-box-ripper) | Latent space evolution on pre-trained GANs. |
 
 ---

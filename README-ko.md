@@ -36,7 +36,7 @@
 | 카테고리 | 공격 이름 | 논문 | Official Repo | 핵심 전략 |
 | :--- | :--- | :--- | :--- | :--- |
 | **베이스라인** | **Random** | - | - | 후보 풀(Pool)에서의 균등 무작위 샘플링. |
-| **능동 학습 (Active Learning)** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | - | 불확실성(Uncertainty), K-Center, DFAL 샘플링 전략. |
+| **능동 학습 (Active Learning)** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | [GitHub](https://github.com/iisc-seal/activethief) | 불확실성(Uncertainty), K-Center, DFAL 샘플링 전략. |
 | | **MARICH** | [Basu et al. (2023)](https://arxiv.org/abs/2302.08466) | [GitHub](https://github.com/Debabrota-Basu/marich) | 엔트로피/손실/그래디언트 기반 다단계 능동 질의. |
 | | **Blackbox Dissector** | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | [GitHub](https://github.com/yxwang-10/Blackbox-Dissector) | Grad-CAM 기반 중요 영역 삭제 및 샘플 선택. |
 | | **CloudLeak** | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | [GitHub](https://github.com/yunyuntsai/DNN-Model-Stealing) | 적대적 예제(Adversarial Example) 생성 (FeatureFool). |
@@ -50,7 +50,7 @@
 | | **ES-Attack** | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | - | 진화 전략(Evolutionary Strategy)을 통한 쿼리 합성. |
 | | **GAME** | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | [GitHub](https://github.com/xythink/game-attack) | 적응형 카테고리 선택 및 GAN 학습. |
 | **하이브리드 / 기타** | **KnockoffNets** | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | [GitHub](https://github.com/tribhuvanesh/knockoffnets) | 강화학습(Bandit)을 이용한 클래스 선택. |
-| | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | - | 자연 이미지의 대규모 오프라인 증강(Augmentation). |
+| | **CopycatCNN** | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | [GitHub](https://github.com/jeiks/Stealing_DL_Models) | 자연 이미지의 대규모 오프라인 증강(Augmentation). |
 | | **Blackbox Ripper** | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | [GitHub](https://github.com/antoniobarbalau/black-box-ripper) | 사전 학습된 GAN의 잠재 공간(Latent Space) 진화. |
 
 ---
