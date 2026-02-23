@@ -32,17 +32,19 @@
 
 ## 🛡️ Supported Attacks (v1.0)
 
-We support **13 state-of-the-art attacks**, faithfully re-implemented from their original papers:
+We support **17 state-of-the-art attacks**, faithfully re-implemented from their original papers:
 
 | Category | Attack | Paper | Official Repo | Key Strategy |
 | :--- | :--- | :--- | :--- | :--- |
 | **Baseline** | **Random** | - | - | Uniform random sampling from pool. |
 | **Active Learning** | **ActiveThief** | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | - | Uncertainty, K-Center, and DFAL sampling. |
+| | **MARICH** | [Basu et al. (2023)](https://arxiv.org/abs/2302.08466) | [GitHub](https://github.com/Debabrota-Basu/marich) | Multi-stage active querying (entropy/loss/gradient). |
 | | **Blackbox Dissector** | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | [GitHub](https://github.com/yxwang-10/Blackbox-Dissector) | Grad-CAM based erasing & selection. |
 | | **CloudLeak** | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | [GitHub](https://github.com/yunyuntsai/DNN-Model-Stealing) | Adversarial example generation (FeatureFool). |
 | | **InverseNet** | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | - | Inversion-based sample recovery. |
 | | **SwiftThief** | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | [GitHub](https://github.com/ku-air/SwiftThief) | Contrastive learning (SimSiam) + Active selection. |
 | **Data-Free / Generative** | **DFME** | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | [GitHub](https://github.com/cake-lab/datafree-model-extraction) | GAN-based query synthesis (Min-Max game). |
+| | **Dual Students (DS)** | Beetham et al. (ICLR 2023) | - | Two-student disagreement-driven data-free extraction. |
 | | **DFMS** | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | [GitHub](https://github.com/val-iisc/Hard-Label-Model-Stealing) | Diverse query synthesis with entropy maximization. |
 | | **DisGUIDE** | [Rosenthal et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | [GitHub](https://github.com/lin-tan/disguide) | Disagreement-guided data-free extraction with replay/diversity losses. |
 | | **MAZE** | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | [GitHub](https://github.com/sanjaykariyappa/MAZE) | Zeroth-order gradient estimation. |
