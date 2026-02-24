@@ -109,7 +109,9 @@ def generate_configs(
     substitute_num_workers: int,
     substitute_train_num_workers: Optional[int],
     substitute_val_num_workers: Optional[int],
+    imagenet_root: str,
 ) -> int:
+    resolved_imagenet_root = str(imagenet_root)
     set_budgets: Dict[str, Dict[str, int]] = {
         "SET-A1": {
             "pool": int(set_a_pool_budget),
@@ -448,11 +450,10 @@ def generate_configs(
                         if str(d.get("surrogate_name")).lower() != "imagenet":
                             return
                         # ImageNet surrogate (ImageFolder format): use a deterministic 100k subset.
-                        # Local path should be provided by the user later via `surrogate_root`
-                        # or env var `MEBENCH_IMAGENET_ROOT`.
+                        # Default local path is configurable via --imagenet-root.
                         d.update(
                             {
-                                "surrogate_root": "<FILL_ME>",
+                                "surrogate_root": resolved_imagenet_root,
                                 "surrogate_resize": [setup.size, setup.size],
                                 "surrogate_max_samples": 100_000,
                                 "surrogate_subset_seed": 42,
@@ -509,7 +510,9 @@ def generate_paperlike_configs(
     substitute_num_workers: int,
     substitute_train_num_workers: Optional[int],
     substitute_val_num_workers: Optional[int],
+    imagenet_root: str,
 ) -> int:
+    resolved_imagenet_root = str(imagenet_root)
     mnist_setup = Setup(
         set_id="SET-A1",
         victim_dataset="MNIST",
@@ -648,7 +651,7 @@ def generate_paperlike_configs(
         if str(base_name).lower() == "imagenet":
             dataset_cfg.update(
                 {
-                    "surrogate_root": "<FILL_ME>",
+                    "surrogate_root": resolved_imagenet_root,
                     "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
                     "surrogate_max_samples": 100_000,
                     "surrogate_subset_seed": int(seed),
@@ -837,7 +840,7 @@ def generate_paperlike_configs(
                 "name": cifar10_setup.victim_dataset,
                 "data_mode": "surrogate",
                 "surrogate_name": "ImageNet",
-                "surrogate_root": "<FILL_ME>",
+                "surrogate_root": resolved_imagenet_root,
                 "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
                 "surrogate_max_samples": 100_000,
                 "surrogate_subset_seed": 42,
@@ -1278,6 +1281,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--set-b-pool-budget", type=int, default=20_000)
     parser.add_argument("--set-b-synthetic-budget", type=int, default=20_000_000)
     parser.add_argument(
+        "--imagenet-root",
+        type=str,
+        default="C:/imagenet",
+        help="Local ImageNet root path used as dataset.surrogate_root in generated configs",
+    )
+    parser.add_argument(
         "--include-both-hard",
         action="store_true",
         help="Generate hard_top1 variants for 'both' attacks (in addition to soft_prob)",
@@ -1338,6 +1347,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             if args.substitute_val_num_workers is not None
             else None
         ),
+        imagenet_root=str(args.imagenet_root),
     )
     print(f"Generated {count} configs in {out_dir}")
     return 0

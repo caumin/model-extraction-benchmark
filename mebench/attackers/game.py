@@ -67,14 +67,14 @@ class GAME(AttackRunner):
         self.agu_update_discriminator = bool(config.get("agu_update_discriminator", False))
         self.use_acgan = bool(config.get("use_acgan", True))
 
-        self.generator: nn.Module | None = None
-        self.discriminator: nn.Module | None = None
-        self.student: nn.Module | None = None
-        self.generator_optimizer: optim.Optimizer | None = None
-        self.discriminator_optimizer: optim.Optimizer | None = None
-        self.student_optimizer: optim.Optimizer | None = None
+        self.generator: Optional[nn.Module] = None
+        self.discriminator: Optional[nn.Module] = None
+        self.student: Optional[nn.Module] = None
+        self.generator_optimizer: Optional[optim.Optimizer] = None
+        self.discriminator_optimizer: Optional[optim.Optimizer] = None
+        self.student_optimizer: Optional[optim.Optimizer] = None
         self._student_opt_config: dict[str, Any] = {}
-        self.proxy_data: torch.Tensor | None = None
+        self.proxy_data: Optional[torch.Tensor] = None
         self.proxy_loader = None
         self.tdl_done = False
         # Cache for normalization tensors.

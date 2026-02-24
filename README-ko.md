@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-active-success)
@@ -92,9 +92,17 @@ pip install -e ".[dev]"
 bash scripts/launch/run_smoke.sh cuda:0
 
 # 2) 매트릭스 설정 생성
-python generate_configs.py
+# ImageNet surrogate 기본 경로는 C:/imagenet 입니다.
+# 각자 로컬 경로에 맞게 IMAGENET_ROOT를 바꿔서 생성하세요.
+IMAGENET_ROOT=C:/imagenet python generate_configs.py
 
-# 3) 완료된 실행 결과 집계
+# WSL 예시
+IMAGENET_ROOT=/mnt/c/imagenet python generate_configs.py
+
+# 3) (선택) 같은 경로로 전체 매트릭스 실행
+IMAGENET_ROOT=C:/imagenet bash scripts/launch/run_matrix.sh
+
+# 4) 완료된 실행 결과 집계
 python aggregate_matrix.py
 ```
 
@@ -114,16 +122,17 @@ v1.0 벤치마크의 전체 실험(매트릭스 프로토콜)을 재현합니다
 
 ```bash
 # 1. 모든 설정 파일 생성
-python generate_configs.py
+IMAGENET_ROOT=C:/imagenet python generate_configs.py
 
 # 2. 실험 실행 (순차 실행 또는 쉘 스크립트로 병렬화 가능)
-bash scripts/launch/run_matrix.sh
+IMAGENET_ROOT=C:/imagenet bash scripts/launch/run_matrix.sh
 
 # 3. 결과 집계 (CSV/LaTeX 포맷)
 python aggregate_matrix.py
 ```
 
 공식 런처 스크립트는 `scripts/launch/`에 정리되어 있습니다.
+`IMAGENET_ROOT`는 사용자 로컬 ImageNet 경로에 맞게 반드시 수정해야 합니다.
 
 ### 3. 스모크 실행 (권장 시작점)
 

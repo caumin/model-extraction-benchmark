@@ -109,8 +109,8 @@ class CopycatCNN(AttackRunner):
         )
 
         self.pool_dataset = None
-        self.substitute: nn.Module | None = None
-        self.substitute_optimizer: torch.optim.Optimizer | None = None
+        self.substitute: Optional[nn.Module] = None
+        self.substitute_optimizer: Optional[torch.optim.Optimizer] = None
 
         self._initialize_state(state)
         

@@ -56,11 +56,11 @@ class ESAttack(AttackRunner):
                 self.opt_steps,
             )
 
-        self.student: nn.Module | None = None
-        self.generator: nn.Module | None = None
-        self.student_optimizer: optim.Optimizer | None = None
-        self.generator_optimizer: optim.Optimizer | None = None
-        self.syn_data: torch.Tensor | None = None
+        self.student: Optional[nn.Module] = None
+        self.generator: Optional[nn.Module] = None
+        self.student_optimizer: Optional[optim.Optimizer] = None
+        self.generator_optimizer: Optional[optim.Optimizer] = None
+        self.syn_data: Optional[torch.Tensor] = None
         
         # Replay buffer for dataset accumulation (ES Attack critical fix)
         self.replay_buffer_x: List[torch.Tensor] = []
@@ -305,8 +305,8 @@ class ESAttack(AttackRunner):
 
     def _train_generator(
         self,
-        z_cpu: torch.Tensor | None,
-        y_g_cpu: torch.Tensor | None,
+        z_cpu: Optional[torch.Tensor],
+        y_g_cpu: Optional[torch.Tensor],
         device: str,
     ) -> None:
         if self.generator is None:

@@ -56,11 +56,11 @@ class InverseNet(AttackRunner):
         self.hcss_max_iter = int(config.get("hcss_max_iter", 20))
 
         self.pool_dataset = None
-        self.pool_data: torch.Tensor | None = None
-        self.inversion_model: nn.Module | None = None
-        self.inversion_optimizer: torch.optim.Optimizer | None = None
-        self.substitute: nn.Module | None = None
-        self.substitute_optimizer: torch.optim.Optimizer | None = None
+        self.pool_data: Optional[torch.Tensor] = None
+        self.inversion_model: Optional[nn.Module] = None
+        self.inversion_optimizer: Optional[torch.optim.Optimizer] = None
+        self.substitute: Optional[nn.Module] = None
+        self.substitute_optimizer: Optional[torch.optim.Optimizer] = None
 
         self._initialize_state(state)
 

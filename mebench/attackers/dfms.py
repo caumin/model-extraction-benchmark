@@ -131,22 +131,22 @@ class DFMSHL(AttackRunner):
         self.alternate_auto_augment = bool(config.get("alternate_auto_augment", True))
         self.auto_augment_policy = str(config.get("auto_augment_policy", "cifar10")).strip().lower()
 
-        self.generator: nn.Module | None = None
-        self.discriminator: nn.Module | None = None
-        self.clone: nn.Module | None = None
-        self.generator_optimizer: optim.Optimizer | None = None
-        self.discriminator_optimizer: optim.Optimizer | None = None
-        self.clone_optimizer: optim.Optimizer | None = None
-        self.clone_scheduler: optim.lr_scheduler.CosineAnnealingLR | None = None
-        self.proxy_data: torch.Tensor | None = None
+        self.generator: Optional[nn.Module] = None
+        self.discriminator: Optional[nn.Module] = None
+        self.clone: Optional[nn.Module] = None
+        self.generator_optimizer: Optional[optim.Optimizer] = None
+        self.discriminator_optimizer: Optional[optim.Optimizer] = None
+        self.clone_optimizer: Optional[optim.Optimizer] = None
+        self.clone_scheduler: Optional[optim.lr_scheduler.CosineAnnealingLR] = None
+        self.proxy_data: Optional[torch.Tensor] = None
         self.pretrained = False
         self._auto_augment = self._build_auto_augment()
         eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
         self._next_eval_query = self.eval_interval_queries
         self._periodic_eval_done: set[int] = set()
-        self._eval_substitute: nn.Module | None = None
-        self._budget_plan: DFMSBudgetPlan | None = None
+        self._eval_substitute: Optional[nn.Module] = None
+        self._budget_plan: Optional[DFMSBudgetPlan] = None
         self._stage_query_ledger: Dict[str, int] = {
             "student_init_dcgan": 0,
             "student_init_degan": 0,
@@ -172,7 +172,7 @@ class DFMSHL(AttackRunner):
 
         return torch.clamp(x_tanh, -1.0, 1.0)
 
-    def _get_substitute_for_eval(self) -> nn.Module | None:
+    def _get_substitute_for_eval(self) -> Optional[nn.Module]:
         if self.clone is None:
             return None
         return self.clone
@@ -1335,7 +1335,7 @@ class DFMSHL(AttackRunner):
             self._pretrain_gan(device)
             self.pretrained = True
 
-    def _next_proxy_batch(self, device: str, batch_size: int | None = None) -> torch.Tensor:
+    def _next_proxy_batch(self, device: str, batch_size: Optional[int] = None) -> torch.Tensor:
         bs = batch_size or self.batch_size
         if self.proxy_data is None or self.proxy_data.size(0) == 0:
             raise RuntimeError("Proxy data not loaded")

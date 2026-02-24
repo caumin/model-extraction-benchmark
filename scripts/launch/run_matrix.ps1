@@ -19,6 +19,7 @@ Push-Location $repoRoot
 try {
     $matrixDir = Get-EnvOrDefault -Name "MATRIX_DIR" -Default "configs/matrix"
     $device = Get-EnvOrDefault -Name "MEBENCH_DEVICE" -Default "cuda:0"
+    $imagenetRoot = Get-EnvOrDefault -Name "IMAGENET_ROOT" -Default "C:/imagenet"
     $pattern = Get-EnvOrDefault -Name "MATRIX_PATTERN" -Default "*.yaml"
     $pythonBin = Get-EnvOrDefault -Name "PYTHON_BIN" -Default "python"
 
@@ -37,6 +38,7 @@ try {
             "generate_configs.py",
             "--out", $matrixDir,
             "--device", $device,
+            "--imagenet-root", $imagenetRoot,
             "--set-a-pool-budget", "$setAPoolBudget",
             "--set-a-synthetic-budget", "$setASyntheticBudget",
             "--set-b-pool-budget", "$setBPoolBudget",

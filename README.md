@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-active-success)
@@ -93,9 +93,17 @@ pip install -e ".[dev]"
 bash scripts/launch/run_smoke.sh cuda:0
 
 # 2) Generate matrix configs
-python generate_configs.py
+# Default ImageNet surrogate root is C:/imagenet
+# Change IMAGENET_ROOT to your local path before generation.
+IMAGENET_ROOT=C:/imagenet python generate_configs.py
 
-# 3) Aggregate completed runs
+# WSL example
+IMAGENET_ROOT=/mnt/c/imagenet python generate_configs.py
+
+# 3) (optional) run full matrix with the same local path
+IMAGENET_ROOT=C:/imagenet bash scripts/launch/run_matrix.sh
+
+# 4) Aggregate completed runs
 python aggregate_matrix.py
 ```
 
@@ -115,16 +123,17 @@ Reproduce the full v1.0 benchmark results (Matrix Protocol).
 
 ```bash
 # 1. Generate all configuration files
-python generate_configs.py
+IMAGENET_ROOT=C:/imagenet python generate_configs.py
 
 # 2. Run experiments (sequentially or parallelize via shell)
-bash scripts/launch/run_matrix.sh
+IMAGENET_ROOT=C:/imagenet bash scripts/launch/run_matrix.sh
 
 # 3. Aggregate results into CSV/LaTeX
 python aggregate_matrix.py
 ```
 
 Official launcher scripts are in `scripts/launch/`.
+`IMAGENET_ROOT` should be changed to each user's local ImageNet path.
 
 ### 3. Smoke Run (Recommended First)
 

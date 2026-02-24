@@ -4,10 +4,31 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "$PYTHON_BIN" ]]; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  elif command -v py >/dev/null 2>&1; then
+    PYTHON_BIN="py"
+  else
+    echo "Python executable not found. Set PYTHON_BIN explicitly (e.g., PYTHON_BIN=py)."
+    exit 127
+  fi
+fi
 MATRIX_DIR="${MATRIX_DIR:-configs/matrix}"
 MATRIX_PATTERN="${MATRIX_PATTERN:-*.yaml}"
 MEBENCH_DEVICE="${MEBENCH_DEVICE:-cuda:0}"
+IMAGENET_ROOT="${IMAGENET_ROOT:-C:/imagenet}"
+
+# WSL/Linux compatibility: convert Windows-style path (e.g., C:/imagenet)
+# to /mnt/c/imagenet for local filesystem checks.
+if [[ "$(uname -s)" == "Linux" && "$IMAGENET_ROOT" =~ ^([A-Za-z]):/(.*)$ ]]; then
+  drive="${BASH_REMATCH[1],,}"
+  rest="${BASH_REMATCH[2]}"
+  IMAGENET_ROOT="/mnt/${drive}/${rest}"
+fi
 SET_A_POOL_BUDGET="${SET_A_POOL_BUDGET:-10000}"
 SET_A_SYNTHETIC_BUDGET="${SET_A_SYNTHETIC_BUDGET:-10000000}"
 SET_B_POOL_BUDGET="${SET_B_POOL_BUDGET:-20000}"
@@ -24,6 +45,7 @@ if [[ "$GENERATE_CONFIGS" != "0" ]]; then
     generate_configs.py
     --out "$MATRIX_DIR"
     --device "$MEBENCH_DEVICE"
+    --imagenet-root "$IMAGENET_ROOT"
     --set-a-pool-budget "$SET_A_POOL_BUDGET"
     --set-a-synthetic-budget "$SET_A_SYNTHETIC_BUDGET"
     --set-b-pool-budget "$SET_B_POOL_BUDGET"
@@ -58,7 +80,7 @@ failed=0
 for config in "${configs[@]}"; do
   name="$(basename "$config" .yaml)"
 
-  if ls "runs/${name}"/*/seed_*/summary.json >/dev/null 2>&1; then
+  if compgen -G "runs/${name}/*/seed_*/summary.json" > /dev/null; then
     echo "[SKIP] ${name}"
     continue
   fi

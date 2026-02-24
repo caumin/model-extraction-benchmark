@@ -1,6 +1,6 @@
 """MAZE (Model Stealing via Zeroth-Order Gradient Estimation) attack implementation."""
 
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Union
 import math
 import torch
 import torch.nn as nn
@@ -51,7 +51,7 @@ class _OfficialMAZEConv3Generator(nn.Module):
 
     def forward(
         self, z: torch.Tensor, return_pre_tanh: bool = False
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         x = self.linear(z)
         x = x.view(-1, 128, self._start_dim, self._start_dim)
         x = self.bn0(x)
