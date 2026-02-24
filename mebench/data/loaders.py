@@ -32,6 +32,28 @@ def _get_default_num_workers(*, default: int = 0) -> int:
         return int(default)
 
 
+def _normalize_root_path(raw_root: str) -> str:
+    """Normalize filesystem roots from config/env across shells.
+
+    Accepts common malformed forms like `C~/path` and `C:~/path` and treats
+    them as `~/path`, then applies env/user expansion.
+    """
+    root = str(raw_root or "").strip()
+    if root == "":
+        root = "./data"
+
+    if len(root) >= 3 and root[0].isalpha() and root[1] == ":" and root[2] == "~":
+        # e.g., C:~/workspace/... -> ~/workspace/...
+        root = root[2:]
+    elif len(root) >= 2 and root[0].isalpha() and root[1] == "~":
+        # e.g., C~/workspace/... -> ~/workspace/...
+        root = root[1:]
+
+    root = os.path.expandvars(root)
+    root = os.path.expanduser(root)
+    return root
+
+
 class BelgiumTSCDataset(Dataset):
     def __init__(self, root: str = "./data", train: bool = True, transform=None) -> None:
         self.root = Path(str(root))
@@ -482,7 +504,8 @@ class SurrogateDataset(Dataset):
             # Directory layout:
             #   <root>/train/<class>/*
             #   <root>/val/<class>/*
-            base = os.environ.get("MEBENCH_IMAGENET_ROOT", root)
+            base_raw = os.environ.get("MEBENCH_IMAGENET_ROOT", root)
+            base = _normalize_root_path(str(base_raw))
             split_dir = os.path.join(str(base), "train" if train_split else "val")
             if not os.path.isdir(split_dir):
                 raise ValueError(
@@ -652,7 +675,7 @@ def create_dataloader(
         desired_resize = (int(desired_input_size[0]), int(desired_input_size[1]))
 
     if data_mode == "surrogate":
-        surrogate_root = str(config.get("surrogate_root") or "./data")
+        surrogate_root = _normalize_root_path(str(config.get("surrogate_root") or "./data"))
         surrogate_resize = config.get("surrogate_resize")
         resize: Optional[Tuple[int, int]]
         if desired_resize is not None:
