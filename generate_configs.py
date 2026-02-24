@@ -449,13 +449,13 @@ def generate_configs(
                             return
                         if str(d.get("surrogate_name")).lower() != "imagenet":
                             return
-                        # ImageNet surrogate (ImageFolder format): use a deterministic 100k subset.
+                        # ImageNet surrogate (ImageFolder format): use a deterministic 50k subset.
                         # Default local path is configurable via --imagenet-root.
                         d.update(
                             {
                                 "surrogate_root": resolved_imagenet_root,
                                 "surrogate_resize": [setup.size, setup.size],
-                                "surrogate_max_samples": 100_000,
+                                "surrogate_max_samples": 50_000,
                                 "surrogate_subset_seed": 42,
                             }
                         )
@@ -653,7 +653,7 @@ def generate_paperlike_configs(
                 {
                     "surrogate_root": resolved_imagenet_root,
                     "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
-                    "surrogate_max_samples": 100_000,
+                    "surrogate_max_samples": 50_000,
                     "surrogate_subset_seed": int(seed),
                 }
             )
@@ -842,7 +842,7 @@ def generate_paperlike_configs(
                 "surrogate_name": "ImageNet",
                 "surrogate_root": resolved_imagenet_root,
                 "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
-                "surrogate_max_samples": 100_000,
+                "surrogate_max_samples": 50_000,
                 "surrogate_subset_seed": 42,
                 "num_workers": int(pool_num_workers),
                 "train_split": True,
@@ -927,7 +927,7 @@ def generate_paperlike_configs(
                 "surrogate_name": "ImageNet",
                 "surrogate_root": "<FILL_ME>",
                 "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
-                "surrogate_max_samples": 100_000,
+                "surrogate_max_samples": 50_000,
                 "surrogate_subset_seed": 42,
                 "num_workers": int(pool_num_workers),
                 "train_split": True,

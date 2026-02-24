@@ -22,7 +22,7 @@ dataset:
   surrogate_name: ImageNet
   surrogate_root: ./data/imagenet
   surrogate_resize: [32, 32]
-  surrogate_max_samples: 100000
+  surrogate_max_samples: 50000
   surrogate_subset_seed: 42
   channels: 3
   input_size: [32, 32]
