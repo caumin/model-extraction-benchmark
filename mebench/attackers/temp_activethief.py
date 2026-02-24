@@ -1,4 +1,4 @@
-"""Internal ActiveThief ablation runner with dual query paths."""
+"""Internal ActiveThief ablation runner with dual pool/query paths."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import torch
+from torch.utils.data import Dataset
 
 from mebench.attackers.activethief import ActiveThief
 from mebench.attackers.runner import AttackRunner
@@ -22,6 +23,7 @@ class _BranchSpec:
     label: str
     budget: int
     query_transform: Callable[[torch.Tensor], torch.Tensor]
+    pool_sample_transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None
 
 
 @dataclass
@@ -31,6 +33,23 @@ class _BranchRuntime:
     attack: ActiveThief
     ctx: _BranchContext
     step_size: int
+
+
+class _MappedDataset(Dataset):
+    def __init__(
+        self,
+        base_dataset: Dataset,
+        sample_transform: Callable[[torch.Tensor], torch.Tensor],
+    ) -> None:
+        self._base_dataset = base_dataset
+        self._sample_transform = sample_transform
+
+    def __len__(self) -> int:
+        return len(self._base_dataset)
+
+    def __getitem__(self, idx: int):
+        x, y = self._base_dataset[idx]
+        return self._sample_transform(x), y
 
 
 class _BranchContext:
@@ -82,8 +101,8 @@ class TempActiveThief(AttackRunner):
     """Compare two ActiveThief variants in one run.
 
     - raw_query_raw_train: query victim with raw pool images, train on raw queried images
-    - norm_query_raw_train: apply victim-like normalization only at query boundary,
-      but keep substitute training on raw queried images
+    - norm_pool_query_train: normalize pool tensors with victim-like transform,
+      then query and train in that same normalized space
     """
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -124,10 +143,13 @@ class TempActiveThief(AttackRunner):
         if not self._warned_missing_norm:
             self.logger.warning(
                 "[TempActiveThief] No victim normalization configured; "
-                "norm-query branch uses identity over raw [0,1] images."
+                "norm-pool branch uses identity over raw [0,1] images."
             )
             self._warned_missing_norm = True
         return x_unit
+
+    def _apply_victim_like_normalization_single(self, x_unit: torch.Tensor) -> torch.Tensor:
+        return self._apply_victim_like_normalization(x_unit.unsqueeze(0)).squeeze(0)
 
     def _make_branch_state(self, branch_budget: int) -> BenchmarkState:
         metadata = copy.deepcopy(self.state.metadata)
@@ -183,6 +205,12 @@ class TempActiveThief(AttackRunner):
 
         if not branch_state.attack_state.get("initialized"):
             branch_attack._setup_datasets(branch_state)
+
+        if spec.pool_sample_transform is not None:
+            branch_attack.pool_dataset = _MappedDataset(
+                branch_attack.pool_dataset,
+                spec.pool_sample_transform,
+            )
 
         branch_attack._bootstrap_seed_and_validation_sets(branch_ctx, branch_state)
 
@@ -276,16 +304,17 @@ class TempActiveThief(AttackRunner):
                 query_transform=self._identity,
             ),
             _BranchSpec(
-                name="norm_query_raw_train",
-                label="query=victim_norm(raw), train=raw",
+                name="norm_pool_query_train",
+                label="pool=victim_norm(raw), query=pool, train=pool",
                 budget=norm_budget,
-                query_transform=self._apply_victim_like_normalization,
+                query_transform=self._identity,
+                pool_sample_transform=self._apply_victim_like_normalization_single,
             ),
         ]
 
         self.logger.info(
             "[TempActiveThief] Variants: raw_query_raw_train(query=raw,train=raw), "
-            "norm_query_raw_train(query=victim_norm(raw),train=raw)"
+            "norm_pool_query_train(pool=victim_norm(raw),query=pool,train=pool)"
         )
 
         pbar = self._create_progress_bar(total_budget, "[TempActiveThief] Ablation")
