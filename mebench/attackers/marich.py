@@ -48,6 +48,11 @@ class MARICH(AttackRunner):
 
     Official pipeline (image branch) uses staged selection:
     entropy -> loss-based proximity -> gradient-based filtering.
+
+    Note:
+    This implementation intentionally preserves the paper/original staged protocol.
+    Harmonization with the benchmark's unified pool-based protocol is tracked as
+    a follow-up fairness improvement task.
     """
 
     def __init__(self, config: Dict[str, Any], state: BenchmarkState) -> None:

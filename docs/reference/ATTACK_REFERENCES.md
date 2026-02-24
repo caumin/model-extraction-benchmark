@@ -38,3 +38,4 @@ Legend:
   - `mebench/attackers/PORTING_PLAN.md`
 - "Official repository" can be listed as a provenance reference even when `Provenance` is `Paper-only`; direct code-port status is determined by the `Provenance` column.
 - Public GitHub links are provided so provenance remains verifiable even when local clone directories are excluded from release.
+- MARICH currently keeps its original staged paper protocol; full harmonization with the benchmark's unified pool-based protocol is a planned follow-up.

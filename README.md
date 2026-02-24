@@ -71,6 +71,12 @@ We support **17 state-of-the-art attacks**, faithfully re-implemented from their
 Implementation provenance (paper + official repo port links) is documented in
 `docs/reference/ATTACK_REFERENCES.md`.
 
+### Known Improvement Needed
+
+- `MARICH` currently follows the paper/original staged protocol in `mebench/attackers/marich.py`.
+- It is not yet fully harmonized with the shared pool-based benchmark protocol used for strict cross-attack fairness.
+- Planned follow-up: integrate MARICH into a unified pool-based protocol layer (selection/training/evaluation schedule alignment).
+
 ## ⚡ Installation
 
 ```bash

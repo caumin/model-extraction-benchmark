@@ -70,6 +70,12 @@
 공격별 구현 출처(제안 논문 + 공식 레포 이식 링크)는
 `docs/reference/ATTACK_REFERENCES.md`에서 확인할 수 있습니다.
 
+### 추가 개선 필요 사항
+
+- `MARICH`는 현재 `mebench/attackers/marich.py`에서 논문/원본 단계형 프로토콜을 유지하고 있습니다.
+- 따라서 다른 pool-based 공격과 완전히 통합된 공정 비교 프로토콜에는 아직 맞춰지지 않았습니다.
+- 향후 과제: pool-based 공격 공통 프로토콜 계층(선택/학습/평가 스케줄)을 통합해 MARICH를 정렬.
+
 ## ⚡ 설치 방법
 
 ```bash
