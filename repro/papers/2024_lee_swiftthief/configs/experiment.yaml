@@ -1,0 +1,67 @@
+run:
+  name: repro_2024_lee_swiftthief_full8k_seed0
+  seeds:
+  - 0
+  device: cuda:0
+benchmark:
+  protocol_version: '1.2'
+victim:
+  victim_id: cifar10_resnet18
+  arch: resnet18
+  channels: 3
+  num_classes: 10
+  input_size:
+  - 32
+  - 32
+  checkpoint_ref: runs/victims/cifar10_resnet18_seed0.pt
+  output_mode: soft_prob
+  temperature: 1.0
+dataset:
+  name: CIFAR10
+  data_mode: surrogate
+  surrogate_name: ImageNet
+  channels: 3
+  input_size:
+  - 32
+  - 32
+attack:
+  name: swiftthief
+  output_mode: soft_prob
+  max_budget: 8000
+  batch_size: 256
+  I: 10
+  initial_seed_ratio: 0.1
+  query_fraction_per_round: 0.1
+  imbalance_kde_splits: 5
+  sl_epoch: 500
+  sl_aug_interval: 50
+  kd_lr: 0.01
+  kd_epochs: 40
+  cl_epochs: 40
+  final_cl_epochs: 100
+  fgsm_epsilon: 0.01
+  lambda1: 1.0
+  lambda2: 0.01
+  projection_dim: 2048
+  effective_beta: 0.99
+substitute:
+  arch: resnet18
+  width_mult: 1
+  init_seed: 0
+  batch_size: 128
+  optimizer:
+    name: sgd
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.0005
+budget:
+  max_budget: 8000
+  checkpoints:
+  - 2000
+  - 4000
+  - 6000
+  - 8000
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true

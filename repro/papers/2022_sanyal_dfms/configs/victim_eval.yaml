@@ -1,0 +1,17 @@
+seed: 0
+batch_size: 256
+num_workers: 0
+victim:
+  arch: resnet34
+  width_mult: 1
+  checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt
+  channels: 3
+  num_classes: 10
+  input_size:
+  - 32
+  - 32
+dataset:
+  name: CIFAR10
+output:
+  json: repro/papers/2022_sanyal_dfms/results/victim_eval.json
+  csv: repro/papers/2022_sanyal_dfms/results/victim_eval.csv

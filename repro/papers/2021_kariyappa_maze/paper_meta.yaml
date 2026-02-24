@@ -1,0 +1,10 @@
+title: "MAZE: Data-Free Model Stealing Attack using Zeroth-Order Gradient Estimation"
+authors:
+  - Sanjay Kariyappa
+  - Atul Prakash
+  - Moinuddin K. Qureshi
+venue: CVPR
+year: 2021
+paper_id: 2021_kariyappa_maze
+pdf_file: papers/MAZE.pdf
+sha256: e1ee3004e9ab91f277903035dcd2e2205e3be176c629cff91bac2ca3cc2d3c29

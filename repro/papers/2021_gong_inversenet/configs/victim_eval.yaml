@@ -1,0 +1,15 @@
+seed: 0
+batch_size: 128
+num_workers: 0
+victim:
+  arch: classifier
+  dropout_prob: 0.2
+  checkpoint_ref: runs/victims/mnist_classifier_seed0.pt
+  channels: 1
+  num_classes: 10
+  input_size: [28, 28]
+dataset:
+  name: MNIST
+output:
+  json: repro/papers/2021_gong_inversenet/results/victim_eval.json
+  csv: repro/papers/2021_gong_inversenet/results/victim_eval.csv

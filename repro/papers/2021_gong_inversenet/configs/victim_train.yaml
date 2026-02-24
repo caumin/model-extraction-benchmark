@@ -1,0 +1,17 @@
+dataset: MNIST
+arch: classifier
+seed: 0
+victim_id: mnist_classifier
+out: runs/victims/mnist_classifier_seed0.pt
+save_metadata: true
+train:
+  epochs: 30
+  batch_size: 128
+  scheduler: none
+  dropout_prob: 0.2
+  num_workers: 0
+  optimizer:
+    name: adam
+    lr: 0.001
+    momentum: 0.9
+    weight_decay: 0.0

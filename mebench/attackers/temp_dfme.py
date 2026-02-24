@@ -13,6 +13,7 @@ import torch.optim as optim
 from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.state import BenchmarkState
+from mebench.data.preprocessing import apply_official_preprocess_batch
 from mebench.models.gan import DFMEGenerator
 from mebench.models.substitute_factory import create_substitute
 from mebench.utils.scaling import tanh_to_unit
@@ -56,9 +57,12 @@ class TempDFME(AttackRunner):
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
         self._next_paired_eval_query = int(self.eval_interval_queries)
         self._checkpoint_eval_done: set[int] = set()
+        self._warned_missing_norm = False
+        self._norm_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
 
         self.baseline_branch: Optional[_BranchState] = None
         self.unit_branch: Optional[_BranchState] = None
+        self.norm_query_branch: Optional[_BranchState] = None
 
     def _build_branch(
         self,
@@ -117,7 +121,45 @@ class TempDFME(AttackRunner):
     def _query_scale(self, branch: _BranchState, x_tanh: torch.Tensor) -> torch.Tensor:
         if branch.query_scale_mode == "unit_01":
             return tanh_to_unit(x_tanh)
+        if branch.query_scale_mode == "unit_01_victim_norm_query":
+            x_unit = tanh_to_unit(x_tanh)
+            return self._apply_victim_like_normalization(x_unit)
         return torch.clamp(x_tanh, -1.0, 1.0)
+
+    def _apply_victim_like_normalization(self, x_unit: torch.Tensor) -> torch.Tensor:
+        victim_cfg = self.state.metadata.get("victim_config", {}) or {}
+        profile = victim_cfg.get("official_preprocess_profile")
+        if profile:
+            return apply_official_preprocess_batch(x_unit, str(profile))
+
+        normalization = victim_cfg.get("normalization")
+        if isinstance(normalization, dict):
+            mean = normalization.get("mean")
+            std = normalization.get("std")
+            if isinstance(mean, (list, tuple)) and isinstance(std, (list, tuple)):
+                channels = int(x_unit.size(1))
+                if len(mean) == channels and len(std) == channels:
+                    key = (str(x_unit.device), channels)
+                    cached = self._norm_cache.get(key)
+                    if cached is None:
+                        mean_t = torch.tensor(mean, dtype=x_unit.dtype, device=x_unit.device).view(1, channels, 1, 1)
+                        std_t = torch.tensor(std, dtype=x_unit.dtype, device=x_unit.device).view(1, channels, 1, 1)
+                        self._norm_cache[key] = (mean_t, std_t)
+                        cached = (mean_t, std_t)
+                    mean_t, std_t = cached
+                    return (x_unit - mean_t) / std_t.clamp_min(1e-8)
+
+        if not self._warned_missing_norm:
+            self.logger.warning(
+                "[TempDFME] No victim normalization configured; normalized-query branch uses identity on [0,1]."
+            )
+            self._warned_missing_norm = True
+        return x_unit
+
+    def _student_input(self, branch: _BranchState, x_tanh: torch.Tensor) -> torch.Tensor:
+        if branch.query_scale_mode == "unit_01_victim_norm_query":
+            return tanh_to_unit(x_tanh)
+        return self._query_scale(branch, x_tanh)
 
     def _decay_lr_if_needed(self, branch: _BranchState) -> None:
         milestones = [
@@ -155,7 +197,7 @@ class TempDFME(AttackRunner):
             z = torch.randn(batch, self.noise_dim, device=device)
             pre_tanh, x_tanh = branch.generator(z, return_pre_tanh=True)
             x_query = self._query_scale(branch, x_tanh)
-            x_student = x_query
+            x_student = self._student_input(branch, x_tanh)
 
             with torch.no_grad():
                 s_out = branch.student(x_student)
@@ -171,7 +213,7 @@ class TempDFME(AttackRunner):
                 x_pert_tanh = torch.tanh(pre_tanh + self.epsilon * u)
                 x_pert_query = self._query_scale(branch, x_pert_tanh)
                 x_pert_query_list.append(x_pert_query)
-                x_pert_student_list.append(x_pert_query)
+                x_pert_student_list.append(self._student_input(branch, x_pert_tanh))
                 u_list.append(u)
 
             x_query_all = torch.cat([x_query] + x_pert_query_list, dim=0)
@@ -210,7 +252,7 @@ class TempDFME(AttackRunner):
             z = torch.randn(batch, self.noise_dim, device=device)
             x_tanh = branch.generator(z).detach()
             x_query = self._query_scale(branch, x_tanh)
-            x_student = x_query
+            x_student = self._student_input(branch, x_tanh)
             v_out = self._query_with_budget(ctx, x_query)
             branch.consumed_budget += int(x_query.size(0))
             pbar.update(int(x_query.size(0)))
@@ -253,36 +295,39 @@ class TempDFME(AttackRunner):
     def _maybe_paired_eval(self, device: str) -> None:
         if int(self.eval_interval_queries) <= 0:
             return
-        if self.baseline_branch is None or self.unit_branch is None:
+        active_branches = [b for b in (self.baseline_branch, self.unit_branch, self.norm_query_branch) if b is not None]
+        if len(active_branches) < 2:
             return
 
-        paired_progress = min(
-            int(self.baseline_branch.consumed_budget),
-            int(self.unit_branch.consumed_budget),
-        )
+        paired_progress = min(int(b.consumed_budget) for b in active_branches)
         while int(self._next_paired_eval_query) > 0 and paired_progress >= int(self._next_paired_eval_query):
             q = int(self._next_paired_eval_query)
             self.logger.info(
-                "[TempDFME] Paired eval at branch_queries=%d for both variants", q
+                "[TempDFME] Paired eval at branch_queries=%d for all variants", q
             )
-            self._evaluate_branch(self.baseline_branch, device, query_count=q)
-            self._evaluate_branch(self.unit_branch, device, query_count=q)
+            for branch in active_branches:
+                self._evaluate_branch(branch, device, query_count=q)
             self._next_paired_eval_query += int(self.eval_interval_queries)
 
     def _maybe_checkpoint_eval(self, device: str) -> None:
         reached = self.state.attack_state.get("checkpoint_reached", [])
         if not reached:
             return
+        active_branches = [b for b in (self.baseline_branch, self.unit_branch, self.norm_query_branch) if b is not None]
+        if not active_branches:
+            return
         for checkpoint in reached:
             q_global = int(checkpoint)
             if q_global in self._checkpoint_eval_done:
                 continue
-            if self.baseline_branch is not None:
-                q_baseline = min(q_global, int(self.baseline_branch.consumed_budget))
-                self._evaluate_branch(self.baseline_branch, device, query_count=q_baseline)
-            if self.unit_branch is not None:
-                q_unit = min(q_global, int(self.unit_branch.consumed_budget))
-                self._evaluate_branch(self.unit_branch, device, query_count=q_unit)
+            q_paired = min(min(q_global, int(branch.consumed_budget)) for branch in active_branches)
+            self.logger.info(
+                "[TempDFME] Checkpoint eval at global_queries=%d using paired branch_queries=%d",
+                q_global,
+                q_paired,
+            )
+            for branch in active_branches:
+                self._evaluate_branch(branch, device, query_count=q_paired)
             self._checkpoint_eval_done.add(q_global)
 
     def run(self, ctx: BenchmarkContext) -> None:
@@ -290,8 +335,9 @@ class TempDFME(AttackRunner):
         self.victim = ctx.oracle.model
 
         total_budget = int(ctx.budget_remaining)
-        baseline_budget = int(total_budget // 2)
-        unit_budget = int(total_budget - baseline_budget)
+        baseline_budget = int(total_budget // 3)
+        unit_budget = int(total_budget // 3)
+        norm_budget = int(total_budget - baseline_budget - unit_budget)
 
         self.baseline_branch = self._build_branch(
             self.state,
@@ -307,16 +353,23 @@ class TempDFME(AttackRunner):
             "unit_01",
             "[0,1]",
         )
+        self.norm_query_branch = self._build_branch(
+            self.state,
+            "unit_query_01_victim_norm",
+            norm_budget,
+            "unit_01_victim_norm_query",
+            "query=norm([0,1]), train=[0,1]",
+        )
 
         self.logger.info(
-            "[TempDFME] Variants: baseline_m11(query_scale=[-1,1]), unit_query_01(query_scale=[0,1])"
+            "[TempDFME] Variants: baseline_m11(query_scale=[-1,1]), unit_query_01(query_scale=[0,1]), unit_query_01_victim_norm(query=norm([0,1]), train=[0,1])"
         )
 
         pbar = self._create_progress_bar(total_budget, "[TempDFME] Dual Extracting")
 
         while ctx.budget_remaining > 0:
             progressed = False
-            for branch in (self.baseline_branch, self.unit_branch):
+            for branch in (self.baseline_branch, self.unit_branch, self.norm_query_branch):
                 if branch is None:
                     continue
                 if int(branch.consumed_budget) >= int(branch.target_budget):
@@ -326,7 +379,6 @@ class TempDFME(AttackRunner):
                 before = int(branch.consumed_budget)
                 self._run_generator_step(branch, ctx, device, pbar)
                 self._run_student_step(branch, ctx, device, pbar)
-                self._maybe_checkpoint_eval(device)
                 if int(branch.consumed_budget) > before:
                     progressed = True
                 if ctx.budget_remaining <= 0:
@@ -337,11 +389,14 @@ class TempDFME(AttackRunner):
             if not progressed:
                 break
 
-        if self.baseline_branch is not None:
-            self._evaluate_branch(self.baseline_branch, device)
-        if self.unit_branch is not None:
-            self._evaluate_branch(self.unit_branch, device)
+        self._maybe_paired_eval(device)
         self._maybe_checkpoint_eval(device)
+        active_branches = [b for b in (self.baseline_branch, self.unit_branch, self.norm_query_branch) if b is not None]
+        if active_branches:
+            q_final = min(int(b.consumed_budget) for b in active_branches)
+            self.logger.info("[TempDFME] Final paired eval at branch_queries=%d", q_final)
+            for branch in active_branches:
+                self._evaluate_branch(branch, device, query_count=q_final)
 
         baseline_student = self.baseline_branch.student if self.baseline_branch is not None else None
         unit_student = self.unit_branch.student if self.unit_branch is not None else None
@@ -349,11 +404,14 @@ class TempDFME(AttackRunner):
             self.state.attack_state["substitute_baseline"] = baseline_student
         if unit_student is not None:
             self.state.attack_state["substitute_unit_query"] = unit_student
+        if self.norm_query_branch is not None:
+            self.state.attack_state["substitute_unit_query_victim_norm"] = self.norm_query_branch.student
         self.state.attack_state["substitute"] = None
 
         self.state.attack_state["ablation_query_counts"] = {
             "baseline": int(self.baseline_branch.consumed_budget) if self.baseline_branch is not None else 0,
             "unit_query": int(self.unit_branch.consumed_budget) if self.unit_branch is not None else 0,
+            "unit_query_victim_norm": int(self.norm_query_branch.consumed_budget) if self.norm_query_branch is not None else 0,
         }
 
         pbar.close()

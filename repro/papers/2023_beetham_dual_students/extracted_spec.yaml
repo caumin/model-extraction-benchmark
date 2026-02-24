@@ -1,0 +1,52 @@
+paper:
+  paper_id: 2023_beetham_dual_students
+  title: "Dual Students for Data-Free Model Extraction"
+  year: 2023
+  venue: ICLR
+pdf:
+  path: /papers/DS.pdf
+  sha256: ""
+attack:
+  name: ds
+  oracle_access:
+    type: soft_prob_or_hard_top1
+  query_budget:
+    cifar10: 20000000
+  substitute:
+    architecture: resnet18
+    training:
+      batch_size: 256
+      student_lr: 0.3
+  hyperparameters:
+    generator_lr: 0.0001
+    g_iter: 1
+    d_iter: 5
+    num_students: 2
+    loss: l1
+    generator_loss: l1
+evaluation:
+  metrics:
+    - acc_gt
+    - agreement
+reported_results:
+  tables:
+    - id: table_main
+      metrics:
+        cifar10_soft_label_ds:
+          query_budget: 20000000
+          victim_acc: 0.9554
+          clone_acc: 0.9134
+  figures: []
+  targets:
+    - id: cifar10_softlabel_main
+      condition: CIFAR-10 soft-label Dual Students final clone accuracy
+      metric_name: acc_gt
+      query_budget: 20000000
+      paper_value: 0.9134
+      track: track_b
+      tolerance_pp: 2.0
+assumptions:
+  - item: full-budget parity requires long-running 20M query execution
+    reason: local smoke/full checks do not complete official-scale budget by default
+  - item: shared CIFAR10 ResNet34 victim profile
+    reason: repro config is aligned to runs/victims/cifar10-resnet34_8x.pt for cross-attack comparability

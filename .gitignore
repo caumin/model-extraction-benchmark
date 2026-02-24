@@ -37,7 +37,6 @@ runs/
 /data/
 !mebench/data/
 /papers/
-/repro/
 /reproduction_specs/
 /official_repo_clones/
 /archive/

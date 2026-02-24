@@ -1,0 +1,10 @@
+paper_id: 2020_barbalau_blackbox_ripper
+strict_reproduction:
+  possible_locally: false
+  blockers:
+    - "Requires pretrained generator checkpoints under checkpoints/blackbox_ripper/official/"
+  caveats:
+    - "If checkpoint filename omits extension, loader fallback resolves .pth/.pt automatically"
+local_fallback_profile:
+  config_smoke: repro/papers/2020_barbalau_blackbox_ripper/configs/experiment_smoke.yaml
+  config_full: repro/papers/2020_barbalau_blackbox_ripper/configs/experiment.yaml

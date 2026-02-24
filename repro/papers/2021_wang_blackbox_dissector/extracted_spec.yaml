@@ -1,0 +1,84 @@
+paper:
+  paper_id: 2021_wang_blackbox_dissector
+  title: "Black-Box Dissector: Towards Erasing-based Hard-Label Model Stealing Attack"
+  authors:
+    - Yixu Wang
+    - Jie Li
+    - Hong Liu
+    - Yan Wang
+    - Yongjian Wu
+    - Feiyue Huang
+    - Rongrong Ji
+  year: 2021
+  venue: "arXiv"
+pdf:
+  path: /papers/blackbox-dissector.pdf
+  sha256: ce99534ad31fdb5622a51fcdde6cd5887132ffc3436a8074fb06eeea3ee537c1
+datasets:
+  - name: CIFAR10
+    role: victim_dataset
+    task: image classification
+    num_classes: 10
+  - name: ILSVRC-2012 / ImageNet
+    role: surrogate_query_pool
+    task: unlabeled query pool
+victim:
+  architecture:
+    name: ResNet34
+    details: benchmark repro profile
+  output_mode: hard_top1
+attack:
+  name: blackbox_dissector
+  oracle_access:
+    type: hard_label
+  data_mode: surrogate
+  query_budget:
+    smoke: 2000
+    full: 30000
+  hyperparameters:
+    n_variants: 10
+    erase_rate: 0.25
+    sl: 0.02
+    sh: 0.4
+    r1: 0.3
+    r2: 3.3
+    lr: 0.02
+    momentum: 0.9
+    max_epochs: 200
+evaluation:
+  metrics: [acc_gt, agreement]
+  protocol: evaluate substitute at configured query checkpoints
+reported_results:
+  tables:
+    - id: Table 1
+      metrics:
+        cifar10_ours_random:
+          agreement: 0.8214
+          acc: 0.8047
+          query_budget: 30000
+  figures: []
+  targets:
+    - id: cifar10_main_acc
+      condition: CIFAR10 Ours+Random @30k queries
+      metric_name: acc_gt
+      query_budget: 30000
+      paper_value: 0.8047
+      track: track_b
+      tolerance_pp: 1.5
+assumptions:
+  - item: surrogate dataset path requirement
+    reason: strict protocol expects ImageNet-style pool availability
+    impact_check: run requires surrogate root mapping in local/remote environment
+evidence_index:
+  - item_path: paper.title
+    pdf_page: 1
+    ref: title
+    quote: "Black-Box Dissector: Towards Erasing-based Hard-Label Model Stealing Attack"
+  - item_path: attack.oracle_access.type
+    pdf_page: 1
+    ref: abstract
+    quote: "under the more practical hard-label setting"
+  - item_path: reported_results.targets[0].paper_value
+    pdf_page: 201
+    ref: Table 1
+    quote: "Ours+Random ... CIFAR10 ... Acc. 80.47"

@@ -1,0 +1,9 @@
+paper_id: 2023_beetham_dual_students
+strict_reproduction:
+  possible_locally: true
+  blockers: []
+  caveats:
+    - "Full budget (20M) is high-cost; prefer remote GPU execution"
+local_fallback_profile:
+  config_smoke: repro/papers/2023_beetham_dual_students/configs/experiment_smoke.yaml
+  config_full: repro/papers/2023_beetham_dual_students/configs/experiment.yaml

@@ -1,0 +1,47 @@
+paper:
+  paper_id: 2024_lee_swiftthief
+  title: "Enhancing Query Efficiency of Model Stealing by Contrastive Learning"
+  authors: []
+  year: 2024
+  venue: "IJCAI"
+pdf:
+  path: /papers/swiftthief.pdf
+  sha256: b5c3113c29e4b88b3f49d1e837bcbfd516b2e023c3ea1706ed218e4b0085a171
+datasets:
+  - name: CIFAR10
+    notes: victim dataset in official script `scripts/swiftthief/cifar10.sh`
+  - name: ImageNet32
+    notes: surrogate/attack dataset in official script (`s_dataset=imagenet`)
+victim:
+  architecture:
+    name: resnet18_cifar
+attack:
+  name: swiftthief
+  oracle_access:
+    type: prob
+  query_budget:
+    cifar10_script_defaults: [2000, 4000, 6000, 8000]
+  hyperparameters:
+    sl_lr: 0.01
+    sl_epoch: 500
+    sl_aug_interval: 50
+    initial_seed_ratio: 0.1
+evaluation:
+  metrics:
+    - acc_gt
+    - agreement
+reported_results:
+  tables: []
+  figures: []
+  targets: []
+assumptions:
+  - item: script defaults imported from official swiftthief shell scripts
+    reason: paper tables are not yet extracted into machine-readable targets
+    impact_check: comparison table remains incomplete until targets are added
+evidence_index:
+  - item_path: attack.query_budget.cifar10_script_defaults
+    ref: official_repo_clones/swiftthief/scripts/swiftthief/cifar10.sh:4
+    quote: "query_budget_list=(2000 4000 6000 8000)"
+  - item_path: attack.hyperparameters.sl_epoch
+    ref: official_repo_clones/swiftthief/scripts/swiftthief/cifar10.sh:29
+    quote: "--sl_epoch 500"

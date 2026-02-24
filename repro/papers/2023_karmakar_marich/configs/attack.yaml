@@ -1,0 +1,41 @@
+attack:
+  name: marich
+  output_mode: hard_top1
+  max_budget: 30000
+  pool_num_workers: 8
+  num_clusters: 10
+  validation_source: pool_split
+  query_preprocess_profile: marich_imagenet32_cifar10_query
+  validation_budget_ratio: 0.2
+  sampling: all_elg
+  init_points: 500
+  budget: 750
+  gamma1: 0.8
+  gamma2: 0.8
+  rounds: 10
+  epochs: 8
+  budget_growth: 1.01
+  epochs_growth: 1.02
+  batch_size: 128
+  selection_batch_size: 128
+  lr: 0.02
+  weight_decay: 0.0005
+  patience: 20
+
+substitute:
+  arch: resnet18
+  pretrained: true
+  width_mult: 1
+  init_seed: 1234
+  batch_size: 128
+  optimizer:
+    name: sgd
+    lr: 0.02
+    momentum: 0.9
+    weight_decay: 0.0005
+  max_epochs: 200
+  patience: 20
+
+budget:
+  max_budget: 30000
+  checkpoints: [1000, 5000, 10000, 20000, 30000]

@@ -1,0 +1,63 @@
+run:
+  name: repro_2021_truong_dfme_smoke2k_seed0
+  seeds:
+  - 0
+  device: cuda:0
+benchmark:
+  protocol_version: '1.2'
+victim:
+  victim_id: cifar10_resnet34_8x_official
+  arch: resnet34
+  width_mult: 1
+  channels: 3
+  num_classes: 10
+  input_size:
+  - 32
+  - 32
+  checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt
+  output_mode: soft_prob
+  temperature: 1.0
+  return_outputs_on_cpu: false
+  normalization: null
+  official_preprocess_profile: dfme_cifar10_test
+dataset:
+  name: CIFAR10
+  data_mode: data_free
+  channels: 3
+  input_size:
+  - 32
+  - 32
+attack:
+  name: dfme
+  output_mode: soft_prob
+  max_budget: 2000
+  eval_interval_queries: 500
+  batch_size: 64
+  n_g_steps: 1
+  n_s_steps: 1
+  grad_approx_m: 1
+  grad_approx_epsilon: 0.001
+  generator_lr: 0.0001
+  noise_dim: 256
+substitute:
+  arch: resnet18
+  width_mult: 1
+  init_seed: 1234
+  optimizer:
+    name: sgd
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.0005
+budget:
+  max_budget: 2000
+  checkpoints:
+  - 200
+  - 600
+  - 1000
+  - 1400
+  - 1800
+  - 2000
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true

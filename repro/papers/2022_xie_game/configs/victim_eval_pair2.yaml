@@ -1,0 +1,17 @@
+seed: 0
+batch_size: 256
+num_workers: 0
+victim:
+  arch: alexnet
+  width_mult: 1
+  checkpoint_ref: runs/victims/belgiumtsc_alexnet_tanh_game_paper.pt
+  channels: 3
+  num_classes: 62
+  input_size:
+  - 32
+  - 32
+dataset:
+  name: BelgiumTSC
+output:
+  json: repro/papers/2022_xie_game/results/victim_eval_pair2.json
+  csv: repro/papers/2022_xie_game/results/victim_eval_pair2.csv

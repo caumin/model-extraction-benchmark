@@ -1,0 +1,96 @@
+paper:
+  paper_id: 2023_karmakar_marich
+  title: "Marich: A Query-efficient Distributionally Equivalent Model Extraction Attack using Public Data"
+  authors:
+    - Pratik Karmakar
+    - Debabrota Basu
+  year: 2023
+  venue: "OpenReview (ICLR 2023 submission) / arXiv"
+pdf:
+  path: /papers/MARICH.pdf
+  sha256: ""
+datasets:
+  - name: CIFAR10
+    role: victim_dataset
+    task: image classification
+    num_classes: 10
+    preprocessing:
+      input_size: 32x32
+  - name: ImageNet (subset)
+    role: surrogate_query_pool
+    task: unlabeled public pool for querying
+    preprocessing:
+      input_size: 32x32
+victim:
+  architecture:
+    name: ResNet34
+    details: benchmark default victim profile in this repository
+  output_mode: hard_top1
+attack:
+  name: marich
+  oracle_access:
+    type: hard_label
+  data_mode: surrogate
+  query_budget:
+    smoke: 2000
+    full: 30000
+  substitute:
+    architecture: resnet18
+    pretrained: true
+  hyperparameters:
+    sampling: all_elg
+    query_preprocess_profile: marich_imagenet32_cifar10_query
+    num_clusters: 10
+    validation_source: pool_split
+    validation_budget_ratio: 0.2
+    init_points: 500
+    rounds: 10
+    per_round_budget: 750
+    gamma1: 0.8
+    gamma2: 0.8
+    epochs: 8
+    budget_growth: 1.01
+    epochs_growth: 1.02
+evaluation:
+  metrics: [acc_gt, agreement]
+  protocol: run benchmark checkpoints and compare against paper values after table extraction
+reported_results:
+  tables:
+    - id: Table 1
+      metrics:
+        cifar10_resnet_imagenet:
+          queries: 8429
+          accuracy: 0.5611
+          mi_accuracy: 0.9040
+    - id: Figure 2(c)
+      metrics:
+        description: ResNet target with ImageNet queries reaches about 56% test accuracy near 8k queries.
+  figures: []
+  targets:
+    - id: cifar10_resnet_imagenet_main
+      condition: CIFAR10 target (ResNet) with ImageNet public queries
+      metric_name: acc_gt
+      query_budget: 8429
+      paper_value: 0.5611
+      track: track_b
+      tolerance_pp: 2.0
+assumptions:
+  - item: repository implementation is hard-label image path only
+    reason: current marich attack implementation in mebench enforces hard_top1
+    impact_check: soft-probability MARICH variants are out of current scope
+  - item: paper query counts are interpreted as active extraction queries
+    reason: official MARICH pipeline uses a fixed validation split with pre-available pool labels
+    impact_check: when comparing to strict black-box accounting, disclose that validation-label construction cost is excluded
+evidence_index:
+  - item_path: paper.title
+    pdf_page: 1
+    ref: title
+    quote: "Marich: A Query-efficient Distributionally Equivalent Model Extraction Attack using Public Data"
+  - item_path: attack.name
+    pdf_page: 1
+    ref: abstract
+    quote: "This leads us to an active sampling-based query selection algorithm, MARICH."
+  - item_path: reported_results.targets[0].paper_value
+    pdf_page: 8
+    ref: Table 1
+    quote: "CIFAR10 ResNet ImageNet MARICH ... 8429 (16.58%) ... 56.11%"

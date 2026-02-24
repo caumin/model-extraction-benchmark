@@ -1,0 +1,81 @@
+paper:
+  paper_id: 2020_barbalau_blackbox_ripper
+  title: "Black-Box Ripper: Copying black-box models using generative evolutionary algorithms"
+  authors:
+    - Antonio Barbalau
+    - Adrian Cosma
+    - Radu Tudor Ionescu
+    - Marius Popescu
+  year: 2020
+  venue: "NeurIPS"
+pdf:
+  path: /papers/blackbox-ripper.pdf
+  sha256: 104761010f82eb4396423faa373d7e29ea3ecaae88a749417798ee9c8f8e813b
+datasets:
+  - name: CIFAR10
+    role: victim_dataset
+    task: image classification
+    num_classes: 10
+  - name: CIFAR100 (proxy for generator pretraining)
+    role: proxy_generator_dataset
+    task: image generation/classification proxy
+victim:
+  architecture:
+    name: ResNet34
+    details: benchmark victim profile in this repository
+  output_mode: soft_prob
+attack:
+  name: blackbox_ripper
+  oracle_access:
+    type: probability
+  data_mode: data_free
+  query_budget:
+    smoke: 2000
+    full: 30000
+  hyperparameters:
+    population_size: 30
+    elite_size: 10
+    latent_bound: 3.0
+    mutation_scale: 1.0
+    fitness_threshold: 0.02
+    max_evolve_iters: 10
+    substitute_epochs: 200
+evaluation:
+  metrics: [acc_gt, agreement, kl_mean, l1_mean]
+  protocol: evaluate substitute at checkpoints under strict query accounting
+reported_results:
+  tables:
+    - id: Table 1
+      metrics:
+        cifar10_cifar100_6_classes:
+          teacher_acc: 0.825
+          blackbox_ripper_acc: 0.699
+  figures: []
+  targets:
+    - id: cifar10_cifar100_6classes_main
+      condition: CIFAR10 true set with CIFAR-100 (6 classes) proxy
+      metric_name: acc_gt
+      query_budget: 30000
+      paper_value: 0.699
+      track: track_b
+      tolerance_pp: 2.0
+assumptions:
+  - item: paper does not define query-budget checkpoints
+    reason: reported values are from convergence-based training, not explicit image-count budgets
+    impact_check: target maps to repro full profile checkpoint (30k) for compare-stage compatibility
+  - item: external generator checkpoint dependency
+    reason: attack requires pretrained generator checkpoint path
+    impact_check: run fails until checkpoint file is present under configured path
+evidence_index:
+  - item_path: paper.title
+    pdf_page: 1
+    ref: title
+    quote: "Black-Box Ripper: Copying black-box models using generative evolutionary algorithms"
+  - item_path: attack.oracle_access.type
+    pdf_page: 1
+    ref: abstract
+    quote: "we only know the output class probabilities"
+  - item_path: reported_results.targets[0].paper_value
+    pdf_page: 6
+    ref: Table 1
+    quote: "Black-Box Ripper (Ours) ... CIFAR-100 6 classes ... 69.9"

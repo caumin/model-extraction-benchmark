@@ -1,0 +1,84 @@
+run:
+  name: repro_2022_xie_game_smoke1k_sweep_lr01_seed0
+  seeds:
+  - 0
+  device: cuda:0
+benchmark:
+  protocol_version: '1.2'
+victim:
+  victim_id: mnist_lenet32_tanh_game_paper
+  arch: lenet
+  channels: 1
+  num_classes: 10
+  input_size:
+  - 32
+  - 32
+  checkpoint_ref: runs/victims/mnist_lenet32_tanh_game_paper.pt
+  output_mode: soft_prob
+  temperature: 1.0
+  normalization: null
+dataset:
+  name: MNIST
+  data_mode: data_free
+  channels: 1
+  input_size:
+  - 32
+  - 32
+attack:
+  name: game
+  output_mode: soft_prob
+  max_budget: 1000
+  batch_size: 128
+  querybudget: 1000
+  attack_train_epoch: 5
+  final_retrain_epoch_offset: 0
+  round_train_epochs: 3
+  train_on_full_buffer: true
+  optimizer: sgd
+  acs_strategy: random
+  use_acgan: true
+  tdl_steps: 3
+  agu_steps: 2
+  agu_loss_terms:
+  - res
+  - bou
+  - dif
+  gmd_steps: 1
+  noise_dim: 100
+  student_lr: 0.01
+  generator_lr: 0.0002
+  discriminator_lr: 0.0002
+  eval_interval_queries: 200
+  proxy_dataset:
+    name: MNIST
+    data_mode: surrogate
+    surrogate_name: FashionMNIST
+    channels: 1
+    input_size:
+    - 32
+    - 32
+    num_workers: 0
+    surrogate_max_samples: 5000
+substitute:
+  arch: half_lenet
+  width_mult: 1
+  init_seed: 0
+  batch_size: 64
+  optimizer:
+    name: sgd
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.0005
+budget:
+  max_budget: 1000
+  checkpoints:
+  - 100
+  - 300
+  - 500
+  - 700
+  - 900
+  - 1000
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true

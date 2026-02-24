@@ -1,0 +1,114 @@
+run:
+  name: repro_2022_sanyal_dfms_full8m_seed0
+  seeds:
+  - 0
+  device: cuda:0
+benchmark:
+  protocol_version: '1.2'
+repro:
+  victim_eval:
+    enabled: true
+victim:
+  victim_id: cifar10_resnet34_8x_official
+  arch: resnet34
+  width_mult: 1
+  channels: 3
+  num_classes: 10
+  input_size:
+  - 32
+  - 32
+  checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt
+  output_mode: hard_top1
+  temperature: 1.0
+  normalization: null
+dataset:
+  name: CIFAR10
+  data_mode: data_free
+  channels: 3
+  input_size:
+  - 32
+  - 32
+attack:
+  name: dfms
+  output_mode: hard_top1
+  use_official_dcgan_arch: true
+  max_budget: 8000000
+  batch_size: 64
+  oracle_batch_size: 64
+  use_official_stages: true
+  budget_planner:
+    mode: paper_fair
+    nC_target: 50000
+    enforce_exact_budget: true
+  dcgan_epochs: 200
+  student_init_epochs: 200
+  degan_epochs: 100
+  student_degan_epochs: 200
+  alternate_epochs: 800
+  student_init_lr: 0.1
+  student_alt_lr: 0.01
+  clone_lr: 0.01
+  generator_lr: 0.0002
+  discriminator_lr: 0.0002
+  student_batch_size: 128
+  proxy_data_ratio: 1.0
+  dcgan_data_ratio: 0.8
+  div_gan_data_ratio: 0.8
+  student_pad_crop: true
+  proxy_pad_crop: true
+  alternate_pad_crop: false
+  alternate_auto_augment: true
+  auto_augment_policy: cifar10
+  proxy_dataset:
+    name: CIFAR10
+    data_mode: surrogate
+    surrogate_name: CIFAR100
+    num_workers: 0
+    train_split: true
+    channels: 3
+    input_size:
+    - 32
+    - 32
+    surrogate_class_subset_size: 10
+    surrogate_class_subset_seed: 42
+    surrogate_class_subset_names:
+    - plate
+    - rose
+    - castle
+    - keyboard
+    - house
+    - forest
+    - road
+    - television
+    - bottle
+    - wardrobe
+    surrogate_max_samples: 50000
+    surrogate_subset_seed: 42
+substitute:
+  arch: resnet18
+  init_seed: 1234
+  batch_size: 128
+  num_workers: 0
+  train_num_workers: 0
+  val_num_workers: 0
+  optimizer:
+    name: sgd
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.0005
+  max_epochs: 200
+  patience: 20
+budget:
+  max_budget: 8000000
+  checkpoints:
+  - 1000
+  - 10000
+  - 100000
+  - 1000000
+  - 2666667
+  - 5333333
+  - 8000000
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true

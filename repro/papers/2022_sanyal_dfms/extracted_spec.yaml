@@ -1,0 +1,143 @@
+paper:
+  paper_id: 2022_sanyal_dfms
+  title: Towards Data-Free Model Stealing in a Hard Label Setting
+  authors:
+    - Sunandini Sanyal
+    - Sravanti Addepalli
+    - R. Venkatesh Babu
+  year: 2022
+  venue: CVPR
+pdf:
+  path: /papers/DFMS.pdf
+  sha256: 14d91d50459794a926f583482d90cea7ee1e47f65a256036a41cbf40ba5bc40d
+datasets:
+  - name: CIFAR-10
+    version: standard
+    task: image classification
+    num_classes: 10
+    splits:
+      train: standard train split
+      val: not specified
+      test: standard test split
+    preprocessing:
+      input_size: 32x32
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: used for main DFMS-HL comparisons
+  - name: CIFAR-100
+    version: standard
+    task: image classification
+    num_classes: 100
+    splits:
+      train: standard train split
+      val: not specified
+      test: standard test split
+    preprocessing:
+      input_size: 32x32
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: used for scalability and proxy subsets
+victim:
+  framework: not specified
+  architecture:
+    name: ResNet-34 (table top section) and ResNet-18 (bottom section)
+    details: paper reports both victim configurations
+    pretrained: not specified
+  training:
+    loss: not explicitly specified
+    optimizer:
+      name: not specified
+      lr: null
+      weight_decay: null
+      momentum: null
+      betas: []
+    batch_size: null
+    epochs: null
+    scheduler: not specified
+    seed: null
+    num_runs: 1
+attack:
+  name: dfms
+  oracle_access:
+    type: label
+    temperature: null
+    rounding: top1_only
+  query_budget:
+    cifar10: 8000000
+    cifar100: 10000000
+  substitute:
+    architecture: ResNet-18 (main table for model stealing comparison)
+    training:
+      optimizer:
+        name: SGD
+        lr: 0.1
+        momentum: 0.9
+        weight_decay: 0.0005
+      scheduler: cosine annealing
+      init_epochs: 200
+  hyperparameters:
+    init_clone_queries_nc: 50000
+    loss:
+      generator: Ladv_fake + lambda_div * Lclass_div
+      clone: cross_entropy_with_hard_labels
+    generator_optimizer:
+      name: Adam
+      lr: 0.0002
+      betas: [0.5, 0.999]
+    lambda_div:
+      cifar10: 500
+      cifar100: 100
+evaluation:
+  metrics:
+    - acc_gt
+    - agreement
+  protocol: compare clone accuracy under hard-label black-box data-free setting
+reported_results:
+  tables:
+    - id: Table 3
+      metrics:
+        cifar10_resnet18_victim:
+          victim_acc: 0.9383
+          dfms_hl_synthetic_acc: 0.8592
+          dfms_hl_proxy40_acc: 0.9051
+          dfms_hl_proxy10_acc: 0.8337
+  figures:
+    - id: Figure 4
+      metrics:
+        description: query ablation on CIFAR-10 with synthetic proxy
+  targets:
+    - id: cifar10_synthetic_hl
+      condition: CIFAR10 DFMS-HL synthetic
+      metric_name: acc_gt
+      query_budget: 8000000
+      paper_value: 0.8592
+      track: track_b
+      tolerance_pp: 1.0
+assumptions:
+  - item: strict 8M total-query policy in benchmark runs
+    reason: paper Sec.3.5 states `NQ=8M` and `TotalQueries=2*nC+NQ`; with `nC=50,000` this yields 8.1M total
+    impact_check: this repository enforces total oracle queries at 8.0M for fair cross-attack comparability, preserving `nC=50,000` and reducing effective alternate-phase `NQ` to 7.9M
+  - item: strictness gating on full-budget execution
+    reason: runtime victim is pinned to provided local ResNet-18 checkpoint; strict table-level parity assumes a high-accuracy teacher comparable to the paper row
+    impact_check: comparison remains incomplete/fail until full run artifacts are generated
+evidence_index:
+  - item_path: attack.oracle_access.type
+    pdf_page: 15284
+    ref: Abstract
+    quote: most of the APIs allow access to only the top-1 labels.
+  - item_path: attack.query_budget.cifar10
+    pdf_page: 15288
+    ref: Section 3.5 Computing the Query Cost
+    quote: We set the query limit NQ to 8 million for ... CIFAR-10.
+  - item_path: attack.hyperparameters.init_clone_queries_nc
+    pdf_page: 15288
+    ref: Section 3.5
+    quote: we set nC as 50,000.
+  - item_path: reported_results.tables[0].metrics.cifar10_resnet18_victim.dfms_hl_synthetic_acc
+    pdf_page: 15289
+    ref: Table 3
+    quote: "Victim Accuracy~93.7%, Victim Model: ResNet-18 ... DFMS-HL ... 85.92"

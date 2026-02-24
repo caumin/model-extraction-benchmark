@@ -1,0 +1,12 @@
+title: "INVERSENET: Augmenting Model Extraction Attacks with Training Data Inversion"
+authors:
+  - Xueluan Gong
+  - Yanjiao Chen
+  - Wenbin Yang
+  - Guanghao Mei
+  - Qian Wang
+venue: IJCAI
+year: 2021
+paper_id: 2021_gong_inversenet
+pdf_file: papers/inversenet.pdf
+sha256: 60fcb56683555fb91935b650e478710aa21d8209d70f0507d306d4e4d7b7f699

@@ -1,0 +1,60 @@
+paper:
+  paper_id: 2023_tan_disguide
+  title: "DisGUIDE: Disagreement-Guided Data-Free Model Extraction"
+  year: 2023
+  venue: AAAI
+pdf:
+  path: /papers/disguide.pdf
+  sha256: 5e5514e3d115fb23c8fe4ee9636876ee084e859a31feb81f43db7423880792a2
+attack:
+  name: disguide
+  oracle_access:
+    type: prob_or_hard
+  query_budget:
+    cifar10: 20000000
+    cifar100: 10000000
+  substitute:
+    architecture: ResNet-18-8x ensemble (effective width=1 in official code)
+    training:
+      batch_size: 256
+      student_lr: 0.03
+  hyperparameters:
+    generator_lr: 0.0001
+    d_iter: 1
+    ensemble_size: 2
+    replay: Classic
+    rep_iter: 3
+    replay_size: 1000000
+    grayscale_freq: 8
+    lambda_div:
+      cifar10: 0.2
+      cifar100: 0.04
+  objective:
+    generator: L_D + lambda * L_div
+    note: generator maximizes clone disagreement and class diversity
+evaluation:
+  metrics:
+    - acc_gt
+    - agreement
+reported_results:
+  tables:
+    - id: Table 1
+      metrics:
+        cifar10_soft_label_disguide:
+          query_budget: 20000000
+          victim_acc: 0.9554
+          clone_acc: 0.9402
+  figures: []
+  targets:
+    - id: cifar10_softlabel_main
+      condition: CIFAR-10 soft-label DisGUIDE final clone accuracy
+      metric_name: acc_gt
+      query_budget: 20000000
+      paper_value: 0.9402
+      track: track_b
+      tolerance_pp: 2.0
+assumptions:
+  - item: strict full-budget parity requires long-running 20M query execution
+    reason: local smoke/full checks do not complete official-scale budget by default
+  - item: official-like victim and input scale alignment
+    reason: repro config uses ResNet-34-8x checkpoint path and victim wrapper preprocessing profile

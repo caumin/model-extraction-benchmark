@@ -1,0 +1,155 @@
+paper:
+  paper_id: 2022_xie_game
+  title: "GAME: Generative-Based Adaptive Model Extraction Attack"
+  authors:
+    - Yi Xie
+    - Mengdie Huang
+    - Xiaoyu Zhang
+    - Changyu Dong
+    - Willy Susilo
+    - Xiaofeng Chen
+  year: 2022
+  venue: "ESORICS (Springer LNCS 13554)"
+pdf:
+  path: /papers/GAME.pdf
+  sha256: c63d55714b898b3ce929b34dbfda1994de7ad43d65366545dbe4d9311009587e
+datasets:
+  - name: MNIST
+    role: victim_train
+    task: image classification
+    num_classes: 10
+    preprocessing:
+      resize: 32x32 (paper)
+    notes: Section 4.1 pair-1 origin dataset
+  - name: FashionMNIST
+    role: proxy_query_set
+    task: image classification
+    num_classes: 10
+    preprocessing:
+      resize: 32x32 (paper)
+    notes: Section 4.1 pair-1 proxy dataset
+  - name: BelgiumTSC
+    role: victim_train
+    task: traffic sign classification
+    notes: Section 4.1 pair-2 origin dataset
+  - name: GTSRB
+    role: proxy_query_set
+    task: traffic sign classification
+    num_classes: 43
+    preprocessing:
+      resize: 32x32 (paper)
+    notes: Section 4.1 pair-2 proxy dataset
+victim:
+  architecture:
+    pair1: LeNet
+    pair2: AlexNet
+  training:
+    optimizer:
+      name: Adam
+      lr: 0.001
+    epochs:
+      pair1_mnist: 15
+      pair2_belgiumtsc: 20
+attack:
+  name: game
+  oracle_access:
+    type: prob
+  query_budget:
+    pair1_mnist_fashionmnist: 8000
+    pair2_belgiumtsc_gtsrb: 6000
+  substitute:
+    architectures:
+      pair1: [half-lenet, vgg16]
+      pair2: [half-alexnet, resnet18]
+    training:
+      optimizer:
+        name: Adam
+      epochs: 40
+      lr:
+        half-lenet: 0.1
+        vgg16: 0.01
+  hyperparameters:
+    generator:
+      architecture: 3 conv blocks + upsampling + BN + ReLU
+    discriminator:
+      architecture: 5 conv blocks + ReLU + dropout(0.25) + BN(last 제외)
+evaluation:
+  metrics:
+    - fidelity
+    - accuracy
+    - relative_accuracy
+  protocol: compare GAME vs baseline/knockoff/JBDA under identical settings
+reported_results:
+  tables:
+    - id: Table 1
+      condition: MNIST victim, FashionMNIST proxy
+      metrics:
+        victim_acc: 98.74
+        half_lenet:
+          baseline: {fidelity: 75.42, accuracy: 75.12, relative: 0.76}
+          knockoff: {fidelity: 83.30, accuracy: 82.93, relative: 0.84}
+          jbda: {fidelity: 79.85, accuracy: 79.44, relative: 0.80}
+          game: {fidelity: 90.93, accuracy: 90.36, relative: 0.92}
+        vgg16:
+          baseline: {fidelity: 81.25, accuracy: 80.96, relative: 0.82}
+          knockoff: {fidelity: 81.02, accuracy: 80.70, relative: 0.82}
+          jbda: {fidelity: 69.76, accuracy: 69.42, relative: 0.70}
+          game: {fidelity: 86.41, accuracy: 85.97, relative: 0.87}
+    - id: Table 2
+      condition: BelgiumTSC victim, GTSRB proxy
+      metrics:
+        victim_acc: 98.29
+        half_alexnet:
+          baseline: {fidelity: 63.79, accuracy: 63.20, relative: 0.64}
+          knockoff: {fidelity: 74.33, accuracy: 73.39, relative: 0.75}
+          jbda: {fidelity: 74.09, accuracy: 73.39, relative: 0.75}
+          game: {fidelity: 76.74, accuracy: 75.88, relative: 0.77}
+        resnet18:
+          baseline: {fidelity: 66.79, accuracy: 65.92, relative: 0.67}
+          knockoff: {fidelity: 73.26, accuracy: 72.16, relative: 0.73}
+          jbda: {fidelity: 69.34, accuracy: 68.49, relative: 0.70}
+          game: {fidelity: 74.52, accuracy: 73.77, relative: 0.75}
+  figures:
+    - id: Figure 3
+      metrics:
+        description: active strategy ablation vs query budget (up to 5k/3k regions discussed)
+  targets:
+    - id: pair1_game_half_lenet_accuracy
+      condition: MNIST/FashionMNIST + half-lenet substitute
+      metric_name: acc_gt
+      query_budget: 8000
+      paper_value: 0.9036
+      track: track_b
+      tolerance_pp: 1.5
+assumptions:
+  - item: repo full profile currently models only pair-1 (MNIST/FashionMNIST)
+    reason: BelgiumTSC dataset and half-* attacker architectures are not fully mirrored in current unified benchmark configs
+    impact_check: strict full-paper parity requires additional pair-2 pipeline support
+  - item: substitute/victim use `lenet_mnist` in repro config
+    reason: benchmark victim training pipeline loads native MNIST 28x28 by default; `lenet` path expects 32x32 flatten shape
+    impact_check: pair-1 result parity should be interpreted as closest-available mapping, not exact resize-32 LeNet parity
+evidence_index:
+  - item_path: datasets[0]
+    pdf_page: 11
+    ref: Section 4.1 Datasets and victim model
+    quote: "MNIST as the original dataset and Fashion-MNIST as the proxy dataset"
+  - item_path: victim.training
+    pdf_page: 11
+    ref: Section 4.1 Datasets and victim model
+    quote: "victim models were trained for 15 epochs on MNIST ... with ADAM at an initial learning rate of 0.001"
+  - item_path: attack.query_budget.pair1_mnist_fashionmnist
+    pdf_page: 11
+    ref: Section 4.1 Attacker model
+    quote: "The query budget is 8k for Fashion-MNIST and 6k for GTSRB"
+  - item_path: attack.substitute.training
+    pdf_page: 11
+    ref: Section 4.1 Attacker model
+    quote: "These models were trained for 40 epochs with ADAM. The initial learning rate is 0.1 for half-LeNet and 0.01 for VGG-16."
+  - item_path: reported_results.tables[0].metrics.half_lenet.game.accuracy
+    pdf_page: 12
+    ref: Table 1
+    quote: "GAME (Ours) ... Accuracy 90.36"
+  - item_path: reported_results.tables[1].metrics.resnet18.game.accuracy
+    pdf_page: 13
+    ref: Table 2
+    quote: "GAME (Ours) ... Accuracy 73.77"

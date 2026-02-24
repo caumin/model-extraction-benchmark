@@ -1,0 +1,64 @@
+run:
+  name: repro_2023_beetham_dual_students_smoke50k_seed0
+  seeds:
+  - 0
+  device: cuda:0
+benchmark:
+  protocol_version: '1.2'
+victim:
+  victim_id: cifar10_resnet34_8x_official
+  arch: resnet34
+  width_mult: 1
+  channels: 3
+  num_classes: 10
+  input_size:
+  - 32
+  - 32
+  checkpoint_ref: runs/victims/cifar10-resnet34_8x.pt
+  output_mode: soft_prob
+  temperature: 1.0
+  inference_policy: benchmark
+  return_outputs_on_cpu: false
+  official_preprocess_profile: dfme_cifar10_test
+dataset:
+  name: CIFAR10
+  data_mode: data_free
+  channels: 3
+  input_size:
+  - 32
+  - 32
+attack:
+  name: ds
+  output_mode: soft_prob
+  max_budget: 50000
+  eval_interval_queries: 10000
+  batch_size: 128
+  noise_dim: 256
+  g_iter: 1
+  d_iter: 5
+  num_students: 2
+  loss: l1
+  generator_loss: l1
+  student_lr: 0.3
+  generator_lr: 0.0001
+  strict_iteration_budget: true
+substitute:
+  arch: resnet18
+  width_mult: 1
+  init_seed: 1234
+  optimizer:
+    name: sgd
+    lr: 0.3
+    momentum: 0.9
+    weight_decay: 0.0005
+budget:
+  max_budget: 50000
+  checkpoints:
+  - 1000
+  - 10000
+  - 25000
+  - 50000
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true

@@ -1,0 +1,78 @@
+param(
+    [ValidateSet("smoke", "full")]
+    [string]$RunProfile = "smoke",
+
+    [string]$Device = "cuda:0",
+
+    [int]$SmokeEpochs = 2,
+
+    [int]$SmokeBatchSize = 64,
+
+    [switch]$DryRun,
+
+    [string]$PythonExe = "python"
+)
+
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $repoRoot
+
+$priority = @(
+    "2022_xie_game",
+    "2022_sanyal_dfms",
+    "2021_wang_blackbox_dissector",
+    "2023_tan_disguide"
+)
+
+$stagesByPaper = @{
+    "2022_xie_game" = "victim_train,victim_eval,attack,collect,compare"
+    "2022_sanyal_dfms" = "victim_eval,attack,collect,compare"
+    "2021_wang_blackbox_dissector" = "victim_eval,attack,collect,compare"
+    "2023_tan_disguide" = "victim_eval,attack,collect,compare"
+}
+
+$queueStart = Get-Date
+$total = $priority.Count
+
+for ($i = 0; $i -lt $total; $i++) {
+    $paperId = $priority[$i]
+    $index = $i + 1
+    $label = "$index/$total $paperId"
+
+    $stages = $stagesByPaper[$paperId]
+    Write-Host ""
+    Write-Host "=== [$label] start ==="
+    Write-Host "[$label] planned_stages=$stages"
+
+    $cmdArgs = @(
+        "repro/run_experiment.py",
+        "run",
+        "--paper-id", $paperId,
+        "--profile", $RunProfile,
+        "--device", $Device,
+        "--smoke-epochs", "$SmokeEpochs",
+        "--smoke-batch-size", "$SmokeBatchSize",
+        "--live-output",
+        "--stages", $stages
+    )
+
+    if ($DryRun) {
+        $cmdArgs += "--dry-run"
+    }
+
+    Write-Host ("$PythonExe " + ($cmdArgs -join " "))
+
+    $paperStart = Get-Date
+    & $PythonExe @cmdArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code $LASTEXITCODE for paper '$paperId'"
+    }
+
+    $paperElapsed = [int]((Get-Date) - $paperStart).TotalSeconds
+    Write-Host "=== [$label] done (${paperElapsed}s) ==="
+}
+
+$totalElapsed = [int]((Get-Date) - $queueStart).TotalSeconds
+Write-Host ""
+Write-Host "Queue finished: $total papers, elapsed=${totalElapsed}s"

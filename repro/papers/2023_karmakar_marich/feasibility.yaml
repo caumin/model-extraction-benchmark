@@ -1,0 +1,10 @@
+paper_id: 2023_karmakar_marich
+strict_reproduction:
+  possible_locally: false
+  blockers:
+    - "Exact paper protocol spans multiple datasets/models (including text/BERT); current repo path covers image MARICH implementation"
+  caveats:
+    - "If ImageNet surrogate pool is unavailable, set dataset surrogate root for local/public pool alternative"
+local_fallback_profile:
+  config_smoke: repro/papers/2023_karmakar_marich/configs/experiment_smoke.yaml
+  config_full: repro/papers/2023_karmakar_marich/configs/experiment.yaml

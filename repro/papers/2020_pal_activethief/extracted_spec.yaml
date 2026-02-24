@@ -1,0 +1,110 @@
+paper:
+  paper_id: 2020_pal_activethief
+  title: "ACTIVETHIEF: Model Extraction Using Active Learning and Unannotated Public Data"
+  authors:
+    - Soham Pal
+    - Yash Gupta
+    - Aditya Shukla
+    - Aditya Kanade
+    - Shirish Shevade
+    - Vinod Ganapathy
+  year: 2020
+  venue: AAAI
+pdf:
+  path: /papers/activethief.pdf
+  sha256: c191a764d9d2720ee541192aabe2e677d244df8356353e4be1762739ab3ba202
+datasets:
+  - name: ILSVRC2012-14 downsampled subset
+    version: downsampled ImageNet proxy
+    task: image classification thief pool
+    num_classes: null
+    splits:
+      train: 100K
+      val: 20K
+      test: null
+    preprocessing:
+      input_size: "paper-dependent"
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: unannotated thief data
+  - name: CIFAR-10
+    version: standard
+    task: image classification secret dataset
+    num_classes: 10
+    splits:
+      train: standard train split
+      val: null
+      test: standard test split
+    preprocessing:
+      input_size: 32x32
+      normalize:
+        mean: []
+        std: []
+      augmentation: []
+    notes: also reports MNIST and GTSRB
+victim:
+  framework: not specified in main paper
+  architecture:
+    name: CNN (image)
+    details: l convolution blocks, 2x(2 conv + pooling) per block
+    pretrained: not specified
+  training:
+    loss: not explicitly specified
+    optimizer:
+      name: Adam
+      lr: null
+      weight_decay: 0.001
+      momentum: null
+      betas: [0.9, 0.999]
+    batch_size: 150
+    epochs: 1000
+    scheduler: not specified
+    seed: null
+    num_runs: 1
+attack:
+  name: activethief
+  oracle_access:
+    type: label
+    temperature: null
+    rounding: null
+  query_budget: 20000
+  substitute:
+    architecture: activethief_cnn
+    training:
+      early_stopping_patience: 100
+      validation_budget_ratio: 0.2
+      initial_seed_ratio: 0.1
+      dropout: 0.2
+  hyperparameters:
+    rounds: 10
+    step_size: 2000
+    strategy: uncertainty|k-center|dfal|dfal+k-center|random
+evaluation:
+  metrics:
+    - agreement
+  protocol: agreement on secret test split only; substitute retrained from scratch each iteration
+reported_results:
+  tables:
+    - id: Table 1
+      metrics:
+        cifar10_agreement_20k:
+          random: 71.38
+          uncertainty: 72.99
+          k_center: 72.97
+          dfal: 71.52
+          dfal_k_center: 73.47
+  figures:
+    - id: Figure 3
+      metrics:
+        cifar10_20k_curve: reported
+assumptions:
+  - item: victim optimization details beyond paper text
+    reason: exact LR schedule not provided in main paper
+    impact_check: sensitivity run over lr in {1e-3, 5e-4}
+evidence_index:
+  - item_path: attack.query_budget
+    pdf_page: 868
+    ref: Section Experimental results
+    quote: "For each dataset, we run ACTIVETHIEF across ... 10K, 15K, 20K, 25K and 30K."
