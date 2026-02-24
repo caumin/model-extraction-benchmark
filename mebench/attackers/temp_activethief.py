@@ -24,6 +24,15 @@ class _BranchSpec:
     query_transform: Callable[[torch.Tensor], torch.Tensor]
 
 
+@dataclass
+class _BranchRuntime:
+    spec: _BranchSpec
+    state: BenchmarkState
+    attack: ActiveThief
+    ctx: _BranchContext
+    step_size: int
+
+
 class _BranchContext:
     def __init__(
         self,
@@ -131,15 +140,15 @@ class TempActiveThief(AttackRunner):
             metadata=metadata,
         )
 
-    def _run_branch(
+    def _prepare_branch(
         self,
         parent_ctx: BenchmarkContext,
         spec: _BranchSpec,
         device: str,
         pbar,
-    ) -> tuple[Optional[torch.nn.Module], int]:
+    ) -> Optional[_BranchRuntime]:
         if int(spec.budget) <= 0:
-            return None, 0
+            return None
 
         branch_state = self._make_branch_state(int(spec.budget))
         branch_attack = ActiveThief(copy.deepcopy(self.config), branch_state)
@@ -171,21 +180,86 @@ class TempActiveThief(AttackRunner):
             int(spec.budget),
             spec.label,
         )
-        branch_attack.run(branch_ctx)
 
-        model = branch_state.attack_state.get("substitute")
+        if not branch_state.attack_state.get("initialized"):
+            branch_attack._setup_datasets(branch_state)
+
+        branch_attack._bootstrap_seed_and_validation_sets(branch_ctx, branch_state)
+
+        step_size = branch_attack.step_size
+        if step_size is None:
+            rounds = max(1, int(branch_attack.rounds))
+            active_budget = int(branch_ctx.budget_remaining)
+            step_size = max(1, int(torch.ceil(torch.tensor(active_budget / rounds)).item()))
+            branch_attack.step_size = int(step_size)
+
+        if branch_attack.substitute is None and branch_attack.labeled_indices:
+            branch_attack._train_substitute(branch_state)
+            if branch_attack.substitute is not None:
+                branch_attack._evaluate_current_substitute(branch_attack.substitute, device)
+
+        return _BranchRuntime(
+            spec=spec,
+            state=branch_state,
+            attack=branch_attack,
+            ctx=branch_ctx,
+            step_size=int(step_size),
+        )
+
+    def _run_branch_round(self, runtime: _BranchRuntime, device: str) -> bool:
+        attack = runtime.attack
+        state = runtime.state
+        branch_ctx = runtime.ctx
+
+        if branch_ctx.budget_remaining <= 0 or not attack.unlabeled_indices:
+            return False
+
+        step_size = min(int(runtime.step_size), int(branch_ctx.budget_remaining), len(attack.unlabeled_indices))
+        if step_size <= 0:
+            return False
+
+        query_batch = attack._select_query_batch(step_size, state)
+        round_id = state.attack_state.get("round", 0)
+        self.logger.info(
+            "[TempActiveThief][%s] round=%s selected=%s (labeled=%s, unlabeled=%s)",
+            runtime.spec.name,
+            round_id,
+            int(query_batch.x.shape[0]),
+            len(attack.labeled_indices),
+            len(attack.unlabeled_indices),
+        )
+
+        if int(query_batch.x.shape[0]) == 0:
+            return False
+
+        oracle_output = branch_ctx.query(query_batch.x, meta=query_batch.meta)
+        attack.observe(query_batch, oracle_output, state)
+
+        if attack.labeled_indices:
+            attack._train_substitute(state)
+            self.logger.info(
+                "[TempActiveThief][%s] round=%s training complete (branch_budget_remaining=%s)",
+                runtime.spec.name,
+                round_id,
+                branch_ctx.budget_remaining,
+            )
+            attack._evaluate_current_substitute(attack.substitute, device)
+
+        return True
+
+    def _finalize_branch(self, runtime: _BranchRuntime) -> None:
+        model = runtime.state.attack_state.get("substitute")
         if model is None:
-            model = getattr(branch_attack, "substitute", None)
-        consumed = int(spec.budget - branch_ctx.branch_budget_remaining)
+            model = getattr(runtime.attack, "substitute", None)
+        consumed = int(runtime.spec.budget - runtime.ctx.branch_budget_remaining)
 
-        self.state.attack_state[f"substitute_{spec.name}"] = model
-        self.state.attack_state.setdefault("ablation_query_counts", {})[spec.name] = consumed
+        self.state.attack_state[f"substitute_{runtime.spec.name}"] = model
+        self.state.attack_state.setdefault("ablation_query_counts", {})[runtime.spec.name] = consumed
         self.logger.info(
             "[TempActiveThief][%s] done (consumed=%d)",
-            spec.name,
+            runtime.spec.name,
             consumed,
         )
-        return model, consumed
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
@@ -215,10 +289,24 @@ class TempActiveThief(AttackRunner):
         )
 
         pbar = self._create_progress_bar(total_budget, "[TempActiveThief] Ablation")
+        runtimes = []
         for spec in specs:
-            if ctx.budget_remaining <= 0:
+            runtime = self._prepare_branch(ctx, spec, device, pbar)
+            if runtime is not None:
+                runtimes.append(runtime)
+
+        while ctx.budget_remaining > 0:
+            progressed = False
+            for runtime in runtimes:
+                if self._run_branch_round(runtime, device):
+                    progressed = True
+                if ctx.budget_remaining <= 0:
+                    break
+            if not progressed:
                 break
-            self._run_branch(ctx, spec, device, pbar)
+
+        for runtime in runtimes:
+            self._finalize_branch(runtime)
         pbar.close()
 
         self.state.attack_state["substitute"] = None
