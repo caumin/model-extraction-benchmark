@@ -385,6 +385,7 @@ class TempDFME(AttackRunner):
                     break
 
             self._maybe_paired_eval(device)
+            self._maybe_checkpoint_eval(device)
 
             if not progressed:
                 break

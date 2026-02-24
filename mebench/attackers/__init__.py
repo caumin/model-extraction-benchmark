@@ -19,6 +19,7 @@ from mebench.attackers.inversenet import InverseNet
 from mebench.attackers.knockoff_nets import KnockoffNets
 from mebench.attackers.random_baseline import RandomBaseline
 from mebench.attackers.temp_dfme import TempDFME
+from mebench.attackers.temp_activethief import TempActiveThief
 
 # Backwards-compatible alias
 DFMS = DFMSHL
@@ -44,4 +45,5 @@ __all__ = [
     "KnockoffNets",
     "RandomBaseline",
     "TempDFME",
+    "TempActiveThief",
 ]

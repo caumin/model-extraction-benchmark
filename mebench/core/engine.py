@@ -31,6 +31,7 @@ from mebench.attackers.maze import MAZE
 from mebench.attackers.random_baseline import RandomBaseline
 from mebench.attackers.swiftthief import SwiftThief
 from mebench.attackers.temp_dfme import TempDFME
+from mebench.attackers.temp_activethief import TempActiveThief
 
 
 def create_runner(
@@ -50,6 +51,8 @@ def create_runner(
     """
     if attack_name == "activethief":
         return ActiveThief(config["attack"], state)
+    elif attack_name == "temp_activethief":
+        return TempActiveThief(config["attack"], state)
     elif attack_name == "dfme":
         return DFME(config["attack"], state)
     elif attack_name == "temp_dfme":
