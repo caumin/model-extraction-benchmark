@@ -1,0 +1,48 @@
+run:
+  name: smoke_temp_dfme_mnist_200
+  seeds:
+    - 0
+  device: cpu
+benchmark:
+  protocol_version: "1.2"
+victim:
+  victim_id: mnist_lenet
+  arch: lenet_mnist
+  channels: 1
+  num_classes: 10
+  input_size: [28, 28]
+  checkpoint_ref: runs/victims/mnist_lenet_mnist_seed0.pt
+  normalization: null
+  output_mode: soft_prob
+  temperature: 1.0
+  return_outputs_on_cpu: false
+dataset:
+  name: MNIST
+  data_mode: data_free
+  train_split: true
+attack:
+  name: temp_dfme
+  output_mode: soft_prob
+  max_budget: 200
+  batch_size: 16
+  n_g_steps: 1
+  n_s_steps: 1
+  grad_approx_m: 1
+  grad_approx_epsilon: 0.001
+  eval_interval_queries: 20
+substitute:
+  arch: lenet_mnist
+  init_seed: 1234
+  batch_size: 16
+  optimizer:
+    name: sgd
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.0005
+budget:
+  max_budget: 200
+  checkpoints: [200]
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true
