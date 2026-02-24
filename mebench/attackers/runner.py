@@ -43,7 +43,6 @@ class AttackRunner(ABC):
         else:
             total_budget = (
                 self.state.metadata.get("max_budget")
-                or self.config.get("max_budget")
                 or ctx.budget_remaining
                 or fallback
             )
@@ -78,7 +77,6 @@ class AttackRunner(ABC):
     ) -> tuple[int, int]:
         max_budget = int(
             self.state.metadata.get("max_budget")
-            or self.config.get("max_budget")
             or total_budget
             or 0
         )

@@ -269,7 +269,6 @@ class InverseNet(AttackRunner):
     def _resolve_total_budget(self, state: BenchmarkState) -> int:
         total_budget = int(
             state.metadata.get("max_budget")
-            or self.config.get("max_budget")
             or self.config.get("total_budget")
             or 0
         )

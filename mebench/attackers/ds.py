@@ -329,7 +329,6 @@ class DualStudents(AttackRunner):
 
         max_budget = int(
             self.state.metadata.get("max_budget")
-            or self.config.get("max_budget")
             or ctx.budget_remaining
             or 0
         )

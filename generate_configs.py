@@ -417,7 +417,6 @@ def generate_configs(
                         "attack": {
                             "name": attack.name,
                             "output_mode": output_mode,
-                            "max_budget": max_budget,
                             "pool_num_workers": int(pool_num_workers),
                             **attack_extra,
                         },

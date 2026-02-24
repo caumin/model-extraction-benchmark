@@ -457,7 +457,7 @@ class SwiftThief(AttackRunner):
 
         total_budget = int(
             self.state.metadata.get("max_budget")
-            or self.config.get("max_budget", ctx.budget_remaining)
+            or ctx.budget_remaining
         )
         round_quota = max(1, int(total_budget * float(self.query_fraction_per_round)))
 
@@ -635,7 +635,7 @@ class SwiftThief(AttackRunner):
         if k > len(unlabeled):
             k = int(len(unlabeled))
 
-        total_budget = int(state.metadata.get("max_budget") or self.config.get("max_budget", 10000))
+        total_budget = int(state.metadata.get("max_budget") or state.budget_remaining or 10000)
         initial_seed_size = int(self.initial_seed_ratio * total_budget)
 
         if force_random or len(labeled) < initial_seed_size:
@@ -674,7 +674,7 @@ class SwiftThief(AttackRunner):
 
         class_counts = state.attack_state["class_counts"]
         num_classes = int(state.metadata.get("num_classes") or self.config.get("num_classes") or 10)
-        total_budget = int(state.metadata.get("max_budget") or self.config.get("max_budget", 10000))
+        total_budget = int(state.metadata.get("max_budget") or state.budget_remaining or 10000)
 
         total_q = len(labeled)
         mean_per_class = total_q / num_classes
@@ -684,7 +684,7 @@ class SwiftThief(AttackRunner):
             state.attack_state["sampling_mode"] = "entropy"
             return
 
-        total_budget = int(state.metadata.get("max_budget", 10000))
+        total_budget = int(state.metadata.get("max_budget") or state.budget_remaining or 10000)
         total_q = sum(class_counts.values())
         mu = total_q / num_classes if num_classes > 0 else 0.0
         mu_rare = (

@@ -127,7 +127,7 @@ class CopycatCNN(AttackRunner):
         device = self.state.metadata.get("device", "cpu")
         total_budget = int(
             self.state.metadata.get("max_budget")
-            or self.config.get("max_budget", ctx.budget_remaining)
+            or ctx.budget_remaining
         )
 
         rounds = max(1, int(self.rounds))

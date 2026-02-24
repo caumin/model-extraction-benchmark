@@ -467,7 +467,6 @@ class CloudLeak(AttackRunner):
     def _bootstrap_seed_and_validation_sets(self, ctx: BenchmarkContext, state: BenchmarkState) -> None:
         total_budget = int(
             state.metadata.get("max_budget")
-            or self.config.get("max_budget", ctx.budget_remaining)
             or ctx.budget_remaining
         )
         seed_target, val_target = self._resolve_seed_and_validation_targets(
