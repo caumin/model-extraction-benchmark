@@ -145,7 +145,17 @@ class TempActiveThief(AttackRunner):
         branch_attack = ActiveThief(copy.deepcopy(self.config), branch_state)
         branch_attack.ctx = self.ctx
         branch_attack.victim = self.victim
-        branch_attack._evaluate_current_substitute = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+        def _branch_eval(substitute, eval_device, *, track="track_b", query_count=None):
+            return AttackRunner._evaluate_current_substitute(
+                branch_attack,
+                substitute,
+                eval_device,
+                track=f"track_b_{spec.name}",
+                query_count=query_count,
+            )
+
+        branch_attack._evaluate_current_substitute = _branch_eval  # type: ignore[method-assign]
 
         branch_ctx = _BranchContext(
             parent_ctx=parent_ctx,
@@ -167,13 +177,6 @@ class TempActiveThief(AttackRunner):
         if model is None:
             model = getattr(branch_attack, "substitute", None)
         consumed = int(spec.budget - branch_ctx.branch_budget_remaining)
-        if model is not None:
-            self._evaluate_current_substitute(
-                model,
-                device,
-                track=f"track_b_{spec.name}",
-                query_count=consumed,
-            )
 
         self.state.attack_state[f"substitute_{spec.name}"] = model
         self.state.attack_state.setdefault("ablation_query_counts", {})[spec.name] = consumed
