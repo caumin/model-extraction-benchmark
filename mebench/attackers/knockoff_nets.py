@@ -614,6 +614,19 @@ class KnockoffNets(AttackRunner):
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
         val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
 
+        # Online retraining may be called many times per run. Using multi-worker
+        # loaders here can accumulate worker processes/file descriptors on Linux
+        # and trigger "Too many open files" under long runs.
+        if (not reset_model) and (int(train_workers) > 0 or int(val_workers) > 0):
+            self.logger.warning(
+                "KnockoffNets online retraining forcing num_workers=0 to avoid FD exhaustion "
+                "(requested train=%d, val=%d)",
+                int(train_workers),
+                int(val_workers),
+            )
+            train_workers = 0
+            val_workers = 0
+
         loader = DataLoader(
             train_dataset,
             batch_size=train_batch_size,
