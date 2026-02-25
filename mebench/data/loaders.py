@@ -657,13 +657,12 @@ class SurrogateDataset(Dataset):
             # Directory layout:
             #   <root>/train/<class>/*
             #   <root>/val/<class>/*
-            base_raw = os.environ.get("MEBENCH_IMAGENET_ROOT", root)
-            base = _normalize_root_path(str(base_raw))
+            base = _normalize_root_path(str(root))
             split_dir = os.path.join(str(base), "train" if train_split else "val")
             if not os.path.isdir(split_dir):
                 raise ValueError(
                     "ImageNet surrogate requires a local ImageFolder directory. "
-                    "Set dataset.surrogate_root (or env MEBENCH_IMAGENET_ROOT) to a folder containing train/ and val/. "
+                    "Set dataset.surrogate_root to a folder containing train/ and val/. "
                     f"Missing: {split_dir}"
                 )
 
