@@ -54,6 +54,34 @@ class _MappedDataset(Dataset):
         return self._sample_transform(x), y
 
 
+@dataclass(frozen=True)
+class _IdentityTensorTransform:
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+@dataclass(frozen=True)
+class _OfficialProfileTransform:
+    profile: str
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return apply_official_preprocess_batch(x.unsqueeze(0), self.profile).squeeze(0)
+
+
+@dataclass(frozen=True)
+class _ChannelNormalizeTransform:
+    mean: tuple[float, ...]
+    std: tuple[float, ...]
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        channels = int(x.size(0))
+        if len(self.mean) != channels or len(self.std) != channels:
+            return x
+        mean_t = torch.tensor(self.mean, dtype=x.dtype, device=x.device).view(channels, 1, 1)
+        std_t = torch.tensor(self.std, dtype=x.dtype, device=x.device).view(channels, 1, 1)
+        return (x - mean_t) / std_t.clamp_min(1e-8)
+
+
 class _BranchContext:
     def __init__(
         self,
@@ -110,7 +138,6 @@ class TempActiveThief(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
         self._warned_missing_norm = False
-        self._norm_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._consistency_victim_acc_min = float(config.get("consistency_victim_acc_min", 0.8))
         self._consistency_agreement_min = float(config.get("consistency_agreement_min", 0.9))
         self._consistency_acc_max = float(config.get("consistency_acc_max", 0.2))
@@ -118,32 +145,22 @@ class TempActiveThief(AttackRunner):
     def _identity(self, x: torch.Tensor) -> torch.Tensor:
         return x
 
-    def _apply_victim_like_normalization(self, x_unit: torch.Tensor) -> torch.Tensor:
+    def _build_norm_pool_transform(self) -> Callable[[torch.Tensor], torch.Tensor]:
         victim_cfg = self.state.metadata.get("victim_config", {}) or {}
         profile = victim_cfg.get("official_preprocess_profile")
-        if profile:
-            return apply_official_preprocess_batch(x_unit, str(profile))
+        if isinstance(profile, str) and profile.strip():
+            return _OfficialProfileTransform(profile=profile.strip())
 
         normalization = victim_cfg.get("normalization")
         if isinstance(normalization, dict):
             mean = normalization.get("mean")
             std = normalization.get("std")
             if isinstance(mean, (list, tuple)) and isinstance(std, (list, tuple)):
-                channels = int(x_unit.size(1))
-                if len(mean) == channels and len(std) == channels:
-                    key = (str(x_unit.device), channels)
-                    cached = self._norm_cache.get(key)
-                    if cached is None:
-                        mean_t = torch.tensor(mean, dtype=x_unit.dtype, device=x_unit.device).view(
-                            1, channels, 1, 1
-                        )
-                        std_t = torch.tensor(std, dtype=x_unit.dtype, device=x_unit.device).view(
-                            1, channels, 1, 1
-                        )
-                        self._norm_cache[key] = (mean_t, std_t)
-                        cached = (mean_t, std_t)
-                    mean_t, std_t = cached
-                    return (x_unit - mean_t) / std_t.clamp_min(1e-8)
+                if len(mean) == len(std):
+                    return _ChannelNormalizeTransform(
+                        mean=tuple(float(v) for v in mean),
+                        std=tuple(float(v) for v in std),
+                    )
 
         if not self._warned_missing_norm:
             self.logger.warning(
@@ -151,10 +168,7 @@ class TempActiveThief(AttackRunner):
                 "norm-pool branch uses identity over raw [0,1] images."
             )
             self._warned_missing_norm = True
-        return x_unit
-
-    def _apply_victim_like_normalization_single(self, x_unit: torch.Tensor) -> torch.Tensor:
-        return self._apply_victim_like_normalization(x_unit.unsqueeze(0)).squeeze(0)
+        return _IdentityTensorTransform()
 
     def _make_branch_state(self, branch_budget: int) -> BenchmarkState:
         metadata = copy.deepcopy(self.state.metadata)
@@ -402,6 +416,7 @@ class TempActiveThief(AttackRunner):
         total_budget = int(ctx.budget_remaining)
         raw_budget = int(total_budget // 2)
         norm_budget = int(total_budget - raw_budget)
+        norm_pool_transform = self._build_norm_pool_transform()
 
         specs = [
             _BranchSpec(
@@ -415,7 +430,7 @@ class TempActiveThief(AttackRunner):
                 label="pool=victim_norm(raw), query=pool, train=pool",
                 budget=norm_budget,
                 query_transform=self._identity,
-                pool_sample_transform=self._apply_victim_like_normalization_single,
+                pool_sample_transform=norm_pool_transform,
             ),
         ]
 
