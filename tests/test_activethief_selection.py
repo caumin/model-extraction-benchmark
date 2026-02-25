@@ -140,6 +140,26 @@ def test_select_k_center_no_labeled_fallback() -> None:
     assert all(0 <= idx < len(unlabeled_probs) for idx in selected)
 
 
+def test_select_k_center_avoids_duplicate_indices_on_ties() -> None:
+    """K-center must not repeatedly select the same point under distance ties."""
+    attack = _make_attack()
+
+    labeled_probs = torch.tensor([[0.5, 0.5]])
+    unlabeled_probs = torch.tensor(
+        [
+            [0.5, 0.5],
+            [0.5, 0.5],
+            [0.5, 0.5],
+        ]
+    )
+
+    selected = attack._select_k_center(unlabeled_probs, labeled_probs, 3)
+
+    assert len(selected) == 3
+    assert len(set(selected)) == 3
+    assert set(selected) == {0, 1, 2}
+
+
 def test_select_dfal_prefers_smallest_perturbation() -> None:
     attack = _make_attack()
     state = BenchmarkState()

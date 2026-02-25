@@ -14,7 +14,9 @@ from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.state import BenchmarkState
 from mebench.core.types import OracleOutput
+from mebench.data.loaders import get_test_dataloader
 from mebench.data.preprocessing import apply_official_preprocess_batch
+from mebench.eval.metrics import compute_accuracy, evaluate_substitute
 
 
 @dataclass
@@ -109,6 +111,9 @@ class TempActiveThief(AttackRunner):
         super().__init__(config, state)
         self._warned_missing_norm = False
         self._norm_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._consistency_victim_acc_min = float(config.get("consistency_victim_acc_min", 0.8))
+        self._consistency_agreement_min = float(config.get("consistency_agreement_min", 0.9))
+        self._consistency_acc_max = float(config.get("consistency_acc_max", 0.2))
 
     def _identity(self, x: torch.Tensor) -> torch.Tensor:
         return x
@@ -162,6 +167,107 @@ class TempActiveThief(AttackRunner):
             metadata=metadata,
         )
 
+    def _evaluate_branch_substitute(
+        self,
+        branch_attack: ActiveThief,
+        spec: _BranchSpec,
+        substitute,
+        eval_device: str,
+        *,
+        query_count: Optional[int] = None,
+    ) -> None:
+        if substitute is None or self.victim is None:
+            return
+
+        current_queries = branch_attack.state.query_count if query_count is None else int(query_count)
+        if current_queries == 0:
+            current_queries = len(branch_attack.state.attack_state.get("labeled_indices", []))
+
+        track_name = f"track_b_{spec.name}"
+        eval_key = (track_name, int(current_queries))
+        if eval_key in branch_attack._tracked_eval_points:
+            return
+        branch_attack._tracked_eval_points.add(eval_key)
+
+        if branch_attack.test_loader is None:
+            dataset_name = branch_attack.state.metadata.get("dataset_config", {}).get("name", "CIFAR10")
+            victim_cfg = branch_attack.state.metadata.get("victim_config", {}) or {}
+            input_size = victim_cfg.get("input_size")
+            size = None
+            if isinstance(input_size, (list, tuple)) and len(input_size) == 2:
+                size = (int(input_size[0]), int(input_size[1]))
+            channels = victim_cfg.get("channels")
+            branch_attack.test_loader = get_test_dataloader(
+                dataset_name,
+                batch_size=128,
+                input_size=size,
+                channels=int(channels) if channels is not None else None,
+            )
+
+        metrics = evaluate_substitute(
+            substitute=substitute,
+            victim=self.victim,
+            test_loader=branch_attack.test_loader,
+            device=eval_device,
+            output_mode=branch_attack.config.get("output_mode", "soft_prob"),
+        )
+        victim_acc_eval = compute_accuracy(self.victim, branch_attack.test_loader, eval_device)
+
+        labeled_indices = branch_attack.state.attack_state.get("labeled_indices", [])
+        labeled_total = int(len(labeled_indices))
+        labeled_unique = int(len(set(int(i) for i in labeled_indices)))
+        labeled_duplicates = int(max(0, labeled_total - labeled_unique))
+
+        kl_value = metrics.get("kl_mean")
+        kl_print = float(kl_value) if kl_value is not None else 0.0
+
+        self.logger.info(
+            "[TempActiveThief][%s][Evaluation] Labeled: %d (unique=%d, dup=%d), "
+            "VictimAcc: %.4f, Acc: %.4f, Agreement: %.4f, KL: %.4f",
+            spec.name,
+            int(current_queries),
+            labeled_unique,
+            labeled_duplicates,
+            float(victim_acc_eval),
+            float(metrics.get("acc_gt", 0.0)),
+            float(metrics.get("agreement", 0.0)),
+            kl_print,
+        )
+
+        if (
+            float(victim_acc_eval) >= self._consistency_victim_acc_min
+            and float(metrics.get("agreement", 0.0)) >= self._consistency_agreement_min
+            and float(metrics.get("acc_gt", 1.0)) <= self._consistency_acc_max
+        ):
+            self.logger.warning(
+                "[TempActiveThief][%s] Suspicious eval combination detected "
+                "(victim_acc=%.4f, agreement=%.4f, acc_gt=%.4f).",
+                spec.name,
+                float(victim_acc_eval),
+                float(metrics.get("agreement", 0.0)),
+                float(metrics.get("acc_gt", 0.0)),
+            )
+
+        if branch_attack.ctx and branch_attack.ctx.logger is not None:
+            history_metrics = dict(metrics)
+            history_metrics.update(
+                {
+                    "victim_acc_eval": float(victim_acc_eval),
+                    "labeled_total": float(labeled_total),
+                    "labeled_unique": float(labeled_unique),
+                    "labeled_duplicates": float(labeled_duplicates),
+                }
+            )
+            branch_attack.ctx.logger.log_history(step=current_queries, metrics=history_metrics)
+            seed = branch_attack.state.metadata.get("seed", 0)
+            branch_attack.ctx.logger.log_checkpoint(
+                seed=seed,
+                checkpoint=current_queries,
+                track=track_name,
+                metrics=metrics,
+            )
+            branch_attack.ctx.logger.save_metrics_csv()
+
     def _prepare_branch(
         self,
         parent_ctx: BenchmarkContext,
@@ -178,11 +284,12 @@ class TempActiveThief(AttackRunner):
         branch_attack.victim = self.victim
 
         def _branch_eval(substitute, eval_device, *, track="track_b", query_count=None):
-            return AttackRunner._evaluate_current_substitute(
+            _ = track
+            return self._evaluate_branch_substitute(
                 branch_attack,
+                spec,
                 substitute,
                 eval_device,
-                track=f"track_b_{spec.name}",
                 query_count=query_count,
             )
 

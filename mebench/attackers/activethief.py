@@ -453,8 +453,13 @@ class ActiveThief(AttackRunner):
         for _ in range(min(k, unlabeled_probs.shape[0])):
             # Select point with maximum 'min_distance'
             max_val, max_idx = torch.max(min_dists, dim=0)
+            if not torch.isfinite(max_val):
+                break
             best_idx = max_idx.item()
             selected.append(best_idx)
+
+            # Prevent duplicate picks when many points share the same distance.
+            min_dists[best_idx] = float("-inf")
             
             # Update distances relative to the NEWLY selected point
             new_center = unlabeled_probs[best_idx].unsqueeze(0)
