@@ -7,7 +7,7 @@
 | Query budget (CIFAR-10) | 20M | `budget.max_budget` | `20000000` in `configs/experiment.yaml` |
 | Query budget (CIFAR-100) | 10M | `budget.max_budget` | available as alternate profile later |
 | Victim architecture | ResNet-34-8x (official naming) | `victim.arch`, `victim.width_mult` | `resnet34`, `1` |
-| Victim input space | victim-wrapper normalization of incoming tanh-query tensors | fixed runtime policy | tanh query -> victim wrapper normalization |
+| Victim input space | runtime oracle path consumes incoming tanh-query tensors as-is | fixed runtime policy | tanh query preserved end-to-end |
 | Ensemble clones | >= 2 | `attack.ensemble_size` | `2` |
 | Replay | Classic | `attack.replay`, `attack.rep_iter` | `Classic`, `3` |
 | Student LR | 0.03 | `attack.student_lr` | `0.03` |

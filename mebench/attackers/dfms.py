@@ -1317,6 +1317,11 @@ class DFMSHL(AttackRunner):
                 else:
                     raise ValueError("DFMS-HL requires proxy_dataset configuration")
             else:
+                proxy_config = dict(proxy_config)
+                # Keep DFMS proxy tensors in raw/unit space before internal
+                # unit->tanh conversion. Surrogate-standard normalization is a
+                # pool-based policy and should not alter data-free DFMS proxy flow.
+                proxy_config.setdefault("surrogate_normalization", "none")
                 # Cache entire proxy dataset to RAM/GPU
                 self.proxy_data = load_pool_to_memory(
                     proxy_config,

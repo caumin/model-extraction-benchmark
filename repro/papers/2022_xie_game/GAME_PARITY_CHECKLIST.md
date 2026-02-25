@@ -44,7 +44,7 @@ Last updated: 2026-02-21
 - [x] **Input size parity**: GAME repro configs switched to `32x32` for victim/proxy paths.
 - [x] **Substitute architecture parity (pair-1 main)**: repro now uses `half_lenet` substitute.
 - [x] **Preprocess parity hook**: GAME uses fixed tanh (`[-1,1]`) internal/query path.
-- [x] **Victim parity profile**: retrained `lenet` victim checkpoint at `32x32`; victim wrapper normalizes tanh-query tensors before inference.
+- [x] **Victim parity profile**: retrained `lenet` victim checkpoint at `32x32`; runtime oracle path consumes tanh-query tensors as-is.
 - [x] **Benchmark query-accounting compliance**: GAME attack path uses metered `ctx.query` only for victim access (1 image = 1 budget unit).
 - [x] **AGU victim-query accounting parity-adaptation**: AGU-step victim outputs are fetched via metered oracle calls; no unmetered victim forward remains.
 - [x] **ACGAN fake-class semantics parity**: discriminator aux head predicts `n_classes+1`, and fake samples are supervised with dedicated fake-class index in TDL/AGU-discriminator updates.
@@ -309,7 +309,7 @@ Last updated: 2026-02-21
 - [~] **GTSRB transform parity**:
   - Added optional `surrogate_color_jitter` to approximate official train transform.
   - File: `mebench/data/loaders.py`.
-- Remaining gap: official also uses explicit `Normalize(0.5,0.5)` in dataset pipeline; benchmark contract uses attacker-boundary scale policy (pool `[0,1]`, data-free `[-1,1]`) plus model-side handling.
+- Remaining gap: official also uses explicit `Normalize(0.5,0.5)` in dataset pipeline; benchmark contract now uses surrogate-standard normalization for pool-based paths and `[-1,1]` for data-free attacker-boundary queries.
 - [x] **Pair-2 victim retraining under aligned AlexNet profile executed**:
   - Config: `repro/papers/2022_xie_game/configs/victim_train_pair2.yaml`
   - Checkpoint: `runs/victims/belgiumtsc_alexnet_tanh_game_paper.pt`
@@ -393,7 +393,7 @@ Last updated: 2026-02-21
 
 - [ ] **Dataset normalization contract mismatch remains material**:
   - Official pipeline applies `Normalize(0.5, 0.5)` in dataset transforms (GTSRB/BelgiumTSC).
-- Benchmark contract uses attacker-boundary scale policy (pool `[0,1]`, data-free `[-1,1]`) and model-side scaling.
+- Benchmark contract uses surrogate-standard normalization for pool-based paths and `[-1,1]` for data-free attacker-boundary queries.
   - Evidence: `official_repo_clones/game_attack/GAME/datasets.py` vs `mebench/data/loaders.py` and benchmark contract notes.
 - [ ] **Official runtime recipe ambiguity still unresolved**:
   - `attack.py` currently comments out `game` attacker entry, so published run path is not fully reconstructible from launcher defaults alone.

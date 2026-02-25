@@ -4,7 +4,7 @@
 |---|---|---|---|
 | Attack | DFME | `attack.name` | `dfme` |
 | Oracle output | soft probabilities | `victim.output_mode` / `attack.output_mode` | `soft_prob` |
-| Victim/query scaling policy | data-free synthetic queries stay tanh-scale at attacker boundary; victim wrapper normalizes before inference | fixed runtime policy | tanh query -> victim wrapper normalization |
+| Victim/query scaling policy | data-free synthetic queries stay tanh-scale at attacker boundary; runtime oracle path consumes tensors as-is | fixed runtime policy | tanh query preserved end-to-end |
 | Query budget (paper) | CIFAR10: 20M | `budget.max_budget` | `20000000` in `experiment.yaml` |
 | Query budget (smoke) | low-resource validation | `budget.max_budget` | `2000` in `experiment_smoke.yaml` |
 | G/S step ratio | `n_G:n_S = 1:5` | `attack.n_g_steps`, `attack.n_s_steps` | `1`, `5` (full) |

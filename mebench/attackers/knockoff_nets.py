@@ -719,10 +719,8 @@ class KnockoffNets(AttackRunner):
         state.attack_state[store_key] = model
 
     def _get_normalization(self, state: BenchmarkState, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-        # Benchmark scaling unification (DFME-style): inputs are in [0,1] and we do NOT
-        # apply dataset mean/std normalization inside attacks. KnockoffNets paper
-        # (knockoffnets.pdf) typically follows dataset preprocessing; we deviate
-        # intentionally for benchmark-wide consistency under the oracle contract.
+        # Pool tensors are normalized in the surrogate loader path. Do not apply
+        # any additional per-attack normalization here to avoid double scaling.
         input_shape = state.metadata.get("input_shape", (3, 32, 32))
         channels = int(input_shape[0])
         norm_mean = torch.zeros((1, channels, 1, 1), device=device)

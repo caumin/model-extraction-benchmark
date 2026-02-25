@@ -105,7 +105,7 @@ This applies to `experiment.yaml`, `victim_eval.yaml`, and `victim_train.yaml` (
 
 For data-free attacks in `@repro`, victim query tensors must remain tanh-scale (`[-1,1]`)
 at the attacker boundary. Do not add attacker-side tanh->unit conversion on query path.
-Victim wrapper normalizes incoming query tensors before inference.
+Runtime victim query path uses direct model input (no attacker-side wrapper normalization).
 
 Remote/high-resource full run:
 

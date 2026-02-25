@@ -116,6 +116,9 @@ class ArtifactLogger:
             "victim_id": self.summary_data["victim_id"],
             "substitute_arch": self.summary_data["substitute_arch"],
         }
+        for key, value in metrics.items():
+            if key not in row:
+                row[key] = value
         self.metrics_rows.append(row)
 
         # Update checkpoint summary
@@ -138,9 +141,13 @@ class ArtifactLogger:
         if not self.metrics_rows:
             return
 
-        fieldnames = list(self.metrics_rows[0].keys())
+        fieldnames: List[str] = []
+        for row in self.metrics_rows:
+            for key in row.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
         with open(metrics_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(self.metrics_rows)
 

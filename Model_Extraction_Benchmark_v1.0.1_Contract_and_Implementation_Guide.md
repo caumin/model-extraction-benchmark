@@ -104,7 +104,7 @@ This benchmark assumes a **BlackBox MLaaS** victim interface:
 - The MLaaS victim applies its own internal preprocessing/normalization, runs inference, and returns the response.
 
 Scale policy at the attacker boundary:
-- Pool-based attacks query images in `[0,1]` scale.
+- Pool-based attacks query/train in surrogate-standard normalized space (`dataset.surrogate_normalization`, default `standard`).
 - Data-free attacks query synthesized images in `[-1,1]` scale.
 - Data-free victim query path must not apply attacker-side tanh->unit conversion.
 - Runtime victim query path uses direct model input (no wrapper-side query normalization).
@@ -162,7 +162,7 @@ Each run MUST include victim metadata fields:
 Substitute architecture is configurable per run (e.g., LeNet / ResNet / MobileNet / VGG).
 
 Rules:
-- Substitute training uses attacker-visible query tensors as collected (`[0,1]` for pool-based, `[-1,1]` for data-free), unless an attack explicitly defines an internal conversion step.
+- Substitute training uses attacker-visible query tensors as collected (surrogate-standard normalized tensors for pool-based, `[-1,1]` for data-free), unless an attack explicitly defines an internal conversion step.
 - Training augmentations are **disallowed by default**, unless an attack definition explicitly requires them (future extensions).
 
 ---

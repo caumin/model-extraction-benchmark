@@ -14,8 +14,7 @@ from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.state import BenchmarkState
 from mebench.core.types import OracleOutput
-from mebench.data.loaders import get_test_dataloader
-from mebench.data.preprocessing import apply_official_preprocess_batch
+from mebench.data.loaders import get_surrogate_standard_normalization, get_test_dataloader
 from mebench.eval.metrics import compute_accuracy, evaluate_substitute
 
 
@@ -58,14 +57,6 @@ class _MappedDataset(Dataset):
 class _IdentityTensorTransform:
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         return x
-
-
-@dataclass(frozen=True)
-class _OfficialProfileTransform:
-    profile: str
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        return apply_official_preprocess_batch(x.unsqueeze(0), self.profile).squeeze(0)
 
 
 @dataclass(frozen=True)
@@ -131,13 +122,12 @@ class TempActiveThief(AttackRunner):
     """Compare two ActiveThief variants in one run.
 
     - raw_query_raw_train: query victim with raw pool images, train on raw queried images
-    - norm_pool_query_train: normalize pool tensors with victim-like transform,
+    - norm_pool_query_train: normalize pool tensors with surrogate-standard transform,
       then query and train in that same normalized space
     """
 
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
-        self._warned_missing_norm = False
         self._consistency_victim_acc_min = float(config.get("consistency_victim_acc_min", 0.8))
         self._consistency_agreement_min = float(config.get("consistency_agreement_min", 0.9))
         self._consistency_acc_max = float(config.get("consistency_acc_max", 0.2))
@@ -146,29 +136,43 @@ class TempActiveThief(AttackRunner):
         return x
 
     def _build_norm_pool_transform(self) -> Callable[[torch.Tensor], torch.Tensor]:
-        victim_cfg = self.state.metadata.get("victim_config", {}) or {}
-        profile = victim_cfg.get("official_preprocess_profile")
-        if isinstance(profile, str) and profile.strip():
-            return _OfficialProfileTransform(profile=profile.strip())
+        dataset_cfg = self.state.metadata.get("dataset_config", {}) or {}
+        mode = str(dataset_cfg.get("surrogate_normalization", "standard")).strip().lower()
 
-        normalization = victim_cfg.get("normalization")
-        if isinstance(normalization, dict):
-            mean = normalization.get("mean")
-            std = normalization.get("std")
-            if isinstance(mean, (list, tuple)) and isinstance(std, (list, tuple)):
-                if len(mean) == len(std):
-                    return _ChannelNormalizeTransform(
-                        mean=tuple(float(v) for v in mean),
-                        std=tuple(float(v) for v in std),
-                    )
+        if mode in {"none", "off", "identity", "raw"}:
+            return _IdentityTensorTransform()
 
-        if not self._warned_missing_norm:
+        if mode == "custom":
+            mean = dataset_cfg.get("surrogate_norm_mean")
+            std = dataset_cfg.get("surrogate_norm_std")
+            if isinstance(mean, (list, tuple)) and isinstance(std, (list, tuple)) and len(mean) == len(std):
+                return _ChannelNormalizeTransform(
+                    mean=tuple(float(v) for v in mean),
+                    std=tuple(float(v) for v in std),
+                )
             self.logger.warning(
-                "[TempActiveThief] No victim normalization configured; "
-                "norm-pool branch uses identity over raw [0,1] images."
+                "[TempActiveThief] Invalid custom surrogate normalization; "
+                "falling back to identity for norm-pool branch."
             )
-            self._warned_missing_norm = True
-        return _IdentityTensorTransform()
+            return _IdentityTensorTransform()
+
+        surrogate_name = str(dataset_cfg.get("surrogate_name") or dataset_cfg.get("name") or "SVHN")
+        channels_raw = dataset_cfg.get("channels")
+        channels = int(channels_raw) if channels_raw is not None else None
+        try:
+            mean, std = get_surrogate_standard_normalization(
+                surrogate_name=surrogate_name,
+                channels=channels,
+            )
+        except ValueError as exc:
+            self.logger.warning(
+                "[TempActiveThief] Unable to resolve surrogate standard normalization "
+                "(surrogate=%s): %s. Falling back to identity.",
+                surrogate_name,
+                str(exc),
+            )
+            return _IdentityTensorTransform()
+        return _ChannelNormalizeTransform(mean=tuple(float(v) for v in mean), std=tuple(float(v) for v in std))
 
     def _make_branch_state(self, branch_budget: int) -> BenchmarkState:
         metadata = copy.deepcopy(self.state.metadata)
@@ -193,12 +197,10 @@ class TempActiveThief(AttackRunner):
         if substitute is None or self.victim is None:
             return
 
-        current_queries = branch_attack.state.query_count if query_count is None else int(query_count)
-        if current_queries == 0:
-            current_queries = len(branch_attack.state.attack_state.get("labeled_indices", []))
+        query_step = branch_attack.state.query_count if query_count is None else int(query_count)
 
         track_name = f"track_b_{spec.name}"
-        eval_key = (track_name, int(current_queries))
+        eval_key = (track_name, int(query_step))
         if eval_key in branch_attack._tracked_eval_points:
             return
         branch_attack._tracked_eval_points.add(eval_key)
@@ -239,7 +241,7 @@ class TempActiveThief(AttackRunner):
             "[TempActiveThief][%s][Evaluation] Labeled: %d (unique=%d, dup=%d), "
             "VictimAcc: %.4f, Acc: %.4f, Agreement: %.4f, KL: %.4f",
             spec.name,
-            int(current_queries),
+            labeled_total,
             labeled_unique,
             labeled_duplicates,
             float(victim_acc_eval),
@@ -263,8 +265,8 @@ class TempActiveThief(AttackRunner):
             )
 
         if branch_attack.ctx and branch_attack.ctx.logger is not None:
-            history_metrics = dict(metrics)
-            history_metrics.update(
+            metrics_with_counts = dict(metrics)
+            metrics_with_counts.update(
                 {
                     "victim_acc_eval": float(victim_acc_eval),
                     "labeled_total": float(labeled_total),
@@ -272,13 +274,13 @@ class TempActiveThief(AttackRunner):
                     "labeled_duplicates": float(labeled_duplicates),
                 }
             )
-            branch_attack.ctx.logger.log_history(step=current_queries, metrics=history_metrics)
+            branch_attack.ctx.logger.log_history(step=query_step, metrics=metrics_with_counts)
             seed = branch_attack.state.metadata.get("seed", 0)
             branch_attack.ctx.logger.log_checkpoint(
                 seed=seed,
-                checkpoint=current_queries,
+                checkpoint=query_step,
                 track=track_name,
-                metrics=metrics,
+                metrics=metrics_with_counts,
             )
             branch_attack.ctx.logger.save_metrics_csv()
 
@@ -427,7 +429,7 @@ class TempActiveThief(AttackRunner):
             ),
             _BranchSpec(
                 name="norm_pool_query_train",
-                label="pool=victim_norm(raw), query=pool, train=pool",
+                label="pool=surrogate_norm(raw), query=pool, train=pool",
                 budget=norm_budget,
                 query_transform=self._identity,
                 pool_sample_transform=norm_pool_transform,
@@ -436,7 +438,7 @@ class TempActiveThief(AttackRunner):
 
         self.logger.info(
             "[TempActiveThief] Variants: raw_query_raw_train(query=raw,train=raw), "
-            "norm_pool_query_train(pool=victim_norm(raw),query=pool,train=pool)"
+            "norm_pool_query_train(pool=surrogate_norm(raw),query=pool,train=pool)"
         )
 
         pbar = self._create_progress_bar(total_budget, "[TempActiveThief] Ablation")

@@ -504,6 +504,10 @@ class GAME(AttackRunner):
                 input_shape = state.metadata.get("input_shape", (3, 32, 32))
                 proxy_config.setdefault("channels", int(input_shape[0]))
                 proxy_config.setdefault("input_size", [int(input_shape[1]), int(input_shape[2])])
+                # Keep GAME proxy tensors in raw/unit space before internal
+                # tanh conversion. Surrogate-standard normalization is for
+                # pool-based attacks, not data-free GAME proxy pretraining.
+                proxy_config.setdefault("surrogate_normalization", "none")
 
                 if self.proxy_loader is None:
                     self.proxy_loader = create_dataloader(

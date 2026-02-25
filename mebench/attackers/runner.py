@@ -178,19 +178,18 @@ class AttackRunner(ABC):
             output_mode=self.config.get("output_mode", "soft_prob")
         )
 
-        current_queries = self.state.query_count if query_count is None else int(query_count)
-        # Handle cases where query_count is 0 but we have labeled data (e.g. initial seed)
-        if current_queries == 0:
-            current_queries = len(self.state.attack_state.get('labeled_indices', []))
+        query_step = self.state.query_count if query_count is None else int(query_count)
+        labeled_total, labeled_unique, labeled_duplicates = self._compute_labeled_stats()
+        labeled_display = int(labeled_total) if int(labeled_total) > 0 else int(query_step)
 
-        eval_key = (str(track), int(current_queries))
+        eval_key = (str(track), int(query_step))
         if eval_key in self._tracked_eval_points:
             return
         self._tracked_eval_points.add(eval_key)
 
         msg = (
             f"[{self.__class__.__name__}] [Evaluation] "
-            f"Labeled: {current_queries}, "
+            f"Labeled: {labeled_display} (unique={labeled_unique}, dup={labeled_duplicates}), "
             f"Acc: {metrics.get('acc_gt', 0.0):.4f}, "
             f"Agreement: {metrics.get('agreement', 0.0):.4f}, "
             f"KL: {metrics.get('kl_mean', 0.0) or 0.0:.4f}"
@@ -198,21 +197,48 @@ class AttackRunner(ABC):
         self.logger.info(msg)
 
         # [ADDED] Log to artifacts if context is available
-        if self.ctx:
+        if self.ctx and self.ctx.logger is not None:
+            metrics_with_counts = dict(metrics)
+            metrics_with_counts.update(
+                {
+                    "labeled_total": float(labeled_total),
+                    "labeled_unique": float(labeled_unique),
+                    "labeled_duplicates": float(labeled_duplicates),
+                }
+            )
             # Log history (time-series)
-            self.ctx.logger.log_history(step=current_queries, metrics=metrics)
+            self.ctx.logger.log_history(step=query_step, metrics=metrics_with_counts)
 
             # Log checkpoint (metrics.csv)
             seed = self.state.metadata.get("seed", 0)
             self.ctx.logger.log_checkpoint(
                 seed=seed,
-                checkpoint=current_queries,
+                checkpoint=query_step,
                 track=track,
-                metrics=metrics,
+                metrics=metrics_with_counts,
             )
 
             # Force save to ensure persistence even if crashed later
             self.ctx.logger.save_metrics_csv()
+
+    def _compute_labeled_stats(self) -> tuple[int, int, int]:
+        labeled_indices = self.state.attack_state.get("labeled_indices", [])
+        if isinstance(labeled_indices, list) and len(labeled_indices) > 0:
+            labeled_total = int(len(labeled_indices))
+            labeled_unique = int(len(set(int(i) for i in labeled_indices)))
+            labeled_duplicates = int(max(0, labeled_total - labeled_unique))
+            return labeled_total, labeled_unique, labeled_duplicates
+
+        query_x = self.state.attack_state.get("query_data_x", [])
+        if isinstance(query_x, list) and len(query_x) > 0:
+            labeled_total = 0
+            for batch in query_x:
+                if isinstance(batch, torch.Tensor) and batch.ndim >= 1:
+                    labeled_total += int(batch.size(0))
+            if labeled_total > 0:
+                return int(labeled_total), int(labeled_total), 0
+
+        return 0, 0, 0
 
     def _build_optimizer(
         self, params: Any, opt_config: Dict[str, Any]

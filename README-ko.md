@@ -187,7 +187,7 @@ model-extraction-benchmark/
 1.  **예산 (Budget)**: `1 쿼리` = `1 이미지`. 배치 단위 쿼리는 `batch_size`만큼 예산이 차감됩니다.
 2.  **오라클 (Oracle)**: 기본 `soft_prob` 모드는 온도 `T=1.0`을 사용합니다. `hard_top1`은 라벨을 반환합니다.
 3.  **결정론 (Determinism)**: 피해 모델은 항상 `eval()`/`no_grad()` 상태로 실행됩니다. Track A의 시드는 고정됩니다.
-4.  **BlackBox MLaaS 입력 계약**: 공격자는 Victim의 내부 정규화 정보를 알지 못한다고 가정합니다. 쿼리 이미지는 그대로 전송되며, 런타임 쿼리 경로에서는 wrapper 변환 없이 Victim 추론으로 직접 전달됩니다. Pool 기반 공격은 `[0,1]`, Data-free 공격은 `[-1,1]` 스케일로 쿼리하며 victim 쿼리 경로에서 attacker-side tanh->unit 변환을 하지 않습니다. 평가는 공정 비교를 위해 공통 정규화 test loader를 사용합니다.
+4.  **BlackBox MLaaS 입력 계약**: 공격자는 Victim의 내부 정규화 정보를 알지 못한다고 가정합니다. 쿼리 이미지는 그대로 전송되며, 런타임 쿼리 경로에서는 wrapper 변환 없이 Victim 추론으로 직접 전달됩니다. Pool 기반 공격은 surrogate 표준 정규화 공간(`dataset.surrogate_normalization`, 기본 `standard`)에서 query/train을 수행하고, Data-free 공격은 `[-1,1]` 스케일로 쿼리하며 victim 쿼리 경로에서 attacker-side tanh->unit 변환을 하지 않습니다. 평가는 공정 비교를 위해 공통 정규화 test loader를 사용합니다.
 
 ---
 

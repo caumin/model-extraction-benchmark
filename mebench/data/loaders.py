@@ -1,4 +1,9 @@
-"""Data loaders for seed, surrogate, and data-free modes."""
+"""Data loaders for seed, surrogate, and data-free modes.
+
+Surrogate datasets can apply dataset-standard normalization directly in the
+pool loader path. This keeps pool-based attacks in a consistent surrogate
+feature space for both query and substitute training.
+"""
 
 from typing import Dict, Any, Tuple, Optional
 import os
@@ -13,10 +18,134 @@ from PIL import Image
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2023, 0.1994, 0.2010)
+CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
+CIFAR100_STD = (0.2675, 0.2565, 0.2761)
 SVHN_MEAN = (0.43768206, 0.44376972, 0.47280434)
 SVHN_STD = (0.19803014, 0.20101564, 0.19703615)
 MNIST_MEAN = (0.1307,)
 MNIST_STD = (0.3081,)
+EMNIST_MEAN = (0.1736,)
+EMNIST_STD = (0.3248,)
+FASHION_MNIST_MEAN = (0.2860,)
+FASHION_MNIST_STD = (0.3530,)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+GTSRB_MEAN = (0.3403, 0.3121, 0.3214)
+GTSRB_STD = (0.2724, 0.2608, 0.2669)
+BELGIUM_TSC_MEAN = GTSRB_MEAN
+BELGIUM_TSC_STD = GTSRB_STD
+
+
+def _rgb_to_grayscale_stats(
+    mean: Tuple[float, float, float],
+    std: Tuple[float, float, float],
+) -> Tuple[Tuple[float], Tuple[float]]:
+    # Rec.709-style luminance weights.
+    w_r, w_g, w_b = 0.2989, 0.5870, 0.1140
+    mean_gray = (w_r * float(mean[0])) + (w_g * float(mean[1])) + (w_b * float(mean[2]))
+    std_gray = (
+        ((w_r * float(std[0])) ** 2)
+        + ((w_g * float(std[1])) ** 2)
+        + ((w_b * float(std[2])) ** 2)
+    ) ** 0.5
+    return (float(mean_gray),), (float(std_gray),)
+
+
+def _adapt_stats_channels(
+    mean: Tuple[float, ...],
+    std: Tuple[float, ...],
+    channels: Optional[int],
+) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    if channels is None:
+        return mean, std
+
+    ch = int(channels)
+    if ch == len(mean):
+        return mean, std
+    if ch == 1 and len(mean) == 3:
+        mean_g, std_g = _rgb_to_grayscale_stats(
+            (float(mean[0]), float(mean[1]), float(mean[2])),
+            (float(std[0]), float(std[1]), float(std[2])),
+        )
+        return mean_g, std_g
+    if ch == 3 and len(mean) == 1:
+        return (float(mean[0]),) * 3, (float(std[0]),) * 3
+
+    raise ValueError(
+        "Unsupported surrogate normalization channel adaptation: "
+        f"stats_channels={len(mean)}, target_channels={ch}"
+    )
+
+
+def _parse_norm_sequence(name: str, value: Any) -> Tuple[float, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) <= 0:
+        raise ValueError(f"{name} must be a non-empty list/tuple, got {value!r}")
+    try:
+        parsed = tuple(float(v) for v in value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain numeric values, got {value!r}") from exc
+    return parsed
+
+
+def get_surrogate_standard_normalization(
+    surrogate_name: str,
+    channels: Optional[int] = None,
+) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    key = str(surrogate_name).strip().lower()
+    mapping: Dict[str, Tuple[Tuple[float, ...], Tuple[float, ...]]] = {
+        "svhn": (SVHN_MEAN, SVHN_STD),
+        "mnist": (MNIST_MEAN, MNIST_STD),
+        "emnist": (EMNIST_MEAN, EMNIST_STD),
+        "fashionmnist": (FASHION_MNIST_MEAN, FASHION_MNIST_STD),
+        "cifar10": (CIFAR10_MEAN, CIFAR10_STD),
+        "cifar100": (CIFAR100_MEAN, CIFAR100_STD),
+        "gtsrb": (GTSRB_MEAN, GTSRB_STD),
+        "belgiumtsc": (BELGIUM_TSC_MEAN, BELGIUM_TSC_STD),
+        "imagenet": (IMAGENET_MEAN, IMAGENET_STD),
+        "ilsvrc": (IMAGENET_MEAN, IMAGENET_STD),
+        "ilsvrc2012": (IMAGENET_MEAN, IMAGENET_STD),
+    }
+    if key not in mapping:
+        raise ValueError(
+            f"Unsupported surrogate dataset for standard normalization: {surrogate_name!r}"
+        )
+
+    mean, std = mapping[key]
+    return _adapt_stats_channels(mean, std, channels)
+
+
+def _resolve_surrogate_normalization(
+    *,
+    surrogate_name: str,
+    output_channels: Optional[int],
+    surrogate_normalization: Any,
+    surrogate_norm_mean: Any,
+    surrogate_norm_std: Any,
+) -> Optional[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
+    mode = str(surrogate_normalization if surrogate_normalization is not None else "standard")
+    mode = mode.strip().lower()
+
+    if mode in {"none", "off", "identity", "raw"}:
+        return None
+
+    if mode in {"standard", "dataset", "surrogate_standard"}:
+        return get_surrogate_standard_normalization(surrogate_name, channels=output_channels)
+
+    if mode == "custom":
+        mean = _parse_norm_sequence("surrogate_norm_mean", surrogate_norm_mean)
+        std = _parse_norm_sequence("surrogate_norm_std", surrogate_norm_std)
+        if len(mean) != len(std):
+            raise ValueError(
+                "surrogate_norm_mean and surrogate_norm_std must have same length, "
+                f"got mean={len(mean)}, std={len(std)}"
+            )
+        return _adapt_stats_channels(mean, std, output_channels)
+
+    raise ValueError(
+        "dataset.surrogate_normalization must be one of "
+        "['standard', 'none', 'custom'], "
+        f"got {surrogate_normalization!r}"
+    )
 
 
 def _get_default_num_workers(*, default: int = 0) -> int:
@@ -350,6 +479,9 @@ class SurrogateDataset(Dataset):
         class_subset_names: Optional[list[str]] = None,
         emnist_split: str = "balanced",
         surrogate_color_jitter: bool = False,
+        surrogate_normalization: Any = "standard",
+        surrogate_norm_mean: Any = None,
+        surrogate_norm_std: Any = None,
     ):
         """Initialize surrogate dataset.
 
@@ -359,6 +491,13 @@ class SurrogateDataset(Dataset):
         """
         self.surrogate_name = surrogate_name
         self.train_split = train_split
+        norm_stats = _resolve_surrogate_normalization(
+            surrogate_name=surrogate_name,
+            output_channels=output_channels,
+            surrogate_normalization=surrogate_normalization,
+            surrogate_norm_mean=surrogate_norm_mean,
+            surrogate_norm_std=surrogate_norm_std,
+        )
 
         # Load surrogate dataset
         if surrogate_name == "SVHN":
@@ -366,6 +505,8 @@ class SurrogateDataset(Dataset):
             if resize is not None:
                 tf.append(transforms.Resize(resize))
             tf.append(transforms.ToTensor())
+            if norm_stats is not None:
+                tf.append(transforms.Normalize(*norm_stats))
             transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.SVHN(
                 root="./data",
@@ -380,6 +521,8 @@ class SurrogateDataset(Dataset):
             if output_channels is not None and int(output_channels) == 3:
                 tf.append(transforms.Grayscale(num_output_channels=3))
             tf.append(transforms.ToTensor())
+            if norm_stats is not None:
+                tf.append(transforms.Normalize(*norm_stats))
             transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.EMNIST(
                 root="./data",
@@ -395,6 +538,8 @@ class SurrogateDataset(Dataset):
             if output_channels is not None and int(output_channels) == 3:
                 tf.append(transforms.Grayscale(num_output_channels=3))
             tf.append(transforms.ToTensor())
+            if norm_stats is not None:
+                tf.append(transforms.Normalize(*norm_stats))
             transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.FashionMNIST(
                 root="./data",
@@ -407,6 +552,8 @@ class SurrogateDataset(Dataset):
             if resize is not None:
                 tf.append(transforms.Resize(resize))
             tf.append(transforms.ToTensor())
+            if norm_stats is not None:
+                tf.append(transforms.Normalize(*norm_stats))
             transform = transforms.Compose(tf)
             self.dataset = torchvision.datasets.CIFAR10(
                 root="./data",
@@ -419,6 +566,8 @@ class SurrogateDataset(Dataset):
             if resize is not None:
                 tf.append(transforms.Resize(resize))
             tf.append(transforms.ToTensor())
+            if norm_stats is not None:
+                tf.append(transforms.Normalize(*norm_stats))
             transform = transforms.Compose(tf)
             full_dataset = torchvision.datasets.CIFAR100(
                 root="./data",
@@ -472,6 +621,8 @@ class SurrogateDataset(Dataset):
                     )
                 )
             tf.append(transforms.ToTensor())
+            if norm_stats is not None:
+                tf.append(transforms.Normalize(*norm_stats))
             transform = transforms.Compose(tf)
             csv_root = Path(str(root)) / "GTSRB" / "trainingset" / "training.csv"
             if csv_root.exists():
@@ -493,6 +644,8 @@ class SurrogateDataset(Dataset):
             if output_channels is not None and int(output_channels) == 1:
                 tf.append(transforms.Grayscale(num_output_channels=1))
             tf.append(transforms.ToTensor())
+            if norm_stats is not None:
+                tf.append(transforms.Normalize(*norm_stats))
             transform = transforms.Compose(tf)
             self.dataset = BelgiumTSCDataset(
                 root=root,
@@ -526,6 +679,8 @@ class SurrogateDataset(Dataset):
                 else:
                     raise ValueError(f"Unsupported output_channels for ImageNet surrogate: {output_channels}")
             tf.append(transforms.ToTensor())
+            if norm_stats is not None:
+                tf.append(transforms.Normalize(*norm_stats))
             transform = transforms.Compose(tf)
             full_dataset = torchvision.datasets.ImageFolder(root=split_dir, transform=transform)
 
@@ -661,7 +816,11 @@ def create_dataloader(
     batch_size: int = 128,
     shuffle: bool = True,
 ) -> DataLoader:
-    """Create dataloader based on config."""
+    """Create dataloader based on config.
+
+    Surrogate mode applies `dataset.surrogate_normalization` (default:
+    `standard`) unless explicitly disabled.
+    """
     name = config.get("name", "CIFAR10")
     data_mode = config.get("data_mode", "surrogate")
     
@@ -676,6 +835,9 @@ def create_dataloader(
 
     if data_mode == "surrogate":
         surrogate_root = _normalize_root_path(str(config.get("surrogate_root") or "./data"))
+        surrogate_normalization = config.get("surrogate_normalization", "standard")
+        surrogate_norm_mean = config.get("surrogate_norm_mean")
+        surrogate_norm_std = config.get("surrogate_norm_std")
         surrogate_resize = config.get("surrogate_resize")
         resize: Optional[Tuple[int, int]]
         if desired_resize is not None:
@@ -700,6 +862,9 @@ def create_dataloader(
             class_subset_names=config.get("surrogate_class_subset_names"),
             emnist_split=str(config.get("surrogate_split", config.get("emnist_split", "balanced"))),
             surrogate_color_jitter=bool(config.get("surrogate_color_jitter", False)),
+            surrogate_normalization=surrogate_normalization,
+            surrogate_norm_mean=surrogate_norm_mean,
+            surrogate_norm_std=surrogate_norm_std,
         )
     elif data_mode == "seed":
         dataset = SeedDataset(

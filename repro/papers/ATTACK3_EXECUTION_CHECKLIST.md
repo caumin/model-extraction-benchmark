@@ -18,7 +18,7 @@ python repro/run_experiment.py preflight --paper-id all --profile full
   - ImageNet surrogate split directory (MARICH/Dissector)
   - generator checkpoint (BlackboxRipper, `.pth/.pt` fallback)
   - victim preprocess profile consistency (`official_preprocess_profile: dfme_cifar10_test`)
-  - data-free victim scale contract (tanh query tensors normalized in victim wrapper)
+  - data-free victim scale contract (tanh query tensors preserved on runtime query path)
 
 ## 2) Hard Blockers
 

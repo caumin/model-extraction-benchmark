@@ -938,10 +938,8 @@ class BlackboxDissector(AttackRunner):
             if pool_workers is not None
             else pool_loader_kwargs(device)
         )
-        # Benchmark scaling unification (DFME-style): inputs are [0,1] and no dataset
-        # mean/std normalization is applied. The Blackbox Dissector paper
-        # (blackbox-dissector.pdf) may assume dataset preprocessing; we deviate
-        # intentionally for benchmark-wide consistency.
+        # Pool tensors are normalized in the surrogate loader path. Keep attack
+        # preprocessing as identity here to avoid double normalization.
         input_shape = state.metadata.get("input_shape", (3, 32, 32))
         channels = int(input_shape[0])
         norm_mean = torch.zeros((1, channels, 1, 1), device=device)

@@ -48,6 +48,27 @@ def validate_config(config: Dict[str, Any]) -> None:
     if data_mode in {"seed", "surrogate"} and seed_name not in {"CIFAR10", "MNIST", "EMNIST", "FashionMNIST", "SVHN", "GTSRB"}:
         raise ValueError(f"Dataset '{seed_name}' not supported for {data_mode} mode")
 
+    if data_mode == "surrogate":
+        dataset_cfg = config.get("dataset", {})
+        norm_mode = str(dataset_cfg.get("surrogate_normalization", "standard")).strip().lower()
+        if norm_mode not in {"standard", "none", "custom"}:
+            raise ValueError(
+                "dataset.surrogate_normalization must be one of "
+                "['standard', 'none', 'custom']"
+            )
+        if norm_mode == "custom":
+            mean = dataset_cfg.get("surrogate_norm_mean")
+            std = dataset_cfg.get("surrogate_norm_std")
+            if not isinstance(mean, (list, tuple)) or not isinstance(std, (list, tuple)):
+                raise ValueError(
+                    "dataset.surrogate_normalization='custom' requires "
+                    "dataset.surrogate_norm_mean/std lists"
+                )
+            if len(mean) <= 0 or len(mean) != len(std):
+                raise ValueError(
+                    "dataset.surrogate_norm_mean/std must be non-empty and have equal length"
+                )
+
     # Check output mode compatibility
     victim_mode = config["victim"]["output_mode"]
     attack_mode = config["attack"]["output_mode"]

@@ -1,7 +1,8 @@
 """Shared scaling helpers for benchmark input-scale handling.
 
 Benchmark contract:
-- Pool-based query paths use unit-scale tensors ([0,1]).
+- Pool-based query/train paths use surrogate-standard normalized tensors
+  (configured in dataset loaders).
 - Data-free query paths use tanh-scale tensors ([-1,1]) at oracle boundary.
 
 To reduce accidental inconsistencies across attacks, common conversions are

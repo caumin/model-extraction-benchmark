@@ -76,6 +76,7 @@ Implementation provenance (paper + official repo port links) is documented in
 - `MARICH` currently follows the paper/original staged protocol in `mebench/attackers/marich.py`.
 - It is not yet fully harmonized with the shared pool-based benchmark protocol used for strict cross-attack fairness.
 - Planned follow-up: integrate MARICH into a unified pool-based protocol layer (selection/training/evaluation schedule alignment).
+- Planned follow-up: add a supplementary transferability evaluation protocol that measures victim robustness to white-box adversarial examples generated from checkpointed substitutes (post-hoc evaluation, budget-isolated from extraction queries).
 
 ## ⚡ Installation
 
@@ -190,7 +191,7 @@ For implementation details and provenance of specific attacks, see `docs/referen
 1.  **Budget**: `1 query` = `1 image`. Batched queries count as `batch_size`.
 2.  **Oracle**: Default `soft_prob` uses Temperature `T=1.0`. `hard_top1` returns labels.
 3.  **Determinism**: Victims run in `eval()`/`no_grad()`. Seeds are fixed for Track A.
-4.  **BlackBox MLaaS Input Contract**: The attacker does not know victim normalization. Query images are sent as-is and forwarded directly to victim inference (no runtime wrapper transform at query time). Pool-based attacks query in `[0,1]`; data-free attacks query in `[-1,1]` and must not apply attacker-side tanh->unit conversion on the victim query path. Evaluation uses a shared, normalized test loader for fair comparison.
+4.  **BlackBox MLaaS Input Contract**: The attacker does not know victim normalization. Query images are sent as-is and forwarded directly to victim inference (no runtime wrapper transform at query time). Pool-based attacks query/train in surrogate-standard normalized space (`dataset.surrogate_normalization`, default `standard`); data-free attacks query in `[-1,1]` and must not apply attacker-side tanh->unit conversion on the victim query path. Evaluation uses a shared, normalized test loader for fair comparison.
 
 ### 🔄 Protocol v1.2: Track Logic & Control Experiments
 To ensure fair attribution of performance gains, we enforce **Protocol v1.2** branching rules:

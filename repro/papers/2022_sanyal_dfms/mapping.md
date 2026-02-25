@@ -7,7 +7,7 @@
 | Victim checkpoint source | shared DFME victim checkpoint | `victim.checkpoint_ref` | `runs/victims/cifar10-resnet34_8x.pt` |
 | Width multiplier note | paper/checkpoint name contains `8x` | `victim.width_mult` | fixed to `1` (matches runnable code path; `8x` kept as naming/provenance) |
 | Oracle output | hard label only | `victim.output_mode` / `attack.output_mode` | `hard_top1` |
-| Victim/query scaling policy | data-free synthetic victim queries stay `[-1,1]` through oracle path; victim wrapper normalizes before inference | fixed runtime policy | tanh query -> victim wrapper normalization |
+| Victim/query scaling policy | data-free synthetic victim queries stay `[-1,1]` through oracle path; runtime oracle path consumes tensors as-is | fixed runtime policy | tanh query preserved end-to-end |
 | Internal DFMS model scale | clone/discriminator/model internal path uses tanh scale | fixed runtime policy | tanh |
 | Query budget (paper/offical) | CIFAR10: 8M | `budget.max_budget` | `8000000` in `experiment.yaml` |
 | Budget semantics note | paper Sec.3.5 equations imply `Total=2*nC+NQ`; with `nC=50k`, `NQ=8M` gives `8.1M` total | benchmark policy | this repo fixes **total** oracle queries to `8,000,000` for fair cross-attack comparison; effectively `NQ` becomes `7.9M` when `nC=50k` is preserved |
