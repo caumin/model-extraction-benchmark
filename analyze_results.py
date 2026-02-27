@@ -1,8 +1,44 @@
 import json
 from pathlib import Path
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+
+# Folder suffix convention for versioned comparisons:
+#   <run_name>__prealign
+#   <run_name>__<custom_tag>
+# This keeps the original run_name parsable while exposing variant labels.
+_LEGACY_VARIANT_TAGS = {
+    "legacy",
+    "prealign",
+    "pre-align",
+    "pre_align",
+    "v0",
+    "old",
+    "before-align",
+}
+
+
+def _split_variant_tag(run_name: str) -> Tuple[str, Optional[str]]:
+    if "__" not in run_name:
+        return run_name, None
+    base, tag = run_name.rsplit("__", 1)
+    base = base.strip()
+    tag = tag.strip()
+    if not base or not tag:
+        return run_name, None
+    return base, tag
+
+
+def _annotate_attack_name(attack_name: str, variant_tag: Optional[str]) -> str:
+    if variant_tag is None:
+        return attack_name
+    tag_norm = str(variant_tag).strip().lower()
+    if tag_norm in _LEGACY_VARIANT_TAGS:
+        return f"{attack_name} (pre-align)"
+    return f"{attack_name} ({variant_tag})"
 
 
 def analyze_results(root_dir="runs", output_dir="analysis_results"):
@@ -18,7 +54,8 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
         if not run_dir.is_dir():
             continue
 
-        parts = run_dir.name.split("_")
+        base_run_name, variant_tag = _split_variant_tag(run_dir.name)
+        parts = base_run_name.split("_")
         if len(parts) < 3:
             continue
 
@@ -30,6 +67,8 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
         for suffix in ["_1k", "_10k", "_20k", "_50k", "_100k"]:
             if attack_name.endswith(suffix):
                 attack_name = attack_name[: -len(suffix)]
+
+        attack_name = _annotate_attack_name(attack_name, variant_tag)
 
         # Find latest timestamp
         timestamps = sorted([d for d in run_dir.iterdir() if d.is_dir()])
@@ -72,6 +111,7 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
                 {
                     "Set": set_id,
                     "Attack": attack_name.upper(),
+                    "Variant": (variant_tag or "default"),
                     "Seed": seed_value,
                     "Track": track_to_use,
                     "Budget": max_cp,

@@ -93,6 +93,127 @@ def _clean_yaml_dir(out_dir: Path) -> None:
         p.unlink()
 
 
+# Apply per-sample LR alignment only for explicitly specified attacks when
+# (1) task is image classification and (2) substitute architecture is resnet18.
+_IMAGE_CLASSIFICATION_DATASETS = {
+    "CIFAR10",
+    "CIFAR100",
+    "SVHN",
+    "GTSRB",
+    "MNIST",
+    "FASHIONMNIST",
+    "EMNIST",
+    "IMAGENET",
+}
+
+_ALIGNED_TRAIN_BATCH = 512
+
+# attack_name -> rule
+# - ref_lr/ref_batch: paper/official baseline used to preserve lr-per-sample
+# - batch_paths: config paths forced to the aligned training batch
+# - lr_paths: config paths receiving aligned LR
+_LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
+    "dfme": {
+        "ref_lr": 0.1,
+        "ref_batch": 256,
+        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
+        "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "student_lr")],
+        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+    },
+    "disguide": {
+        "ref_lr": 0.03,
+        "ref_batch": 256,
+        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
+        "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "student_lr")],
+        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+    },
+    "ds": {
+        "ref_lr": 0.3,
+        "ref_batch": 256,
+        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
+        "lr_paths": [("attack", "student_lr")],
+        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+    },
+    "maze": {
+        "ref_lr": 0.1,
+        "ref_batch": 128,
+        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
+        "lr_paths": [("substitute", "optimizer", "lr")],
+        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+    },
+    "knockoff_nets": {
+        "ref_lr": 0.01,
+        "ref_batch": 64,
+        "batch_paths": [("substitute", "batch_size")],
+        "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "paper_train_lr")],
+        "substitute_optimizer": {"name": "sgd", "momentum": 0.5, "weight_decay": 5e-4},
+    },
+    "blackbox_dissector": {
+        "ref_lr": 0.02,
+        "ref_batch": 128,
+        "batch_paths": [("substitute", "batch_size")],
+        "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "lr")],
+        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+    },
+    "blackbox_ripper": {
+        "ref_lr": 0.01,
+        "ref_batch": 64,
+        "batch_paths": [("attack", "train_batch_size"), ("substitute", "batch_size")],
+        "lr_paths": [("attack", "substitute_lr")],
+        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+    },
+    "swiftthief": {
+        "ref_lr": 0.01,
+        "ref_batch": 100,
+        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
+        "lr_paths": [
+            ("substitute", "optimizer", "lr"),
+            ("attack", "lr"),
+            ("attack", "kd_lr"),
+        ],
+        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+    },
+}
+
+
+def _set_nested_value(cfg: Dict[str, Any], path: Tuple[str, ...], value: Any) -> None:
+    cursor: Dict[str, Any] = cfg
+    for key in path[:-1]:
+        node = cursor.get(key)
+        if not isinstance(node, dict):
+            node = {}
+            cursor[key] = node
+        cursor = node
+    cursor[path[-1]] = value
+
+
+def _is_resnet18_image_setup(setup: Setup, cfg: Dict[str, Any]) -> bool:
+    sub_arch = str(cfg.get("substitute", {}).get("arch", "")).strip().lower()
+    dataset_name = str(setup.victim_dataset).strip().upper()
+    return sub_arch == "resnet18" and dataset_name in _IMAGE_CLASSIFICATION_DATASETS
+
+
+def _apply_lr_per_sample_alignment(cfg: Dict[str, Any], setup: Setup, attack_name: str) -> None:
+    rule = _LRPS_ALIGNMENT_RULES.get(str(attack_name))
+    if rule is None:
+        return
+    if not _is_resnet18_image_setup(setup, cfg):
+        return
+
+    aligned_lr = float(rule["ref_lr"]) * (float(_ALIGNED_TRAIN_BATCH) / float(rule["ref_batch"]))
+
+    sub_opt = rule.get("substitute_optimizer")
+    if isinstance(sub_opt, dict):
+        for key, value in sub_opt.items():
+            _set_nested_value(cfg, ("substitute", "optimizer", str(key)), value)
+
+    for path in rule.get("batch_paths", []):
+        _set_nested_value(cfg, tuple(path), int(_ALIGNED_TRAIN_BATCH))
+
+    for path in rule.get("lr_paths", []):
+        _set_nested_value(cfg, tuple(path), float(aligned_lr))
+
+
 def generate_configs(
     out_dir: Path,
     device: str,
@@ -494,6 +615,10 @@ def generate_configs(
                             gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}.pth"
                         cfg["attack"]["generator_name"] = gen_name
                         cfg["attack"]["generator_checkpoint"] = gen_ckpt
+
+                    # Align selected attacks to paper/official lr-per-sample while
+                    # using a larger training batch when the setup is image+resnet18.
+                    _apply_lr_per_sample_alignment(cfg, setup, attack.name)
 
                     out_path = out_dir / f"{run_name}.yaml"
                     out_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -1289,7 +1414,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument(
         "--imagenet-root",
         type=str,
-        default="C:/imagenet",
+        default="D:/imagenet",
         help="Local ImageNet root path used as dataset.surrogate_root in generated configs",
     )
     parser.add_argument(

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from generate_configs import generate_configs, generate_paperlike_configs
@@ -12,12 +13,17 @@ def _generate_matrix(out_dir: Path) -> int:
         seeds=[0],
         pool_budget=30_000,
         synthetic_budget=30_000_000,
+        set_a_pool_budget=30_000,
+        set_a_synthetic_budget=30_000_000,
+        set_b_pool_budget=30_000,
+        set_b_synthetic_budget=30_000_000,
         include_both_hard=False,
         clean=True,
         pool_num_workers=0,
         substitute_num_workers=0,
         substitute_train_num_workers=0,
         substitute_val_num_workers=0,
+        imagenet_root="D:/imagenet",
     )
 
 
@@ -31,7 +37,76 @@ def _generate_paperlike(out_dir: Path) -> int:
         substitute_num_workers=0,
         substitute_train_num_workers=0,
         substitute_val_num_workers=0,
+        imagenet_root="D:/imagenet",
     )
+
+
+def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image(tmp_path: Path) -> None:
+    out_dir = tmp_path / "cfg"
+    _generate_matrix(out_dir)
+
+    def _load(name: str) -> dict:
+        return yaml.safe_load((out_dir / name).read_text(encoding="utf-8"))
+
+    dfme = _load("SET-B1_dfme_soft_30m_seed0.yaml")
+    assert int(dfme["attack"]["batch_size"]) == 512
+    assert int(dfme["substitute"]["batch_size"]) == 512
+    assert dfme["substitute"]["optimizer"]["name"] == "sgd"
+    assert float(dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.2)
+    assert float(dfme["attack"]["student_lr"]) == pytest.approx(0.2)
+
+    disguide = _load("SET-B1_disguide_soft_30m_seed0.yaml")
+    assert int(disguide["attack"]["batch_size"]) == 512
+    assert int(disguide["substitute"]["batch_size"]) == 512
+    assert float(disguide["substitute"]["optimizer"]["lr"]) == pytest.approx(0.06)
+    assert float(disguide["attack"]["student_lr"]) == pytest.approx(0.06)
+
+    ds = _load("SET-B1_ds_soft_30m_seed0.yaml")
+    assert int(ds["attack"]["batch_size"]) == 512
+    assert int(ds["substitute"]["batch_size"]) == 512
+    assert float(ds["attack"]["student_lr"]) == pytest.approx(0.6)
+
+    maze = _load("SET-B1_maze_soft_30m_seed0.yaml")
+    assert int(maze["attack"]["batch_size"]) == 512
+    assert int(maze["substitute"]["batch_size"]) == 512
+    assert float(maze["substitute"]["optimizer"]["lr"]) == pytest.approx(0.4)
+
+    knockoff = _load("SET-B1_knockoff_nets_soft_30k_seed0.yaml")
+    assert int(knockoff["substitute"]["batch_size"]) == 512
+    assert knockoff["substitute"]["optimizer"]["name"] == "sgd"
+    assert float(knockoff["substitute"]["optimizer"]["momentum"]) == pytest.approx(0.5)
+    assert float(knockoff["substitute"]["optimizer"]["lr"]) == pytest.approx(0.08)
+    assert float(knockoff["attack"]["paper_train_lr"]) == pytest.approx(0.08)
+
+    dissector = _load("SET-B1_blackbox_dissector_hard_30k_seed0.yaml")
+    assert int(dissector["substitute"]["batch_size"]) == 512
+    assert float(dissector["substitute"]["optimizer"]["lr"]) == pytest.approx(0.08)
+    assert float(dissector["attack"]["lr"]) == pytest.approx(0.08)
+
+    ripper = _load("SET-B1_blackbox_ripper_soft_30m_seed0.yaml")
+    assert int(ripper["attack"]["train_batch_size"]) == 512
+    assert int(ripper["substitute"]["batch_size"]) == 512
+    assert float(ripper["attack"]["substitute_lr"]) == pytest.approx(0.08)
+
+    swift = _load("SET-B1_swiftthief_soft_30k_seed0.yaml")
+    assert int(swift["attack"]["batch_size"]) == 512
+    assert int(swift["substitute"]["batch_size"]) == 512
+    assert swift["substitute"]["optimizer"]["name"] == "sgd"
+    assert float(swift["substitute"]["optimizer"]["lr"]) == pytest.approx(0.0512)
+    assert float(swift["attack"]["lr"]) == pytest.approx(0.0512)
+    assert float(swift["attack"]["kd_lr"]) == pytest.approx(0.0512)
+
+    # Not explicitly aligned: keep previous defaults.
+    activethief = _load("SET-B1_activethief_soft_30k_seed0.yaml")
+    assert int(activethief["attack"]["batch_size"]) == 150
+    assert int(activethief["substitute"]["batch_size"]) == 128
+    assert float(activethief["substitute"]["optimizer"]["lr"]) == pytest.approx(0.01)
+
+    # Guard condition: non-resnet18 setup should not be aligned.
+    set_a_dfme = _load("SET-A1_dfme_soft_30m_seed0.yaml")
+    assert "batch_size" not in set_a_dfme["attack"]
+    assert int(set_a_dfme["substitute"]["batch_size"]) == 128
+    assert float(set_a_dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.01)
 
 
 def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
