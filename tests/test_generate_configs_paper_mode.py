@@ -101,14 +101,14 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     # Not explicitly aligned: keep previous defaults.
     activethief = _load("SET-B1_activethief_soft_30k_seed0.yaml")
     assert int(activethief["attack"]["batch_size"]) == 150
-    assert int(activethief["substitute"]["batch_size"]) == 128
-    assert float(activethief["substitute"]["optimizer"]["lr"]) == pytest.approx(0.01)
+    assert int(activethief["substitute"]["batch_size"]) == 512
+    assert float(activethief["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
 
     # Guard condition: non-resnet18 setup should not be aligned.
     set_a_dfme = _load("SET-A1_dfme_soft_30m_seed0.yaml")
     assert "batch_size" not in set_a_dfme["attack"]
-    assert int(set_a_dfme["substitute"]["batch_size"]) == 128
-    assert float(set_a_dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.01)
+    assert int(set_a_dfme["substitute"]["batch_size"]) == 512
+    assert float(set_a_dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
 
 
 def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:

@@ -402,7 +402,8 @@ def generate_configs(
         out_dir.mkdir(parents=True, exist_ok=True)
 
     protocol_version = "1.3"
-    substitute_batch_size = 128
+    # Heuristic default substitute profile for non-aligned paths.
+    substitute_batch_size = 512
 
     # Unified pool-based budget protocol
     pool_initial_seed_ratio = 0.1
@@ -412,7 +413,7 @@ def generate_configs(
     # Unified simple substitute supervised training defaults.
     # NOTE: these are heuristic benchmark defaults and are used for attacks that
     # are not covered by _LRPS_ALIGNMENT_RULES under the resnet18-image scope.
-    unified_substitute_lr = 0.01
+    unified_substitute_lr = 0.04
     unified_substitute_max_epochs = 200
     unified_substitute_patience = 20
 
