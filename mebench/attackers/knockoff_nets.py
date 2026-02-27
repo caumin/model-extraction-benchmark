@@ -32,13 +32,15 @@ class KnockoffNets(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
 
-        # Official knockoffnets transfer.py defaults to batch_size=8.
+        # Fixed-required (official semantics): transfer/query batch is 8.
+        # Keep this distinct from substitute training batch in sub_config.
         self.batch_size = int(config.get("batch_size", 8))
         self.policy = str(config.get("policy", "adaptive")).strip().lower()
         if self.policy not in {"random", "adaptive"}:
             raise ValueError(f"KnockoffNets policy must be 'random' or 'adaptive', got {self.policy!r}")
         # Update substitute periodically or every batch if policy requires fresh logits
         self.train_every = max(1, int(config.get("train_every", self.batch_size)))
+        # Tunable (benchmark): online/offline retraining cadence.
         self.train_epochs = int(config.get("train_epochs", 1))
         self.online_train_epochs = int(config.get("online_train_epochs", self.train_epochs))
         offline_train_epochs = config.get("offline_train_epochs")
@@ -53,6 +55,7 @@ class KnockoffNets(AttackRunner):
         self.samples_per_class = int(config.get("samples_per_class", 50))
         self.kmeans_iters = int(config.get("kmeans_iters", 100))
         self.kmeans_tol = float(config.get("kmeans_tol", 1e-4))
+        self.feature_batch_size = max(1, int(config.get("feature_batch_size", 128)))
         feature_arch = str(config.get("feature_arch", "resnet50")).lower()
         if feature_arch in {"resnet18", "resnet34"}:
             feature_arch = "resnet50"
@@ -395,6 +398,7 @@ class KnockoffNets(AttackRunner):
         state.attack_state["class_to_coarse"] = {}
         state.attack_state["coarse_to_classes"] = {}
         state.attack_state["random_refill_count"] = 0
+        state.attack_state["online_workers_forced_logged"] = False
 
     def _get_dataset_config(self, state: BenchmarkState) -> dict:
         dataset_config = state.metadata.get("dataset_config", {})
@@ -493,8 +497,8 @@ class KnockoffNets(AttackRunner):
             sampled = indices[:n]
 
             features = []
-            for start in range(0, len(sampled), self.batch_size):
-                batch_idx = sampled[start : start + self.batch_size]
+            for start in range(0, len(sampled), self.feature_batch_size):
+                batch_idx = sampled[start : start + self.feature_batch_size]
                 imgs = [self.pool_dataset[idx][0] for idx in batch_idx]
                 x = torch.stack(imgs).to(device)
                 with torch.no_grad():
@@ -618,12 +622,14 @@ class KnockoffNets(AttackRunner):
         # loaders here can accumulate worker processes/file descriptors on Linux
         # and trigger "Too many open files" under long runs.
         if (not reset_model) and (int(train_workers) > 0 or int(val_workers) > 0):
-            self.logger.warning(
-                "KnockoffNets online retraining forcing num_workers=0 to avoid FD exhaustion "
-                "(requested train=%d, val=%d)",
-                int(train_workers),
-                int(val_workers),
-            )
+            if not bool(state.attack_state.get("online_workers_forced_logged", False)):
+                self.logger.debug(
+                    "KnockoffNets online retraining forcing num_workers=0 to avoid FD exhaustion "
+                    "(requested train=%d, val=%d)",
+                    int(train_workers),
+                    int(val_workers),
+                )
+                state.attack_state["online_workers_forced_logged"] = True
             train_workers = 0
             val_workers = 0
 
@@ -697,7 +703,9 @@ class KnockoffNets(AttackRunner):
         optimizer_config.setdefault("lr", self.paper_train_lr)
         optimizer_config.setdefault("momentum", self.paper_train_momentum)
         train_config["optimizer"] = optimizer_config
-        train_config["max_epochs"] = int(sub_config.get("max_epochs", epochs))
+        # Respect the caller's epoch budget. This keeps online retraining fast
+        # (typically 1 epoch) while allowing a longer final offline retrain.
+        train_config["max_epochs"] = max(1, int(epochs))
         train_config["patience"] = int(sub_config.get("patience", 20))
         trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
         steps_per_epoch = max(1, int(math.ceil(train_size / max(1, train_batch_size))))

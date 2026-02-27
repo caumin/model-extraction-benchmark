@@ -2,6 +2,9 @@
 
 This report tracks official-to-internal parity status for attack ports.
 
+Companion policy document:
+- `mebench/attackers/HYPERPARAM_POLICY.md` (fixed-required vs tunable knobs)
+
 ## Global parity checklist
 
 - [x] All attacks query victim through `BenchmarkContext.query` (single budget gateway)

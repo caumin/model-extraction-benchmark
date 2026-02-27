@@ -125,6 +125,7 @@ _ALIGNED_TRAIN_BATCH = 512
 # - batch_paths: config paths forced to the aligned training batch
 # - lr_paths: config paths receiving aligned LR
 # - substitute_optimizer: optimizer family/params matched to reference
+# - fixed_paths: config paths pinned to explicit reference values
 _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
     "dfme": {
         "ref_lr": 0.1,
@@ -155,11 +156,14 @@ _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
         "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
     },
     "knockoff_nets": {
+        # KnockoffNets keeps query/update batch fixed to official transfer default (8)
+        # while substitute training uses aligned settings under this benchmark policy.
         "ref_lr": 0.01,
         "ref_batch": 64,
         "batch_paths": [("substitute", "batch_size")],
         "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "paper_train_lr")],
         "substitute_optimizer": {"name": "sgd", "momentum": 0.5, "weight_decay": 5e-4},
+        "fixed_paths": [("attack", "batch_size", 8), ("attack", "train_every", 8)],
     },
     "blackbox_dissector": {
         "ref_lr": 0.02,
@@ -225,6 +229,12 @@ def _apply_lr_per_sample_alignment(cfg: Dict[str, Any], setup: Setup, attack_nam
 
     for path in rule.get("lr_paths", []):
         _set_nested_value(cfg, tuple(path), float(aligned_lr))
+
+    for fixed_path in rule.get("fixed_paths", []):
+        if len(fixed_path) < 2:
+            continue
+        *path_keys, raw_value = fixed_path
+        _set_nested_value(cfg, tuple(path_keys), raw_value)
 
 
 def generate_configs(

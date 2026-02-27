@@ -44,6 +44,7 @@ class DualStudents(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState) -> None:
         super().__init__(config, state)
 
+        # Fixed-required defaults for DS parity profile (official script family).
         self.batch_size = int(config.get("batch_size", 256))
         self.noise_dim = int(config.get("noise_dim", config.get("nz", 256)))
         self.g_iter = int(config.get("g_iter", 1))

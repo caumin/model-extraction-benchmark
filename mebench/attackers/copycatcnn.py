@@ -88,6 +88,9 @@ class CopycatCNN(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState) -> None:
         super().__init__(config, state)
 
+        # CopycatCNN local policy:
+        # - Fixed-required: NPDD constraint (non-problem-domain querying)
+        # - Tunable: batch/epochs/optimizer-level training knobs
         self.batch_size = int(config.get("batch_size", 128))
         self.train_every = int(config.get("train_every", 1000))
         self.train_checkpoints = config.get("train_checkpoints", [1000, 10000, 100000, 1000000])

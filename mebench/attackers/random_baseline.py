@@ -27,6 +27,8 @@ class RandomBaseline(AttackRunner):
 
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
+        # Baseline policy: no paper-anchored fixed hyperparameter profile.
+        # All scheduling/training knobs are benchmark-tunable by design.
         self.dataloader = None
         self.iterator = None
         self._initial_batch_size = None

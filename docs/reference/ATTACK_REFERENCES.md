@@ -36,6 +36,7 @@ Legend:
 - Source-of-truth for internal mapping status is maintained in:
   - `mebench/attackers/ATTACK_PARITY_REPORT.md`
   - `mebench/attackers/PORTING_PLAN.md`
+  - `mebench/attackers/HYPERPARAM_POLICY.md`
 - Matrix-generation policy (`generate_configs.py`) for SET-B currently uses two paths:
   - **Reference-aligned path** (optimizer + lr-per-sample + batch=512) for attacks with sufficiently comparable paper/official settings in the image-classification + resnet18 setup.
   - **Heuristic-default path** for attacks where source settings are missing, inconsistent, or not directly comparable for this exact setup.

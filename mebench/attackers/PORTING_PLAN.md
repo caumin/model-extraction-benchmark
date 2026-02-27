@@ -2,6 +2,9 @@
 
 This document is the implementation mapping for fairness-preserving attack porting.
 
+Companion policy document:
+- `mebench/attackers/HYPERPARAM_POLICY.md` (fixed-required vs tunable knobs and current compliance)
+
 - Official sources (read-only): `official_repo_clones/`
 - Internal framework: `mebench/attackers/`
 - Goal: keep preprocessing, query/output interface, budget semantics, hyperparameters, and seed behavior aligned with official references.

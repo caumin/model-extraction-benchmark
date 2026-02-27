@@ -34,6 +34,8 @@ class InverseNet(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
 
+        # Fixed-required semantics: three-phase protocol and two retraining points.
+        # Tunable: inversion/retraining lrs and per-phase budget ratios.
         self.batch_size = int(config.get("batch_size", 128))
         self.num_classes = int(
             state.metadata.get("num_classes")

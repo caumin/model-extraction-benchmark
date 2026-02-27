@@ -72,6 +72,8 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     assert float(maze["substitute"]["optimizer"]["lr"]) == pytest.approx(0.4)
 
     knockoff = _load("SET-B1_knockoff_nets_soft_30k_seed0.yaml")
+    assert int(knockoff["attack"]["batch_size"]) == 8
+    assert int(knockoff["attack"]["train_every"]) == 8
     assert int(knockoff["substitute"]["batch_size"]) == 512
     assert knockoff["substitute"]["optimizer"]["name"] == "sgd"
     assert float(knockoff["substitute"]["optimizer"]["momentum"]) == pytest.approx(0.5)

@@ -100,6 +100,7 @@ class MAZE(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
 
+        # Fixed-required defaults from official MAZE profile (query loop family).
         self.batch_size = int(config.get("batch_size", 128))
         self.grad_approx_m = int(config.get("grad_approx_m", 10))
         self.epsilon = float(config.get("grad_approx_epsilon", 1e-3))

@@ -142,6 +142,8 @@ class DisGUIDE(AttackRunner):
     def __init__(self, config: dict, state: BenchmarkState) -> None:
         super().__init__(config, state)
 
+        # Fixed-required family for default parity runs: batch=256, g_iter/d_iter
+        # schedule and lr_S/lr_G anchors from official DisGUIDE setup.
         self.batch_size = int(config.get("batch_size", 256))
         self.g_iter = int(config.get("g_iter", config.get("n_g_steps", 1)))
         self.d_iter = int(config.get("d_iter", config.get("n_s_steps", 1)))

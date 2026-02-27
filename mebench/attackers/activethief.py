@@ -50,6 +50,10 @@ class ActiveThief(AttackRunner):
             or self.state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
         
+        # Fixed-required semantics: strategy family + pool-based querying.
+        # Training knobs (rounds/step size) remain tunable in benchmark runs.
+        # Note: paper reports modality-dependent batch sizes (image/text).
+        # This image benchmark path uses the image profile from generated configs.
         # Active learning strategy
         self.strategy = config.get("strategy", "uncertainty")
         initial_seed_size = config.get("initial_seed_size")

@@ -23,12 +23,15 @@ class DFME(AttackRunner):
 
     def __init__(self, config: dict, state: BenchmarkState):
         super().__init__(config, state)
+        # Fixed-required (paper/official default family): batch=256, n_g=1, n_s=5,
+        # grad epsilon=1e-3, m=1. These can be ablated, but default runs keep them.
         self.batch_size = int(config.get("batch_size", 256))
         self.n_g = int(config.get("n_g_steps", 1))
         self.n_s = int(config.get("n_s_steps", 5))
         self.epsilon = float(config.get("grad_approx_epsilon", 1e-3))
         self.m = int(config.get("grad_approx_m", 1))
         self.noise_dim = int(config.get("noise_dim", 256))
+        # Tunable only in explicit ablations; default aligns to official lr_G.
         self.generator_lr = float(config.get("generator_lr", config.get("lr_G", 1e-4)))
         eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
