@@ -93,8 +93,20 @@ def _clean_yaml_dir(out_dir: Path) -> None:
         p.unlink()
 
 
-# Apply per-sample LR alignment only for explicitly specified attacks when
-# (1) task is image classification and (2) substitute architecture is resnet18.
+# SET-B reference alignment policy (matrix generation)
+#
+# Goal:
+# - For attacks with sufficiently comparable official/paper settings, preserve
+#   optimizer family and lr-per-sample under a larger training batch.
+#
+# Scope gate:
+# - Apply only when (1) task is image classification and (2) substitute arch is
+#   resnet18. This avoids forcing the policy onto non-comparable setups.
+#
+# Non-listed attacks:
+# - If an attack is not listed in _LRPS_ALIGNMENT_RULES, config generation keeps
+#   the benchmark defaults (heuristic choices) because source information is
+#   missing, inconsistent, or not directly comparable to this exact setup.
 _IMAGE_CLASSIFICATION_DATASETS = {
     "CIFAR10",
     "CIFAR100",
@@ -112,6 +124,7 @@ _ALIGNED_TRAIN_BATCH = 512
 # - ref_lr/ref_batch: paper/official baseline used to preserve lr-per-sample
 # - batch_paths: config paths forced to the aligned training batch
 # - lr_paths: config paths receiving aligned LR
+# - substitute_optimizer: optimizer family/params matched to reference
 _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
     "dfme": {
         "ref_lr": 0.1,
@@ -386,7 +399,9 @@ def generate_configs(
     pool_validation_budget_ratio = 0.2
     pool_iterations = 10
 
-    # Unified simple substitute supervised training defaults
+    # Unified simple substitute supervised training defaults.
+    # NOTE: these are heuristic benchmark defaults and are used for attacks that
+    # are not covered by _LRPS_ALIGNMENT_RULES under the resnet18-image scope.
     unified_substitute_lr = 0.01
     unified_substitute_max_epochs = 200
     unified_substitute_patience = 20
@@ -616,8 +631,8 @@ def generate_configs(
                         cfg["attack"]["generator_name"] = gen_name
                         cfg["attack"]["generator_checkpoint"] = gen_ckpt
 
-                    # Align selected attacks to paper/official lr-per-sample while
-                    # using a larger training batch when the setup is image+resnet18.
+                    # Apply reference alignment only for covered attacks; all
+                    # others remain on benchmark-default (heuristic) settings.
                     _apply_lr_per_sample_alignment(cfg, setup, attack.name)
 
                     out_path = out_dir / f"{run_name}.yaml"

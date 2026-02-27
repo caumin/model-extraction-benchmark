@@ -40,6 +40,16 @@ Notes:
 - `SET-B1` victim checkpoint follows DFAD: `https://github.com/VainF/Data-Free-Adversarial-Distillation`.
 - Matrix configs are generated from `generate_configs.py` into `configs/matrix/`.
 
+### SET-B1 Training-Config Policy (Current)
+
+- For **image classification + `substitute.arch=resnet18`** cases with sufficiently comparable references, `generate_configs.py` aligns:
+  - optimizer family/params (paper or official-code based),
+  - `lr per sample` (via reference `lr/batch` scaling),
+  - training batch size to **512**.
+- Currently aligned attacks: `dfme`, `disguide`, `ds`, `maze`, `knockoff_nets`, `blackbox_dissector`, `blackbox_ripper`, `swiftthief`.
+- Attacks without reliable one-to-one reference conditions (missing or inconsistent optimizer/LR evidence for this exact setup) keep benchmark heuristic defaults for now (example: `activethief`, `marich`, `cloudleak`, `inversenet`, `random`, `dfms`).
+- For old-vs-new comparison runs, keep legacy folders with a suffix like `__prealign`; `analyze_results.py` will annotate these as `(PRE-ALIGN)` in aggregated reports.
+
 ---
 
 ## 🛡️ Supported Attacks (v1.0)
@@ -100,15 +110,15 @@ pip install -e ".[dev]"
 bash scripts/launch/run_smoke.sh cuda:0
 
 # 2) Generate matrix configs
-# Default ImageNet surrogate root is C:/imagenet
+# Default ImageNet surrogate root is D:/imagenet
 # Change IMAGENET_ROOT to your local path before generation.
-IMAGENET_ROOT=C:/imagenet python generate_configs.py
+IMAGENET_ROOT=D:/imagenet python generate_configs.py
 
 # WSL example
 IMAGENET_ROOT=/mnt/c/imagenet python generate_configs.py
 
 # 3) (optional) run full matrix with the same local path
-IMAGENET_ROOT=C:/imagenet bash scripts/launch/run_matrix.sh
+IMAGENET_ROOT=D:/imagenet bash scripts/launch/run_matrix.sh
 
 # 4) Aggregate completed runs
 python aggregate_matrix.py
@@ -130,10 +140,10 @@ Reproduce the full v1.0 benchmark results (Matrix Protocol).
 
 ```bash
 # 1. Generate all configuration files
-IMAGENET_ROOT=C:/imagenet python generate_configs.py
+IMAGENET_ROOT=D:/imagenet python generate_configs.py
 
 # 2. Run experiments (sequentially or parallelize via shell)
-IMAGENET_ROOT=C:/imagenet bash scripts/launch/run_matrix.sh
+IMAGENET_ROOT=D:/imagenet bash scripts/launch/run_matrix.sh
 
 # 3. Aggregate results into CSV/LaTeX
 python aggregate_matrix.py

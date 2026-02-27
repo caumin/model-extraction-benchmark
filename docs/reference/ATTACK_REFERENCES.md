@@ -14,7 +14,7 @@ Legend:
 | Attack | Proposing paper | Provenance | Official repository | Official source entrypoint (GitHub) | mebench implementation |
 |---|---|---|---|---|---|
 | RandomBaseline | - | Benchmark native | - | - | `mebench/attackers/random_baseline.py` |
-| ActiveThief | https://ojs.aaai.org/index.php/AAAI/article/view/5432 | Paper-only | https://github.com/iisc-seal/activethief | https://github.com/iisc-seal/activethief/blob/master/generic_program.py | `mebench/attackers/activethief.py` |
+| ActiveThief | https://ojs.aaai.org/index.php/AAAI/article/view/5432 | Official repo port | https://github.com/iisc-seal/activethief | https://github.com/iisc-seal/activethief/blob/master/generic_program.py | `mebench/attackers/activethief.py` |
 | BlackboxDissector | https://arxiv.org/abs/2105.00623 | Official repo port | https://github.com/yxwang-10/Blackbox-Dissector | https://github.com/yxwang-10/Blackbox-Dissector/blob/main/attack.py | `mebench/attackers/blackbox_dissector.py` |
 | CloudLeak | https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf | Official repo port | https://github.com/yunyuntsai/DNN-Model-Stealing | https://github.com/yunyuntsai/DNN-Model-Stealing/blob/main/optimize.py | `mebench/attackers/cloudleak.py` |
 | InverseNet | https://www.ijcai.org/proceedings/2021/336 | Paper-only | - | - | `mebench/attackers/inversenet.py` |
@@ -36,6 +36,11 @@ Legend:
 - Source-of-truth for internal mapping status is maintained in:
   - `mebench/attackers/ATTACK_PARITY_REPORT.md`
   - `mebench/attackers/PORTING_PLAN.md`
+- Matrix-generation policy (`generate_configs.py`) for SET-B currently uses two paths:
+  - **Reference-aligned path** (optimizer + lr-per-sample + batch=512) for attacks with sufficiently comparable paper/official settings in the image-classification + resnet18 setup.
+  - **Heuristic-default path** for attacks where source settings are missing, inconsistent, or not directly comparable for this exact setup.
+- Current SET-B reference-aligned attacks: `dfme`, `disguide`, `ds`, `maze`, `knockoff_nets`, `blackbox_dissector`, `blackbox_ripper`, `swiftthief`.
+- Current SET-B heuristic-default attacks (subject to future refinement): `activethief`, `marich`, `cloudleak`, `inversenet`, `random`, `dfms`.
 - "Official repository" can be listed as a provenance reference even when `Provenance` is `Paper-only`; direct code-port status is determined by the `Provenance` column.
 - Public GitHub links are provided so provenance remains verifiable even when local clone directories are excluded from release.
 - MARICH currently keeps its original staged paper protocol; full harmonization with the benchmark's unified pool-based protocol is a planned follow-up.

@@ -26,7 +26,7 @@ This report tracks official-to-internal parity status for attack ports.
 | DisGUIDE | `official_repo_clones/disguide/disguide/train.py` | `mebench/attackers/disguide.py` | CLOSE (official transform assumptions documented) | SAME (`soft_prob` or `hard_top1` with HL loss) | CLOSE (ensemble/replay/diversity defaults) | SAME | Hard-mode guard enforced in attack config validation |
 | CloudLeak | `official_repo_clones/cloudleak/optimize.py` | `mebench/attackers/cloudleak.py` | CLOSE (Caffe preprocessing adapted to contract) | SAME (`soft_prob`) | CLOSE (FeatureFool optimization defaults) | SAME | Channel/order conversions explicitly handled in implementation |
 | BlackboxDissector | `official_repo_clones/blackbox-dissector/attack.py` | `mebench/attackers/blackbox_dissector.py` | CLOSE (official normalize notes documented) | SAME (`hard_top1`) | CLOSE (iterative split + erase-rate behavior aligned) | SAME | Transfer-set file workflow adapted to in-memory query storage |
-| ActiveThief | paper-reference (no direct clone in `official_repo_clones`) | `mebench/attackers/activethief.py` | N/A official clone | SAME (both modes supported by framework policy) | DONE_PAPER | SAME | Paper-faithful implementation tracked in benchmark matrix |
+| ActiveThief | `official_repo_clones/activethief/README.md` | `mebench/attackers/activethief.py` | CLOSE (`generic_program.py`, `cfg.py`, and `utils/model.py` loop parity) | SAME (`soft_prob`, `hard_top1`) | CLOSE (`initial_seed`, `num_iter`, `k`, iteration scheduling) | SAME | Official-round semantics mapped into framework state machine and retraining schedule |
 | CopycatCNN | paper-reference (no direct clone in `official_repo_clones`) | `mebench/attackers/copycatcnn.py` | N/A official clone | SAME (`hard_top1`) | DONE_PAPER | SAME | Offline augmentation parity based on paper/open implementations |
 | InverseNet | paper-reference (no direct clone in `official_repo_clones`) | `mebench/attackers/inversenet.py` | N/A official clone | SAME (`hard_top1`) | DONE_PAPER | SAME | Phase-ratio budget semantics implemented in runner |
 | BlackboxRipper | paper-reference (no direct clone in `official_repo_clones`) | `mebench/attackers/blackbox_ripper.py` | N/A official clone | SAME (`soft_prob`) | DONE_PAPER | SAME | Evolutionary latent loop aligned to paper spec |
@@ -47,6 +47,10 @@ This report tracks official-to-internal parity status for attack ports.
 3. Budget semantics unification:
    - Official repos sometimes express budget in rounds/epochs/millions.
    - mebench enforces one canonical rule at runtime: 1 queried image consumes 1 budget.
+
+4. SET-B generation policy split (reference-aligned vs heuristic):
+   - For image-classification + resnet18 substitute setups, selected attacks are generated with paper/official optimizer family + lr-per-sample alignment and a larger training batch (`512`).
+   - Attacks without reliable one-to-one reference conditions keep heuristic benchmark defaults until stronger evidence is available.
 
 ## Evidence: key parity tests in this repo
 

@@ -6,6 +6,10 @@ This document is the implementation mapping for fairness-preserving attack porti
 - Internal framework: `mebench/attackers/`
 - Goal: keep preprocessing, query/output interface, budget semantics, hyperparameters, and seed behavior aligned with official references.
 
+Current matrix-generation note (`generate_configs.py`, SET-B):
+- For image-classification + resnet18 substitute setups with sufficiently comparable references, configs use paper/official optimizer family and lr-per-sample alignment with train batch `512`.
+- For attacks without reliable one-to-one reference conditions in this exact setup, configs currently keep heuristic benchmark defaults.
+
 ## 1) Inventory
 
 ### 1.1 Official attack implementations found in `official_repo_clones/`
@@ -22,6 +26,7 @@ This document is the implementation mapping for fairness-preserving attack porti
 | CloudLeak / FeatureFool | `official_repo_clones/cloudleak/optimize.py` | `official_repo_clones/cloudleak/optimize.py:12`, `official_repo_clones/cloudleak/optimize.py:13` |
 | Blackbox Dissector | `official_repo_clones/blackbox-dissector/attack.py` | `official_repo_clones/blackbox-dissector/attack.py:48`, `official_repo_clones/blackbox-dissector/attack.py:684` |
 | FFF | `official_repo_clones/fff/train.py` | `official_repo_clones/fff/train.py` |
+| ActiveThief | `official_repo_clones/activethief/generic_program.py`, `official_repo_clones/activethief/cfg.py`, `official_repo_clones/activethief/utils/model.py` | `official_repo_clones/activethief/generic_program.py:61-67`, `official_repo_clones/activethief/cfg.py:78-86`, `official_repo_clones/activethief/sss/uncertainty_sss.py` |
 
 ### 1.2 Internal attacks found in `mebench/attackers/`
 
@@ -43,6 +48,7 @@ This document is the implementation mapping for fairness-preserving attack porti
 | DisGUIDE | `DisGUIDE` | DONE | `official_repo_clones/disguide/disguide/train.py`, `official_repo_clones/disguide/disguide/cli_parser.py` | `mebench/attackers/disguide.py` | Official updates query budget in-loop; mebench tracks via oracle/context image counting | Query budget in millions + no-logits flags (`official_repo_clones/disguide/disguide/cli_parser.py:15`, `official_repo_clones/disguide/disguide/cli_parser.py:99`) | Official supports pre/post transform assumptions in `disguide/dataloader.py`; mebench keeps canonical input + internal scale mode options | In hard mode, use HL loss only; mebench enforces this guard in `DisGUIDE` config checks |
 | CloudLeak | `CloudLeak` | DONE | `official_repo_clones/cloudleak/optimize.py` | `mebench/attackers/cloudleak.py` | Official optimization queries victim with generated candidates; mebench uses context query for each batch | L-BFGS params from official optimization script (`official_repo_clones/cloudleak/optimize.py:12`, `official_repo_clones/cloudleak/optimize.py:13`) | Official code is Caffe-style preprocessing/deprocessing; mebench normalizes to canonical [0,1] before oracle | Channel-order and preprocessing order differences must be explicit in parity report |
 | Blackbox Dissector | `BlackboxDissector` | DONE | `official_repo_clones/blackbox-dissector/attack.py` | `mebench/attackers/blackbox_dissector.py` | Official iterative budget splits + hard-label training; mebench enforces hard-top1 and image-count budget | `initial_budget`, split budgets list in script (`official_repo_clones/blackbox-dissector/attack.py:48`, `official_repo_clones/blackbox-dissector/attack.py:684`) | Official includes dataset-specific normalize chains in `attack.py`; mebench keeps parity notes and profile option | File-path transfer set workflow in official is adapted into in-memory framework datasets |
+| ActiveThief | `ActiveThief` | DONE | `official_repo_clones/activethief/generic_program.py` | `mebench/attackers/activethief.py` | Official uses iterative budget split (`initial_seed`, `num_iter`, `k`) and strategy-driven selection; mebench tracks budget per-image and maps rounds through runner state | `initial_seed`, `num_iter`, `k`, `iterative`, `sampling_method` equivalents and round scheduling | Official `train_copynet_iter` + `get_queries`/`get_next_batch` flow adapted into `_bootstrap_seed_and_validation_sets` + `_select_query_batch` + `train_substitute` | Keep strategy-specific path for uncertainty/k-center/DFAL aligned with contract batch/image conventions |
 | FFF | N/A | NOT_IN_SCOPE | `official_repo_clones/fff/train.py` | N/A | Fast Feature Fool is a universal perturbation method, not the model-extraction attack family used by this benchmark matrix | N/A | N/A | Excluded from benchmark attack matrix scope |
 | MAZE-JBDA variant | N/A | NOT_IN_SCOPE | `official_repo_clones/maze/src/attacks/jbda.py` | N/A | Variant attack baseline, not part of current benchmark matrix identifiers | N/A | Uses MAZE dataset transform path | Can be added later as separate attack id if scope expands |
 | MAZE-noise baseline | N/A | NOT_IN_SCOPE | `official_repo_clones/maze/src/attacks/noise.py` | N/A | Variant attack baseline, not part of current benchmark matrix identifiers | N/A | Uses MAZE dataset transform path | Can be added later as separate attack id if scope expands |
@@ -53,7 +59,6 @@ The following mebench attacks do not have direct code in `official_repo_clones/`
 
 | mebench attack | Status | Notes |
 |---|---|---|
-| `ActiveThief` | DONE_PAPER | Paper-faithful active sampling loop, seed/validation split, checkpoint retraining logic retained in framework |
 | `CopycatCNN` | DONE_PAPER | Paper-faithful offline augmentation + query-train rounds integrated into AttackRunner interface |
 | `InverseNet` | DONE_PAPER | Phase-based extraction loop integrated with strict budget gate |
 | `BlackboxRipper` | DONE_PAPER | Evolutionary latent optimization runner integrated with strict oracle budget and output-mode checks |
