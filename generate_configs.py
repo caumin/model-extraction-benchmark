@@ -312,7 +312,7 @@ def generate_configs(
                 "budget": 300,
                 "gamma1": 0.8,
                 "gamma2": 0.8,
-                "rounds": 20,
+                "iterations": 20,
                 "epochs": 20,
                 "budget_growth": 1.01,
                 "epochs_growth": 1.02,
@@ -580,7 +580,9 @@ def generate_configs(
                     if attack.kind == "pool":
                         cfg["attack"].setdefault("initial_seed_ratio", pool_initial_seed_ratio)
                         cfg["attack"].setdefault("validation_budget_ratio", pool_validation_budget_ratio)
-                        cfg["attack"].setdefault("rounds", pool_iterations)
+                        # Canonical loop-count key for generated configs.
+                        # Backward compatibility for legacy `rounds` is handled in
+                        # attack implementations via fallback parsing.
                         cfg["attack"].setdefault("iterations", pool_iterations)
 
                     # CloudLeak: disable pretrained substitutes by default for fairness.

@@ -59,7 +59,7 @@ class MARICH(AttackRunner):
         super().__init__(config, state)
         self.batch_size = int(config.get("batch_size", 128))
         self.init_points = int(config.get("init_points", 1000))
-        self.rounds = int(config.get("rounds", 20))
+        self.rounds = int(config.get("iterations", config.get("rounds", 20)))
         self.round_budget = float(config.get("budget", 300.0))
         self.budget_growth = float(config.get("budget_growth", 1.01))
         self.epochs = float(config.get("epochs", 20.0))

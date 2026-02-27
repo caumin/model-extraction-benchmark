@@ -99,8 +99,8 @@ class CopycatCNN(AttackRunner):
         self.substitute_weight_decay = float(config.get("substitute_weight_decay", 5e-4))
         self.substitute_epochs = int(config.get("substitute_epochs", 200))
         # Round-based execution: query -> (re)train substitute, repeated.
-        # Default aligns with common "10 round" reporting in prior works.
-        self.rounds = int(config.get("rounds", 10))
+        # Canonical key is `iterations`; keep `rounds` for backward compatibility.
+        self.rounds = int(config.get("iterations", config.get("rounds", 10)))
         # Paper CopycatCNN balances the fake dataset by class by default.
         self.balance_by_class = bool(config.get("balance_by_class", True))
         # Official CopycatCNN code expands each image with ~22 offline augmentation methods.

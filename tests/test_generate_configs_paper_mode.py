@@ -101,8 +101,14 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     # Not explicitly aligned: keep previous defaults.
     activethief = _load("SET-B1_activethief_soft_30k_seed0.yaml")
     assert int(activethief["attack"]["batch_size"]) == 150
+    assert int(activethief["attack"]["iterations"]) == 10
+    assert "rounds" not in activethief["attack"]
     assert int(activethief["substitute"]["batch_size"]) == 512
     assert float(activethief["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
+
+    marich = _load("SET-B1_marich_hard_30k_seed0.yaml")
+    assert int(marich["attack"]["iterations"]) == 20
+    assert "rounds" not in marich["attack"]
 
     # Guard condition: non-resnet18 setup should not be aligned.
     set_a_dfme = _load("SET-A1_dfme_soft_30m_seed0.yaml")
