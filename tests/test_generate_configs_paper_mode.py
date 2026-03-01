@@ -49,11 +49,11 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
         return yaml.safe_load((out_dir / name).read_text(encoding="utf-8"))
 
     dfme = _load("SET-B1_dfme_soft_30m_seed0.yaml")
-    assert int(dfme["attack"]["batch_size"]) == 512
-    assert int(dfme["substitute"]["batch_size"]) == 512
+    assert int(dfme["attack"]["batch_size"]) == 256
+    assert int(dfme["substitute"]["batch_size"]) == 256
     assert dfme["substitute"]["optimizer"]["name"] == "sgd"
-    assert float(dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.2)
-    assert float(dfme["attack"]["student_lr"]) == pytest.approx(0.2)
+    assert float(dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.1)
+    assert float(dfme["attack"]["student_lr"]) == pytest.approx(0.1)
 
     disguide = _load("SET-B1_disguide_soft_30m_seed0.yaml")
     assert int(disguide["attack"]["batch_size"]) == 512
@@ -62,14 +62,14 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     assert float(disguide["attack"]["student_lr"]) == pytest.approx(0.06)
 
     ds = _load("SET-B1_ds_soft_30m_seed0.yaml")
-    assert int(ds["attack"]["batch_size"]) == 512
-    assert int(ds["substitute"]["batch_size"]) == 512
-    assert float(ds["attack"]["student_lr"]) == pytest.approx(0.6)
+    assert int(ds["attack"]["batch_size"]) == 256
+    assert int(ds["substitute"]["batch_size"]) == 256
+    assert float(ds["attack"]["student_lr"]) == pytest.approx(0.3)
 
     maze = _load("SET-B1_maze_soft_30m_seed0.yaml")
-    assert int(maze["attack"]["batch_size"]) == 512
-    assert int(maze["substitute"]["batch_size"]) == 512
-    assert float(maze["substitute"]["optimizer"]["lr"]) == pytest.approx(0.4)
+    assert int(maze["attack"]["batch_size"]) == 128
+    assert int(maze["substitute"]["batch_size"]) == 128
+    assert float(maze["substitute"]["optimizer"]["lr"]) == pytest.approx(0.1)
 
     knockoff = _load("SET-B1_knockoff_nets_soft_30k_seed0.yaml")
     assert int(knockoff["attack"]["batch_size"]) == 8

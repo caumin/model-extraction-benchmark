@@ -97,7 +97,11 @@ def _clean_yaml_dir(out_dir: Path) -> None:
 #
 # Goal:
 # - For attacks with sufficiently comparable official/paper settings, preserve
-#   optimizer family and lr-per-sample under a larger training batch.
+#   optimizer family and align LR/batch in a reproducible way.
+# - Default aligned path uses larger train batch (512) with linear LR scaling.
+# - Exception path keeps paper/official LR-batch pair unchanged.
+# - IMPORTANT: DFME/DS/MAZE use the exception path because linear scaling did
+#   not reproduce stable extraction quality in SET-B runs.
 #
 # Scope gate:
 # - Apply only when (1) task is image classification and (2) substitute arch is
@@ -121,11 +125,12 @@ _IMAGE_CLASSIFICATION_DATASETS = {
 _ALIGNED_TRAIN_BATCH = 512
 
 # attack_name -> rule
-# - ref_lr/ref_batch: paper/official baseline used to preserve lr-per-sample
-# - batch_paths: config paths forced to the aligned training batch
-# - lr_paths: config paths receiving aligned LR
+# - ref_lr/ref_batch: paper/official baseline pair
+# - batch_paths: config paths receiving the chosen target batch
+# - lr_paths: config paths receiving the chosen target LR
 # - substitute_optimizer: optimizer family/params matched to reference
 # - fixed_paths: config paths pinned to explicit reference values
+# - keep_reference_pair: if True, keep ref_lr/ref_batch exactly (no linear scaling)
 _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
     "dfme": {
         "ref_lr": 0.1,
@@ -133,6 +138,7 @@ _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
         "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
         "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "student_lr")],
         "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+        "keep_reference_pair": True,
     },
     "disguide": {
         "ref_lr": 0.03,
@@ -147,6 +153,7 @@ _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
         "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
         "lr_paths": [("attack", "student_lr")],
         "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+        "keep_reference_pair": True,
     },
     "maze": {
         "ref_lr": 0.1,
@@ -154,6 +161,7 @@ _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
         "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
         "lr_paths": [("substitute", "optimizer", "lr")],
         "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+        "keep_reference_pair": True,
     },
     "knockoff_nets": {
         # KnockoffNets keeps query/update batch fixed to official transfer default (8)
@@ -210,14 +218,23 @@ def _is_resnet18_image_setup(setup: Setup, cfg: Dict[str, Any]) -> bool:
     return sub_arch == "resnet18" and dataset_name in _IMAGE_CLASSIFICATION_DATASETS
 
 
-def _apply_lr_per_sample_alignment(cfg: Dict[str, Any], setup: Setup, attack_name: str) -> None:
+def _apply_reference_hparam_alignment(cfg: Dict[str, Any], setup: Setup, attack_name: str) -> None:
     rule = _LRPS_ALIGNMENT_RULES.get(str(attack_name))
     if rule is None:
         return
     if not _is_resnet18_image_setup(setup, cfg):
         return
 
-    aligned_lr = float(rule["ref_lr"]) * (float(_ALIGNED_TRAIN_BATCH) / float(rule["ref_batch"]))
+    reference_lr = float(rule["ref_lr"])
+    reference_batch = int(rule["ref_batch"])
+    keep_reference_pair = bool(rule.get("keep_reference_pair", False))
+
+    if keep_reference_pair:
+        target_lr = reference_lr
+        target_batch = reference_batch
+    else:
+        target_batch = int(_ALIGNED_TRAIN_BATCH)
+        target_lr = reference_lr * (float(target_batch) / float(reference_batch))
 
     sub_opt = rule.get("substitute_optimizer")
     if isinstance(sub_opt, dict):
@@ -225,10 +242,10 @@ def _apply_lr_per_sample_alignment(cfg: Dict[str, Any], setup: Setup, attack_nam
             _set_nested_value(cfg, ("substitute", "optimizer", str(key)), value)
 
     for path in rule.get("batch_paths", []):
-        _set_nested_value(cfg, tuple(path), int(_ALIGNED_TRAIN_BATCH))
+        _set_nested_value(cfg, tuple(path), int(target_batch))
 
     for path in rule.get("lr_paths", []):
-        _set_nested_value(cfg, tuple(path), float(aligned_lr))
+        _set_nested_value(cfg, tuple(path), float(target_lr))
 
     for fixed_path in rule.get("fixed_paths", []):
         if len(fixed_path) < 2:
@@ -646,7 +663,7 @@ def generate_configs(
 
                     # Apply reference alignment only for covered attacks; all
                     # others remain on benchmark-default (heuristic) settings.
-                    _apply_lr_per_sample_alignment(cfg, setup, attack.name)
+                    _apply_reference_hparam_alignment(cfg, setup, attack.name)
 
                     out_path = out_dir / f"{run_name}.yaml"
                     out_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
