@@ -137,24 +137,31 @@ def evaluate_substitute(
     Returns:
         Dictionary with metrics
     """
-    metrics = {}
+    substitute_was_training = bool(substitute.training)
+    victim_was_training = bool(victim.training)
 
-    # Test accuracy (ground truth)
-    metrics["acc_gt"] = compute_accuracy(substitute, test_loader, device)
+    try:
+        metrics = {}
 
-    # Agreement with victim
-    metrics["agreement"] = compute_agreement(substitute, victim, test_loader, device)
+        # Test accuracy (ground truth)
+        metrics["acc_gt"] = compute_accuracy(substitute, test_loader, device)
 
-    # Soft-label metrics (only for soft_prob mode)
-    if output_mode == "soft_prob":
-        metrics["kl_mean"] = compute_kl_divergence(
-            substitute, victim, test_loader, device, temperature
-        )
-        metrics["l1_mean"] = compute_l1_distance(
-            substitute, victim, test_loader, device, temperature
-        )
-    else:
-        metrics["kl_mean"] = None
-        metrics["l1_mean"] = None
+        # Agreement with victim
+        metrics["agreement"] = compute_agreement(substitute, victim, test_loader, device)
 
-    return metrics
+        # Soft-label metrics (only for soft_prob mode)
+        if output_mode == "soft_prob":
+            metrics["kl_mean"] = compute_kl_divergence(
+                substitute, victim, test_loader, device, temperature
+            )
+            metrics["l1_mean"] = compute_l1_distance(
+                substitute, victim, test_loader, device, temperature
+            )
+        else:
+            metrics["kl_mean"] = None
+            metrics["l1_mean"] = None
+
+        return metrics
+    finally:
+        substitute.train(substitute_was_training)
+        victim.train(victim_was_training)
