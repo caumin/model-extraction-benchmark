@@ -40,15 +40,18 @@ Notes:
 - `SET-B1` victim checkpoint follows DFAD: `https://github.com/VainF/Data-Free-Adversarial-Distillation`.
 - Matrix configs are generated from `generate_configs.py` into `configs/matrix/`.
 
-### SET-B1 Training-Config Policy (Current)
+### Matrix Hyperparameter Policy (Current)
 
-- For **image classification + `substitute.arch=resnet18`** cases with sufficiently comparable references, `generate_configs.py` aligns:
-  - optimizer family/params (paper or official-code based),
-  - `lr per sample` (via reference `lr/batch` scaling),
-  - training batch size to **512**.
-- Currently aligned attacks: `dfme`, `disguide`, `ds`, `maze`, `knockoff_nets`, `blackbox_dissector`, `blackbox_ripper`, `swiftthief`.
-- Attacks without reliable one-to-one reference conditions (missing or inconsistent optimizer/LR evidence for this exact setup) keep benchmark heuristic defaults for now (example: `activethief`, `marich`, `cloudleak`, `inversenet`, `random`, `dfms`).
-- For old-vs-new comparison runs, keep legacy folders with a suffix like `__prealign`; `analyze_results.py` will annotate these as `(PRE-ALIGN)` in aggregated reports.
+- **SET-B1 (`substitute.arch=resnet18`)**:
+  - For attacks with sufficiently comparable official/paper references, `generate_configs.py` aligns optimizer family and reference LR/batch.
+  - Default aligned path uses **batch 512 + linear LR scaling** (throughput-oriented policy for SGD-family training).
+  - Exception path (`keep_reference_pair=True`) keeps official/paper LR-batch pairs unchanged for stability-critical attacks.
+  - Current keep-reference attacks: `dfme`, `ds`, `maze`, `swiftthief`.
+- **SET-A1 (`substitute.arch=lenet_mnist`)**:
+  - There is no one-to-one LeNet official profile consistently comparable to this benchmark setup.
+  - Matrix generation therefore uses unified heuristic substitute defaults and keeps only attack-semantic knobs.
+- Attacks without reliable one-to-one reference conditions in the target setup keep benchmark heuristic defaults (e.g., `activethief`, `marich`, `cloudleak`, `inversenet`, `random`, `dfms`).
+- For old-vs-new comparison runs, keep legacy folders with a suffix like `__prealign`; `analyze_results.py` annotates these as `(PRE-ALIGN)` in aggregated reports.
 
 ---
 

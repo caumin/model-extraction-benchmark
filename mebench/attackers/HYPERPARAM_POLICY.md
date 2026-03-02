@@ -30,16 +30,18 @@ Scope:
 | `marich` | Local official sources are inconsistent for optimizer/LR values | Selection strategy controls, round budget growth, training knobs | **Heuristic/Partial** until single reference profile is locked (`official_repo_clones/MARICH/lr_cnn_res_al/utils.py:45-49`, `official_repo_clones/MARICH/lr_cnn_res_al/nets.py:57-70`, `mebench/attackers/marich.py:60-69`) |
 | `maze` | Official defaults: `batch=128`, `lr_clone=0.1`, `iter_gen=1`, `iter_clone=5`, ZO params (`eps`, `ndirs`) | Eval cadence, strict budget scheduling, architecture swap experiments | **Aligned (SET-B policy)** for primary optimizer/lr-per-sample path (`official_repo_clones/maze/src/utils/config.py:16`, `official_repo_clones/maze/src/utils/config.py:53`, `official_repo_clones/maze/src/utils/config.py:92-96`, `mebench/attackers/maze.py:103-109`) |
 | `random_baseline` | No paper-anchored fixed hyperparameter profile; role is benchmark control baseline | Query step size, training cadence, substitute train settings | **Heuristic baseline** by design (`mebench/attackers/random_baseline.py:25-35`, `mebench/attackers/random_baseline.py:74`) |
-| `swiftthief` | Official script pins key training knobs (`sl_lr=1e-2`, `sl_epoch=500`, interval schedule) | CL/KD epochs, queue sizes, scoring worker settings | **Aligned/Partial**: key defaults mirrored, benchmark adds scaling knobs (`official_repo_clones/swiftthief/scripts/swiftthief/cifar10.sh:28-31`, `mebench/attackers/swiftthief.py:418-424`) |
+| `swiftthief` | Official script pins key training knobs (`sl_lr=1e-2`, `sl_epoch=500`, interval schedule) | CL/KD epochs, queue sizes, scoring worker settings | **Aligned (SET-B keep-reference)**: `sl_lr` pair is preserved with large-batch path; SET-A keeps heuristic substitute defaults (`official_repo_clones/swiftthief/scripts/swiftthief/cifar10.sh:28-31`, `generate_configs.py`) |
 
 ## Config Generator Enforcement (SET-B)
 
 For image-classification + `substitute.arch=resnet18`, `generate_configs.py` applies explicit policy for selected attacks:
 
 - optimizer family alignment,
-- lr-per-sample alignment,
-- larger train batch path (`512`) where policy applies,
+- default lr-per-sample alignment with larger train batch (`512`),
+- keep-reference exceptions for stability-critical attacks (`dfme`, `ds`, `maze`, `swiftthief`),
 - and attack-specific fixed paths where required (e.g., `knockoff_nets` query/update batch = `8`).
+
+For `SET-A1` (`substitute.arch=lenet_mnist`), matrix generation uses heuristic substitute defaults unless attack semantics require explicit overrides.
 
 Reference: `generate_configs.py:129-193`, `generate_configs.py:213-238`.
 

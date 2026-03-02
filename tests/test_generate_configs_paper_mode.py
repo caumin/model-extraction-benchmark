@@ -94,9 +94,9 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     assert int(swift["attack"]["batch_size"]) == 512
     assert int(swift["substitute"]["batch_size"]) == 512
     assert swift["substitute"]["optimizer"]["name"] == "sgd"
-    assert float(swift["substitute"]["optimizer"]["lr"]) == pytest.approx(0.0512)
-    assert float(swift["attack"]["lr"]) == pytest.approx(0.0512)
-    assert float(swift["attack"]["kd_lr"]) == pytest.approx(0.0512)
+    assert float(swift["substitute"]["optimizer"]["lr"]) == pytest.approx(0.01)
+    assert float(swift["attack"]["lr"]) == pytest.approx(0.01)
+    assert float(swift["attack"]["kd_lr"]) == pytest.approx(0.01)
 
     # Not explicitly aligned: keep previous defaults.
     activethief = _load("SET-B1_activethief_soft_30k_seed0.yaml")
@@ -115,6 +115,13 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     assert "batch_size" not in set_a_dfme["attack"]
     assert int(set_a_dfme["substitute"]["batch_size"]) == 512
     assert float(set_a_dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
+
+    set_a_swift = _load("SET-A1_swiftthief_soft_30k_seed0.yaml")
+    assert "batch_size" not in set_a_swift["attack"]
+    assert "lr" not in set_a_swift["attack"]
+    assert "kd_lr" not in set_a_swift["attack"]
+    assert int(set_a_swift["substitute"]["batch_size"]) == 512
+    assert float(set_a_swift["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
 
 
 def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:

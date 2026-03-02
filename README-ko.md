@@ -39,6 +39,18 @@
 - `SET-B1` victim 체크포인트는 DFAD 레포 기준입니다: `https://github.com/VainF/Data-Free-Adversarial-Distillation`.
 - 매트릭스 설정은 `generate_configs.py`가 `configs/matrix/`에 생성합니다.
 
+### 매트릭스 하이퍼파라미터 정책 (현재)
+
+- **SET-B1 (`substitute.arch=resnet18`)**:
+  - 공식/논문 근거가 충분히 비교 가능한 공격은 `generate_configs.py`에서 optimizer 계열과 기준 LR/batch를 정렬합니다.
+  - 기본 정렬 경로는 **batch 512 + LR 선형 스케일**(SGD 계열 학습의 처리량 최적화 목적)입니다.
+  - 예외 경로(`keep_reference_pair=True`)는 안정성 확보를 위해 공식/논문 LR-batch 쌍을 그대로 유지합니다.
+  - 현재 keep-reference 공격: `dfme`, `ds`, `maze`, `swiftthief`.
+- **SET-A1 (`substitute.arch=lenet_mnist`)**:
+  - 이 벤치마크 설정과 일대일로 대응되는 LeNet 공식 프로파일이 일관되게 확보되지 않아,
+  - 매트릭스 생성은 통합 heuristic substitute 기본값을 사용하고 공격 의미론적 파라미터만 유지합니다.
+- 대상 설정에서 신뢰 가능한 일대일 근거가 부족한 공격은 heuristic 기본값을 유지합니다 (`activethief`, `marich`, `cloudleak`, `inversenet`, `random`, `dfms`).
+
 ---
 
 ## 🛡️ 지원되는 공격 (v1.0)

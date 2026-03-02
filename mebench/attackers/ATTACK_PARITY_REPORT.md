@@ -52,7 +52,9 @@ Companion policy document:
    - mebench enforces one canonical rule at runtime: 1 queried image consumes 1 budget.
 
 4. SET-B generation policy split (reference-aligned vs heuristic):
-   - For image-classification + resnet18 substitute setups, selected attacks are generated with paper/official optimizer family + lr-per-sample alignment and a larger training batch (`512`).
+   - For image-classification + resnet18 substitute setups, selected attacks are generated with paper/official optimizer-family alignment.
+   - Default aligned path uses batch `512` with LR linear scaling; keep-reference exceptions preserve official LR/batch pairs (`dfme`, `ds`, `maze`, `swiftthief`).
+   - SET-A1 (`lenet_mnist`) follows heuristic substitute defaults unless attack semantics require explicit overrides.
    - Attacks without reliable one-to-one reference conditions keep heuristic benchmark defaults until stronger evidence is available.
 
 ## Evidence: key parity tests in this repo

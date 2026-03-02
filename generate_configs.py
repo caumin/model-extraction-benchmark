@@ -93,24 +93,24 @@ def _clean_yaml_dir(out_dir: Path) -> None:
         p.unlink()
 
 
-# SET-B reference alignment policy (matrix generation)
+# Matrix optimizer/LR policy
 #
-# Goal:
-# - For attacks with sufficiently comparable official/paper settings, preserve
-#   optimizer family and align LR/batch in a reproducible way.
+# Policy contract:
+# - SET-B1 (ResNet-18 substitute): if official/paper settings are sufficiently
+#   comparable, preserve optimizer family and use reference-aware LR/batch policy.
+# - SET-A1 (LeNet substitute): no attack has a sufficiently comparable official
+#   LeNet profile for direct transfer in this benchmark setup, so use unified
+#   heuristic defaults (unless an attack explicitly requires an override).
+#
+# SET-B1 alignment behavior:
 # - Default aligned path uses larger train batch (512) with linear LR scaling.
 # - Exception path keeps paper/official LR-batch pair unchanged.
-# - IMPORTANT: DFME/DS/MAZE use the exception path because linear scaling did
-#   not reproduce stable extraction quality in SET-B runs.
-#
-# Scope gate:
-# - Apply only when (1) task is image classification and (2) substitute arch is
-#   resnet18. This avoids forcing the policy onto non-comparable setups.
+# - keep_reference_pair=True is used for attacks where exact paper/official
+#   values are required for stable extraction quality.
 #
 # Non-listed attacks:
 # - If an attack is not listed in _LRPS_ALIGNMENT_RULES, config generation keeps
-#   the benchmark defaults (heuristic choices) because source information is
-#   missing, inconsistent, or not directly comparable to this exact setup.
+#   benchmark-default heuristic settings.
 _IMAGE_CLASSIFICATION_DATASETS = {
     "CIFAR10",
     "CIFAR100",
@@ -188,8 +188,10 @@ _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
         "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
     },
     "swiftthief": {
+        # Official SwiftThief scripts use SupCon batch=512 and sl_lr=1e-2.
+        # Keep this pair as-is for SET-B1 comparability.
         "ref_lr": 0.01,
-        "ref_batch": 100,
+        "ref_batch": 512,
         "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
         "lr_paths": [
             ("substitute", "optimizer", "lr"),
@@ -197,6 +199,7 @@ _LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
             ("attack", "kd_lr"),
         ],
         "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
+        "keep_reference_pair": True,
     },
 }
 
@@ -212,7 +215,9 @@ def _set_nested_value(cfg: Dict[str, Any], path: Tuple[str, ...], value: Any) ->
     cursor[path[-1]] = value
 
 
-def _is_resnet18_image_setup(setup: Setup, cfg: Dict[str, Any]) -> bool:
+def _is_set_b_resnet18_image_setup(setup: Setup, cfg: Dict[str, Any]) -> bool:
+    if str(setup.set_id).strip().upper() != "SET-B1":
+        return False
     sub_arch = str(cfg.get("substitute", {}).get("arch", "")).strip().lower()
     dataset_name = str(setup.victim_dataset).strip().upper()
     return sub_arch == "resnet18" and dataset_name in _IMAGE_CLASSIFICATION_DATASETS
@@ -222,7 +227,7 @@ def _apply_reference_hparam_alignment(cfg: Dict[str, Any], setup: Setup, attack_
     rule = _LRPS_ALIGNMENT_RULES.get(str(attack_name))
     if rule is None:
         return
-    if not _is_resnet18_image_setup(setup, cfg):
+    if not _is_set_b_resnet18_image_setup(setup, cfg):
         return
 
     reference_lr = float(rule["ref_lr"])
@@ -370,21 +375,9 @@ def generate_configs(
             kind="pool",
             label_capability="both",
             extra={
-                "lr": 0.06,
-                "kd_lr": 0.06,
                 "cl_epochs": 40,
                 "kd_epochs": 40,
                 "patience": 50,
-                "batch_size": 256,
-                "substitute": {
-                    "batch_size": 256,
-                    "optimizer": {
-                        "name": "sgd",
-                        "lr": 0.06,
-                        "momentum": 0.9,
-                        "weight_decay": 5e-4,
-                    },
-                },
             },
         ),
 
