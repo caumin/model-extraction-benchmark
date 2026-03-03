@@ -37,12 +37,10 @@ Legend:
   - `mebench/attackers/ATTACK_PARITY_REPORT.md`
   - `mebench/attackers/PORTING_PLAN.md`
   - `mebench/attackers/HYPERPARAM_POLICY.md`
-- Matrix-generation policy (`generate_configs.py`) uses setup-aware paths:
-  - **SET-B1 (`substitute.arch=resnet18`)** reference-aligned path for attacks with sufficiently comparable paper/official settings.
-    - Default aligned path: optimizer-family alignment + batch `512` + LR linear scaling.
-    - `keep_reference_pair` path: preserve official/paper LR-batch pairs unchanged (`dfme`, `ds`, `maze`, `swiftthief`).
-  - **SET-A1 (`substitute.arch=lenet_mnist`)** heuristic-default path, since no stable one-to-one LeNet official profile is consistently comparable for this matrix setup.
-- Current heuristic-default attacks (subject to future refinement): `activethief`, `marich`, `cloudleak`, `inversenet`, `random`, `dfms`.
+- Matrix-generation policy (`generate_configs.py`) uses setup-level unified substitute defaults:
+  - **SET-B1 (`substitute.arch=resnet18`)**: `batch=256`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+  - **SET-A1 (`substitute.arch=lenet_mnist`)**: `batch=512`, `optimizer=sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+- Matrix generation does not apply per-attack LR/batch alignment overrides; attack-specific fields are retained only for attack-semantic behavior.
 - "Official repository" can be listed as a provenance reference even when `Provenance` is `Paper-only`; direct code-port status is determined by the `Provenance` column.
 - Public GitHub links are provided so provenance remains verifiable even when local clone directories are excluded from release.
 - MARICH currently keeps its original staged paper protocol; full harmonization with the benchmark's unified pool-based protocol is a planned follow-up.

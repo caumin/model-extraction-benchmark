@@ -10,9 +10,9 @@ Companion policy document:
 - Goal: keep preprocessing, query/output interface, budget semantics, hyperparameters, and seed behavior aligned with official references.
 
 Current matrix-generation note (`generate_configs.py`, SET-B):
-- For image-classification + resnet18 substitute setups with sufficiently comparable references, configs use paper/official optimizer-family alignment.
-- Default aligned path uses batch `512` with LR linear scaling; keep-reference exceptions preserve official LR/batch pairs (`dfme`, `ds`, `maze`, `swiftthief`).
-- SET-A1 (`lenet_mnist`) uses heuristic substitute defaults unless attack semantics require explicit overrides.
+- Matrix generation uses setup-level unified substitute defaults (no per-attack LR/batch alignment overrides).
+- SET-B1 (`resnet18`) substitute defaults: `batch=256`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+- SET-A1 (`lenet_mnist`) substitute defaults: `batch=512`, `optimizer=sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
 
 ## 1) Inventory
 

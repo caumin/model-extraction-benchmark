@@ -43,15 +43,14 @@ Notes:
 ### Matrix Hyperparameter Policy (Current)
 
 - **SET-B1 (`substitute.arch=resnet18`)**:
-  - For attacks with sufficiently comparable official/paper references, `generate_configs.py` aligns optimizer family and reference LR/batch.
-  - Default aligned path uses **batch 512 + linear LR scaling** (throughput-oriented policy for SGD-family training).
-  - Exception path (`keep_reference_pair=True`) keeps official/paper LR-batch pairs unchanged for stability-critical attacks.
-  - Current keep-reference attacks: `dfme`, `ds`, `maze`, `swiftthief`.
+  - Matrix generation uses a unified substitute training profile across attacks.
+  - Defaults: `optimizer=sgd`, `lr=0.1`, `momentum=0.9`, `weight_decay=5e-4`, `batch_size=256`.
+  - Scheduler/training horizon: `multistep(milestones_ratio=[0.5,0.75], gamma=0.1)`, `max_epochs=1000`, `patience=100`.
 - **SET-A1 (`substitute.arch=lenet_mnist`)**:
-  - There is no one-to-one LeNet official profile consistently comparable to this benchmark setup.
-  - Matrix generation therefore uses unified heuristic substitute defaults and keeps only attack-semantic knobs.
-- Attacks without reliable one-to-one reference conditions in the target setup keep benchmark heuristic defaults (e.g., `activethief`, `marich`, `cloudleak`, `inversenet`, `random`, `dfms`).
-- For old-vs-new comparison runs, keep legacy folders with a suffix like `__prealign`; `analyze_results.py` annotates these as `(PRE-ALIGN)` in aggregated reports.
+  - Matrix generation uses unified heuristic substitute defaults.
+  - Defaults: `optimizer=sgd`, `lr=0.04`, `momentum=0.9`, `weight_decay=5e-4`, `batch_size=512`.
+  - Scheduler/training horizon: `multistep(milestones_ratio=[0.5,0.75], gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+- Matrix policy does not apply per-attack LR/batch alignment overrides; attack-specific knobs remain only where they are semantic to the attack loop.
 
 ---
 

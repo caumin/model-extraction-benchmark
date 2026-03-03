@@ -41,71 +41,69 @@ def _generate_paperlike(out_dir: Path) -> int:
     )
 
 
-def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image(tmp_path: Path) -> None:
+def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) -> None:
     out_dir = tmp_path / "cfg"
     _generate_matrix(out_dir)
 
     def _load(name: str) -> dict:
         return yaml.safe_load((out_dir / name).read_text(encoding="utf-8"))
 
+    def _assert_set_b_uniform_substitute(cfg: dict) -> None:
+        assert int(cfg["substitute"]["batch_size"]) == 256
+        assert cfg["substitute"]["optimizer"]["name"] == "sgd"
+        assert float(cfg["substitute"]["optimizer"]["lr"]) == pytest.approx(0.1)
+        assert float(cfg["substitute"]["optimizer"]["momentum"]) == pytest.approx(0.9)
+        assert float(cfg["substitute"]["optimizer"]["weight_decay"]) == pytest.approx(5e-4)
+        assert cfg["substitute"]["scheduler"]["name"] == "multistep"
+        assert cfg["substitute"]["scheduler"]["milestones_ratio"] == [0.5, 0.75]
+        assert float(cfg["substitute"]["scheduler"]["gamma"]) == pytest.approx(0.1)
+
     dfme = _load("SET-B1_dfme_soft_30m_seed0.yaml")
-    assert int(dfme["attack"]["batch_size"]) == 256
-    assert int(dfme["substitute"]["batch_size"]) == 256
-    assert dfme["substitute"]["optimizer"]["name"] == "sgd"
-    assert float(dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.1)
-    assert float(dfme["attack"]["student_lr"]) == pytest.approx(0.1)
+    _assert_set_b_uniform_substitute(dfme)
+    assert "batch_size" not in dfme["attack"]
+    assert "student_lr" not in dfme["attack"]
 
     disguide = _load("SET-B1_disguide_soft_30m_seed0.yaml")
-    assert int(disguide["attack"]["batch_size"]) == 512
-    assert int(disguide["substitute"]["batch_size"]) == 512
-    assert float(disguide["substitute"]["optimizer"]["lr"]) == pytest.approx(0.06)
-    assert float(disguide["attack"]["student_lr"]) == pytest.approx(0.06)
+    _assert_set_b_uniform_substitute(disguide)
+    assert "batch_size" not in disguide["attack"]
+    assert "student_lr" not in disguide["attack"]
 
     ds = _load("SET-B1_ds_soft_30m_seed0.yaml")
-    assert int(ds["attack"]["batch_size"]) == 256
-    assert int(ds["substitute"]["batch_size"]) == 256
-    assert float(ds["attack"]["student_lr"]) == pytest.approx(0.3)
+    _assert_set_b_uniform_substitute(ds)
+    assert "batch_size" not in ds["attack"]
+    assert "student_lr" not in ds["attack"]
 
     maze = _load("SET-B1_maze_soft_30m_seed0.yaml")
-    assert int(maze["attack"]["batch_size"]) == 128
-    assert int(maze["substitute"]["batch_size"]) == 128
-    assert float(maze["substitute"]["optimizer"]["lr"]) == pytest.approx(0.1)
+    _assert_set_b_uniform_substitute(maze)
+    assert "batch_size" not in maze["attack"]
 
     knockoff = _load("SET-B1_knockoff_nets_soft_30k_seed0.yaml")
-    assert int(knockoff["attack"]["batch_size"]) == 8
-    assert int(knockoff["attack"]["train_every"]) == 8
-    assert int(knockoff["substitute"]["batch_size"]) == 512
-    assert knockoff["substitute"]["optimizer"]["name"] == "sgd"
-    assert float(knockoff["substitute"]["optimizer"]["momentum"]) == pytest.approx(0.5)
-    assert float(knockoff["substitute"]["optimizer"]["lr"]) == pytest.approx(0.08)
-    assert float(knockoff["attack"]["paper_train_lr"]) == pytest.approx(0.08)
+    _assert_set_b_uniform_substitute(knockoff)
+    assert "batch_size" not in knockoff["attack"]
+    assert "train_every" not in knockoff["attack"]
+    assert "paper_train_lr" not in knockoff["attack"]
 
     dissector = _load("SET-B1_blackbox_dissector_hard_30k_seed0.yaml")
-    assert int(dissector["substitute"]["batch_size"]) == 512
-    assert float(dissector["substitute"]["optimizer"]["lr"]) == pytest.approx(0.08)
-    assert float(dissector["attack"]["lr"]) == pytest.approx(0.08)
+    _assert_set_b_uniform_substitute(dissector)
+    assert "lr" not in dissector["attack"]
 
     ripper = _load("SET-B1_blackbox_ripper_soft_30m_seed0.yaml")
-    assert int(ripper["attack"]["train_batch_size"]) == 512
-    assert int(ripper["substitute"]["batch_size"]) == 512
-    assert float(ripper["attack"]["substitute_lr"]) == pytest.approx(0.08)
+    _assert_set_b_uniform_substitute(ripper)
+    assert "train_batch_size" not in ripper["attack"]
+    assert "substitute_lr" not in ripper["attack"]
 
     swift = _load("SET-B1_swiftthief_soft_30k_seed0.yaml")
-    assert int(swift["attack"]["batch_size"]) == 512
-    assert int(swift["substitute"]["batch_size"]) == 512
-    assert swift["substitute"]["optimizer"]["name"] == "sgd"
-    assert float(swift["substitute"]["optimizer"]["lr"]) == pytest.approx(0.01)
-    assert float(swift["attack"]["lr"]) == pytest.approx(0.01)
-    assert float(swift["attack"]["kd_lr"]) == pytest.approx(0.01)
+    _assert_set_b_uniform_substitute(swift)
+    assert "batch_size" not in swift["attack"]
+    assert "lr" not in swift["attack"]
+    assert "kd_lr" not in swift["attack"]
 
-    # Not explicitly aligned: keep previous defaults.
     activethief = _load("SET-B1_activethief_soft_30k_seed0.yaml")
     assert int(activethief["attack"]["scoring_batch_size"]) == 512
     assert "batch_size" not in activethief["attack"]
     assert int(activethief["attack"]["iterations"]) == 10
     assert "rounds" not in activethief["attack"]
-    assert int(activethief["substitute"]["batch_size"]) == 512
-    assert float(activethief["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
+    _assert_set_b_uniform_substitute(activethief)
 
     marich = _load("SET-B1_marich_hard_30k_seed0.yaml")
     assert int(marich["attack"]["iterations"]) == 20
@@ -119,7 +117,7 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     assert float(set_b_inversenet["attack"]["hcss_xi"]) == pytest.approx(0.02)
     assert int(set_b_inversenet["attack"]["hcss_max_iter"]) == 20
 
-    # Guard condition: non-resnet18 setup should not be aligned.
+    # Guard condition: SET-A keeps its own unified defaults.
     set_a_dfme = _load("SET-A1_dfme_soft_30m_seed0.yaml")
     assert "batch_size" not in set_a_dfme["attack"]
     assert int(set_a_dfme["substitute"]["batch_size"]) == 512
@@ -161,6 +159,11 @@ def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
     set_b_cfg_path = out_dir / "SET-B1_random_soft_30k_seed0.yaml"
     set_b_cfg = yaml.safe_load(set_b_cfg_path.read_text(encoding="utf-8"))
     assert set_b_cfg["victim"]["inference_policy"] == "benchmark"
+    assert int(set_b_cfg["dataset"]["surrogate_max_samples"]) == 100_000
+
+    set_a_cfg_path = out_dir / "SET-A1_random_soft_30k_seed0.yaml"
+    set_a_cfg = yaml.safe_load(set_a_cfg_path.read_text(encoding="utf-8"))
+    assert int(set_a_cfg["dataset"]["surrogate_max_samples"]) == 50_000
 
 
 def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) -> None:

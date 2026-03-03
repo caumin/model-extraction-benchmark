@@ -51,11 +51,10 @@ Companion policy document:
    - Official repos sometimes express budget in rounds/epochs/millions.
    - mebench enforces one canonical rule at runtime: 1 queried image consumes 1 budget.
 
-4. SET-B generation policy split (reference-aligned vs heuristic):
-   - For image-classification + resnet18 substitute setups, selected attacks are generated with paper/official optimizer-family alignment.
-   - Default aligned path uses batch `512` with LR linear scaling; keep-reference exceptions preserve official LR/batch pairs (`dfme`, `ds`, `maze`, `swiftthief`).
-   - SET-A1 (`lenet_mnist`) follows heuristic substitute defaults unless attack semantics require explicit overrides.
-   - Attacks without reliable one-to-one reference conditions keep heuristic benchmark defaults until stronger evidence is available.
+4. Matrix substitute policy is setup-level unified:
+   - SET-B1 (`resnet18`) uses one substitute profile across attacks: `sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `batch=256`, `multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+   - SET-A1 (`lenet_mnist`) uses one substitute profile across attacks: `sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `batch=512`, `multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+   - Matrix generation does not apply per-attack LR/batch alignment overrides; attack-specific knobs remain only when semantic to the attack protocol.
 
 ## Evidence: key parity tests in this repo
 

@@ -93,170 +93,9 @@ def _clean_yaml_dir(out_dir: Path) -> None:
         p.unlink()
 
 
-# Matrix optimizer/LR policy
-#
-# Policy contract:
-# - SET-B1 (ResNet-18 substitute): if official/paper settings are sufficiently
-#   comparable, preserve optimizer family and use reference-aware LR/batch policy.
-# - SET-A1 (LeNet substitute): no attack has a sufficiently comparable official
-#   LeNet profile for direct transfer in this benchmark setup, so use unified
-#   heuristic defaults (unless an attack explicitly requires an override).
-#
-# SET-B1 alignment behavior:
-# - Default aligned path uses larger train batch (512) with linear LR scaling.
-# - Exception path keeps paper/official LR-batch pair unchanged.
-# - keep_reference_pair=True is used for attacks where exact paper/official
-#   values are required for stable extraction quality.
-#
-# Non-listed attacks:
-# - If an attack is not listed in _LRPS_ALIGNMENT_RULES, config generation keeps
-#   benchmark-default heuristic settings.
-_IMAGE_CLASSIFICATION_DATASETS = {
-    "CIFAR10",
-    "CIFAR100",
-    "SVHN",
-    "GTSRB",
-    "MNIST",
-    "FASHIONMNIST",
-    "EMNIST",
-    "IMAGENET",
-}
-
-_ALIGNED_TRAIN_BATCH = 512
-
-# attack_name -> rule
-# - ref_lr/ref_batch: paper/official baseline pair
-# - batch_paths: config paths receiving the chosen target batch
-# - lr_paths: config paths receiving the chosen target LR
-# - substitute_optimizer: optimizer family/params matched to reference
-# - fixed_paths: config paths pinned to explicit reference values
-# - keep_reference_pair: if True, keep ref_lr/ref_batch exactly (no linear scaling)
-_LRPS_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {
-    "dfme": {
-        "ref_lr": 0.1,
-        "ref_batch": 256,
-        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
-        "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "student_lr")],
-        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
-        "keep_reference_pair": True,
-    },
-    "disguide": {
-        "ref_lr": 0.03,
-        "ref_batch": 256,
-        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
-        "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "student_lr")],
-        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
-    },
-    "ds": {
-        "ref_lr": 0.3,
-        "ref_batch": 256,
-        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
-        "lr_paths": [("attack", "student_lr")],
-        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
-        "keep_reference_pair": True,
-    },
-    "maze": {
-        "ref_lr": 0.1,
-        "ref_batch": 128,
-        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
-        "lr_paths": [("substitute", "optimizer", "lr")],
-        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
-        "keep_reference_pair": True,
-    },
-    "knockoff_nets": {
-        # KnockoffNets keeps query/update batch fixed to official transfer default (8)
-        # while substitute training uses aligned settings under this benchmark policy.
-        "ref_lr": 0.01,
-        "ref_batch": 64,
-        "batch_paths": [("substitute", "batch_size")],
-        "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "paper_train_lr")],
-        "substitute_optimizer": {"name": "sgd", "momentum": 0.5, "weight_decay": 5e-4},
-        "fixed_paths": [("attack", "batch_size", 8), ("attack", "train_every", 8)],
-    },
-    "blackbox_dissector": {
-        "ref_lr": 0.02,
-        "ref_batch": 128,
-        "batch_paths": [("substitute", "batch_size")],
-        "lr_paths": [("substitute", "optimizer", "lr"), ("attack", "lr")],
-        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
-    },
-    "blackbox_ripper": {
-        "ref_lr": 0.01,
-        "ref_batch": 64,
-        "batch_paths": [("attack", "train_batch_size"), ("substitute", "batch_size")],
-        "lr_paths": [("attack", "substitute_lr")],
-        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
-    },
-    "swiftthief": {
-        # Official SwiftThief scripts use SupCon batch=512 and sl_lr=1e-2.
-        # Keep this pair as-is for SET-B1 comparability.
-        "ref_lr": 0.01,
-        "ref_batch": 512,
-        "batch_paths": [("attack", "batch_size"), ("substitute", "batch_size")],
-        "lr_paths": [
-            ("substitute", "optimizer", "lr"),
-            ("attack", "lr"),
-            ("attack", "kd_lr"),
-        ],
-        "substitute_optimizer": {"name": "sgd", "momentum": 0.9, "weight_decay": 5e-4},
-        "keep_reference_pair": True,
-    },
-}
-
-
-def _set_nested_value(cfg: Dict[str, Any], path: Tuple[str, ...], value: Any) -> None:
-    cursor: Dict[str, Any] = cfg
-    for key in path[:-1]:
-        node = cursor.get(key)
-        if not isinstance(node, dict):
-            node = {}
-            cursor[key] = node
-        cursor = node
-    cursor[path[-1]] = value
-
-
-def _is_set_b_resnet18_image_setup(setup: Setup, cfg: Dict[str, Any]) -> bool:
-    if str(setup.set_id).strip().upper() != "SET-B1":
-        return False
-    sub_arch = str(cfg.get("substitute", {}).get("arch", "")).strip().lower()
-    dataset_name = str(setup.victim_dataset).strip().upper()
-    return sub_arch == "resnet18" and dataset_name in _IMAGE_CLASSIFICATION_DATASETS
-
-
-def _apply_reference_hparam_alignment(cfg: Dict[str, Any], setup: Setup, attack_name: str) -> None:
-    rule = _LRPS_ALIGNMENT_RULES.get(str(attack_name))
-    if rule is None:
-        return
-    if not _is_set_b_resnet18_image_setup(setup, cfg):
-        return
-
-    reference_lr = float(rule["ref_lr"])
-    reference_batch = int(rule["ref_batch"])
-    keep_reference_pair = bool(rule.get("keep_reference_pair", False))
-
-    if keep_reference_pair:
-        target_lr = reference_lr
-        target_batch = reference_batch
-    else:
-        target_batch = int(_ALIGNED_TRAIN_BATCH)
-        target_lr = reference_lr * (float(target_batch) / float(reference_batch))
-
-    sub_opt = rule.get("substitute_optimizer")
-    if isinstance(sub_opt, dict):
-        for key, value in sub_opt.items():
-            _set_nested_value(cfg, ("substitute", "optimizer", str(key)), value)
-
-    for path in rule.get("batch_paths", []):
-        _set_nested_value(cfg, tuple(path), int(target_batch))
-
-    for path in rule.get("lr_paths", []):
-        _set_nested_value(cfg, tuple(path), float(target_lr))
-
-    for fixed_path in rule.get("fixed_paths", []):
-        if len(fixed_path) < 2:
-            continue
-        *path_keys, raw_value = fixed_path
-        _set_nested_value(cfg, tuple(path_keys), raw_value)
+# Matrix substitute policy:
+# - Keep a unified substitute training recipe per setup.
+# - Do not apply per-attack LR/batch alignment overrides in matrix generation.
 
 
 def generate_configs(
@@ -427,7 +266,7 @@ def generate_configs(
         out_dir.mkdir(parents=True, exist_ok=True)
 
     protocol_version = "1.3"
-    # Heuristic default substitute profile for non-aligned paths.
+    # Heuristic default substitute profile.
     substitute_batch_size = 512
 
     # Unified pool-based budget protocol
@@ -436,11 +275,13 @@ def generate_configs(
     pool_iterations = 10
 
     # Unified simple substitute supervised training defaults.
-    # NOTE: these are heuristic benchmark defaults and are used for attacks that
-    # are not covered by _LRPS_ALIGNMENT_RULES under the resnet18-image scope.
+    # NOTE: these are heuristic benchmark defaults applied uniformly per setup.
     unified_substitute_lr = 0.04
-    unified_substitute_max_epochs = 200
-    unified_substitute_patience = 20
+    # SET-B1 default profile.
+    set_b_substitute_batch_size = 256
+    set_b_unified_substitute_lr = 0.1
+    unified_substitute_max_epochs = 1000
+    unified_substitute_patience = 100
 
     # Synthetic/data-free attacks do not depend on the surrogate dataset.
     # Generate them once per victim. Prefer an ImageNet-based SET when available
@@ -519,17 +360,21 @@ def generate_configs(
 
                     run_name = f"{setup.set_id}_{attack_name_for_filename}_{suffix_mode}_{suffix_budget}_seed{seed}"
                     
+                    setup_substitute_batch_size = substitute_batch_size
                     target_lr = unified_substitute_lr
+                    if str(setup.set_id).strip().upper() == "SET-B1":
+                        setup_substitute_batch_size = int(set_b_substitute_batch_size)
+                        target_lr = float(set_b_unified_substitute_lr)
 
                     # Default substitute config
                     substitute_config = {
                         "arch": setup.substitute_arch,
                         "init_seed": 1234 + seed,
-                        "batch_size": substitute_batch_size,
+                        "batch_size": int(setup_substitute_batch_size),
                         "num_workers": int(substitute_num_workers),
                         "train_num_workers": int(resolved_sub_train_workers),
                         "val_num_workers": int(resolved_sub_val_workers),
-                        "trackA": {"batch_size": substitute_batch_size, "steps_coeff_c": 0.2},
+                        "trackA": {"batch_size": int(setup_substitute_batch_size), "steps_coeff_c": 0.2},
                         "optimizer": {
                             "name": "sgd",
                             "lr": target_lr,
@@ -631,13 +476,14 @@ def generate_configs(
                             return
                         if str(d.get("surrogate_name")).lower() != "imagenet":
                             return
-                        # ImageNet surrogate (ImageFolder format): use a deterministic 50k subset.
+                        # ImageNet surrogate (ImageFolder format): use set-specific deterministic subset size.
                         # Default local path is configurable via --imagenet-root.
+                        surrogate_max_samples = 100_000 if str(setup.set_id).strip().upper() == "SET-B1" else 50_000
                         d.update(
                             {
                                 "surrogate_root": resolved_imagenet_root,
                                 "surrogate_resize": [setup.size, setup.size],
-                                "surrogate_max_samples": 50_000,
+                                "surrogate_max_samples": int(surrogate_max_samples),
                                 "surrogate_subset_seed": 42,
                             }
                         )
@@ -676,10 +522,6 @@ def generate_configs(
                             gen_ckpt = f"checkpoints/blackbox_ripper/official/{gen_name}.pth"
                         cfg["attack"]["generator_name"] = gen_name
                         cfg["attack"]["generator_checkpoint"] = gen_ckpt
-
-                    # Apply reference alignment only for covered attacks; all
-                    # others remain on benchmark-default (heuristic) settings.
-                    _apply_reference_hparam_alignment(cfg, setup, attack.name)
 
                     out_path = out_dir / f"{run_name}.yaml"
                     out_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -841,7 +683,7 @@ def generate_paperlike_configs(
                 {
                     "surrogate_root": resolved_imagenet_root,
                     "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
-                    "surrogate_max_samples": 50_000,
+                    "surrogate_max_samples": 100_000,
                     "surrogate_subset_seed": int(seed),
                 }
             )
@@ -1032,7 +874,7 @@ def generate_paperlike_configs(
                 "surrogate_normalization": "standard",
                 "surrogate_root": resolved_imagenet_root,
                 "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
-                "surrogate_max_samples": 50_000,
+                "surrogate_max_samples": 100_000,
                 "surrogate_subset_seed": 42,
                 "num_workers": int(pool_num_workers),
                 "train_split": True,
@@ -1118,7 +960,7 @@ def generate_paperlike_configs(
                 "surrogate_normalization": "standard",
                 "surrogate_root": "<FILL_ME>",
                 "surrogate_resize": [cifar10_setup.size, cifar10_setup.size],
-                "surrogate_max_samples": 50_000,
+                "surrogate_max_samples": 100_000,
                 "surrogate_subset_seed": 42,
                 "num_workers": int(pool_num_workers),
                 "train_split": True,
@@ -1396,7 +1238,7 @@ def generate_paperlike_configs(
                 "input_size": [cifar10_setup.size, cifar10_setup.size],
                 "surrogate_class_subset_size": int(profile["surrogate_class_subset_size"]),
                 "surrogate_class_subset_seed": 42,
-                "surrogate_max_samples": 50_000,
+                "surrogate_max_samples": 100_000,
                 "surrogate_subset_seed": 42,
             }
             dfms_attack = {
