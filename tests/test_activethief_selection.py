@@ -170,7 +170,7 @@ def test_select_dfal_prefers_smallest_perturbation() -> None:
     attack.pool_dataset = IndexedDataset([close, far])
 
     attack.unlabeled_indices = [0, 1]
-    attack.batch_size = 32
+    attack.scoring_batch_size = 32
     attack.substitute = FeatureModel()
     attack.dfal_max_iter = 1
 

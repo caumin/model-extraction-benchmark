@@ -24,6 +24,7 @@ from mebench.utils.dataloader import (
 )
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.config_aliases import resolve_iterations
 
 
 class FeatureFool:
@@ -338,7 +339,12 @@ class CloudLeak(AttackRunner):
             max_thres = 10.0 / 255.0
         self.epsilon = float(max_thres)
 
-        self.num_rounds = int(config.get("iterations", config.get("num_rounds", config.get("rounds", 10))))
+        self.num_rounds = resolve_iterations(
+            config,
+            default=10,
+            context="cloudleak",
+            allow_num_rounds=True,
+        )
         initial_seed_size = config.get("initial_seed_size")
         if initial_seed_size is None:
             initial_seed_size = config.get("initial_pool_size")

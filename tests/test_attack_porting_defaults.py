@@ -41,6 +41,7 @@ def test_swiftthief_kd_lr_default_matches_official_sl_lr() -> None:
 def test_game_default_batch_size_matches_official() -> None:
     atk = GAME({}, _state())
     assert atk.batch_size == 1024
+    assert atk.query_budget == 2000
     assert atk.querybudget == 2000
     assert atk.attack_train_epoch == 40
     assert atk.acs_strategy == "random"

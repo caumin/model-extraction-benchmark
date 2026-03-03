@@ -14,6 +14,10 @@ from mebench.core.state import BenchmarkState
 from mebench.models.gan import DCGANGenerator, DCGANDiscriminator, ACGANGenerator, ACGANDiscriminator
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
+from mebench.utils.config_aliases import (
+    resolve_nominal_query_budget,
+    resolve_query_budget,
+)
 from mebench.utils.dataloader import load_pool_to_memory
 from mebench.utils.scaling import clamp_unit, unit_to_tanh
 
@@ -49,8 +53,15 @@ class GAME(AttackRunner):
         self.beta4 = float(config.get("beta4", 100.0))  # L_dif
 
         # Official attack.py defaults.
-        self.querybudget = int(config.get("querybudget", config.get("budget", 2000)))
-        self.nominal_querybudget = int(config.get("nominal_querybudget", 0))
+        self.query_budget = resolve_query_budget(config, default=2000, context="game")
+        self.nominal_query_budget = resolve_nominal_query_budget(
+            config,
+            default=0,
+            context="game",
+        )
+        # Backward-compatible attributes used in existing tests/call sites.
+        self.querybudget = self.query_budget
+        self.nominal_querybudget = self.nominal_query_budget
         self.attack_train_epoch = int(config.get("attack_train_epoch", 40))
         self.final_retrain_epoch_offset = int(config.get("final_retrain_epoch_offset", 10))
         self.round_train_epochs = int(config.get("round_train_epochs", 20))
@@ -246,9 +257,9 @@ class GAME(AttackRunner):
         if not self.tdl_done and self.tdl_steps > 0:
             self._tdl_phase(device)
 
-        total_budget = min(int(self.state.budget_remaining), int(self.querybudget))
+        total_budget = min(int(self.state.budget_remaining), int(self.query_budget))
         start_query_count = int(self.state.query_count)
-        nominal_budget_left = int(self.nominal_querybudget) if int(self.nominal_querybudget) > 0 else None
+        nominal_budget_left = int(self.nominal_query_budget) if int(self.nominal_query_budget) > 0 else None
         # [FEATURE] Clean progress bar for Data-Free (Query Progress Only)
         pbar = self._create_progress_bar(total_budget, "[GAME] Extracting")
         

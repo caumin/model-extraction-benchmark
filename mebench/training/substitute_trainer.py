@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -136,15 +137,34 @@ class SubstituteTrainer:
     def _setup_optimizer(self, model: nn.Module) -> optim.Optimizer:
         """Configure optimizer based on config."""
         opt_config = self.config.get("optimizer", "SGD")
-        
+
+        if "lr" in self.config and "substitute_lr" in self.config:
+            if float(self.config["lr"]) != float(self.config["substitute_lr"]):
+                raise ValueError(
+                    "Conflicting learning-rate keys: use canonical 'substitute_lr' or"
+                    " optimizer.lr; got different values for 'lr' and 'substitute_lr'."
+                )
+        if "lr" in self.config and "substitute_lr" not in self.config:
+            warnings.warn(
+                "'lr' is deprecated for substitute training config; use 'substitute_lr' "
+                "or optimizer.lr.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         if isinstance(opt_config, dict):
             opt_name = opt_config.get("name", "SGD")
-            lr = float(opt_config.get("lr", self.config.get("lr", 0.01)))
+            lr = float(
+                opt_config.get(
+                    "lr",
+                    self.config.get("substitute_lr", self.config.get("lr", 0.01)),
+                )
+            )
             weight_decay = float(opt_config.get("weight_decay", self.config.get("weight_decay", 5e-4)))
             momentum = float(opt_config.get("momentum", self.config.get("momentum", 0.9)))
         else:
             opt_name = opt_config
-            lr = float(self.config.get("lr", 0.01))
+            lr = float(self.config.get("substitute_lr", self.config.get("lr", 0.01)))
             weight_decay = float(self.config.get("weight_decay", 5e-4))
             momentum = float(self.config.get("momentum", 0.9))
 

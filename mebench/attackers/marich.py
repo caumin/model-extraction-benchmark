@@ -23,6 +23,7 @@ from mebench.data.loaders import create_dataloader
 from mebench.data.preprocessing import apply_official_preprocess_batch
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.config_aliases import resolve_iterations
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_pool_num_workers,
@@ -59,7 +60,7 @@ class MARICH(AttackRunner):
         super().__init__(config, state)
         self.batch_size = int(config.get("batch_size", 128))
         self.init_points = int(config.get("init_points", 1000))
-        self.rounds = int(config.get("iterations", config.get("rounds", 20)))
+        self.rounds = resolve_iterations(config, default=20, context="marich")
         self.round_budget = float(config.get("budget", 300.0))
         self.budget_growth = float(config.get("budget_growth", 1.01))
         self.epochs = float(config.get("epochs", 20.0))

@@ -362,7 +362,7 @@ def generate_configs(
             label_capability="both",
             extra={
                 "strategy": "dfal_k_center",
-                "batch_size": 150,
+                "scoring_batch_size": 512,
             },
         ),
         AttackSpec(
@@ -372,7 +372,7 @@ def generate_configs(
             extra={
                 "strategy": "uncertainty",
                 "variant": "uncertainty",
-                "batch_size": 150,
+                "scoring_batch_size": 512,
             },
         ),
         AttackSpec(
@@ -382,7 +382,7 @@ def generate_configs(
             extra={
                 "strategy": "dfal",
                 "variant": "dfal",
-                "batch_size": 150,
+                "scoring_batch_size": 512,
             },
         ),
         AttackSpec(
@@ -609,6 +609,14 @@ def generate_configs(
                         # Backward compatibility for legacy `rounds` is handled in
                         # attack implementations via fallback parsing.
                         cfg["attack"].setdefault("iterations", pool_iterations)
+
+                    # GAME canonical budget keys (future-ready).
+                    # GAME is currently excluded from matrix generation, so this
+                    # has no effect on today's outputs; it keeps naming consistent
+                    # when GAME is re-enabled.
+                    if attack.name == "game":
+                        cfg["attack"].setdefault("query_budget", int(max_budget))
+                        cfg["attack"].setdefault("nominal_query_budget", 0)
 
                     # CloudLeak: disable pretrained substitutes by default for fairness.
                     if attack.name == "cloudleak":

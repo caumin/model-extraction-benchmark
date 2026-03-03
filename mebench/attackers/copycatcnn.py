@@ -15,6 +15,7 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.config_aliases import resolve_iterations
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_train_num_workers,
@@ -98,9 +99,7 @@ class CopycatCNN(AttackRunner):
         self.substitute_momentum = float(config.get("substitute_momentum", 0.9))
         self.substitute_weight_decay = float(config.get("substitute_weight_decay", 5e-4))
         self.substitute_epochs = int(config.get("substitute_epochs", 200))
-        # Round-based execution: query -> (re)train substitute, repeated.
-        # Canonical key is `iterations`; keep `rounds` for backward compatibility.
-        self.rounds = int(config.get("iterations", config.get("rounds", 10)))
+        self.rounds = resolve_iterations(config, default=10, context="copycatcnn")
         # Paper CopycatCNN balances the fake dataset by class by default.
         self.balance_by_class = bool(config.get("balance_by_class", True))
         # Official CopycatCNN code expands each image with ~22 offline augmentation methods.

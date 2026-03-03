@@ -17,6 +17,7 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.config_aliases import resolve_iterations
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_pool_num_workers,
@@ -43,7 +44,7 @@ class ActiveThief(AttackRunner):
         super().__init__(config, state)
 
         # Basic parameters
-        self.batch_size = int(config.get("batch_size", 256))
+        self.scoring_batch_size = int(config.get("scoring_batch_size", config.get("batch_size", 512)))
         self.num_classes = int(
             self.state.metadata.get("num_classes")
             or self.config.get("num_classes")
@@ -62,8 +63,7 @@ class ActiveThief(AttackRunner):
         )
         step_size = config.get("step_size")
         self.step_size = int(step_size) if step_size is not None else None
-        # Unified config key is `iterations` (default 10). Keep `rounds` as backwards-compatible alias.
-        self.rounds = int(config.get("iterations", config.get("rounds", 10)))
+        self.rounds = resolve_iterations(config, default=10, context="activethief")
         
         # Store oracle labels to override dataset labels during training
         self.observed_labels = {}
@@ -200,7 +200,7 @@ class ActiveThief(AttackRunner):
                 subset = Subset(self.pool_dataset, val_indices)
                 loader = DataLoader(
                     subset,
-                    batch_size=min(self.batch_size, len(val_indices)),
+                    batch_size=min(self.scoring_batch_size, len(val_indices)),
                     shuffle=False,
                     **pool_kwargs,
                 )
@@ -232,7 +232,7 @@ class ActiveThief(AttackRunner):
                 subset = Subset(self.pool_dataset, seed_indices)
                 loader = DataLoader(
                     subset,
-                    batch_size=min(self.batch_size, len(seed_indices)),
+                    batch_size=min(self.scoring_batch_size, len(seed_indices)),
                     shuffle=False,
                     **pool_kwargs,
                 )
@@ -310,7 +310,7 @@ class ActiveThief(AttackRunner):
 
         train_batch_size = int(
             sub_config.get("batch_size")
-            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+            or sub_config.get("trackA", {}).get("batch_size", self.scoring_batch_size)
         )
 
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
@@ -588,7 +588,7 @@ class ActiveThief(AttackRunner):
         unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
         unlabeled_loader = DataLoader(
             unlabeled_dataset, 
-            batch_size=self.batch_size, 
+            batch_size=self.scoring_batch_size, 
             shuffle=False, 
             **loader_kwargs,
         )
@@ -610,7 +610,7 @@ class ActiveThief(AttackRunner):
                     self.substitute,
                     x_batch,
                     max_iter=self.dfal_max_iter,
-                    internal_batch_size=min(self.batch_size, x_batch.shape[0]),
+                    internal_batch_size=min(self.scoring_batch_size, x_batch.shape[0]),
                 )
             all_distances.append(distances.detach().cpu())
         
@@ -656,7 +656,7 @@ class ActiveThief(AttackRunner):
         candidate_dataset = Subset(self.pool_dataset, dfal_candidates)
         candidate_loader = DataLoader(
             candidate_dataset, 
-            batch_size=self.batch_size, 
+            batch_size=self.scoring_batch_size, 
             shuffle=False, 
             **loader_kwargs,
         )
@@ -670,7 +670,7 @@ class ActiveThief(AttackRunner):
             labeled_dataset = Subset(self.pool_dataset, self.labeled_indices)
             labeled_loader = DataLoader(
                 labeled_dataset,
-                batch_size=self.batch_size,
+                batch_size=self.scoring_batch_size,
                 shuffle=False,
                 **loader_kwargs,
             )
@@ -772,7 +772,7 @@ class ActiveThief(AttackRunner):
         unlabeled_dataset = Subset(self.pool_dataset, self.unlabeled_indices)
         unlabeled_loader = DataLoader(
             unlabeled_dataset,
-            batch_size=self.batch_size,
+            batch_size=self.scoring_batch_size,
             shuffle=False,
             **loader_kwargs,
         )
@@ -789,7 +789,7 @@ class ActiveThief(AttackRunner):
                 labeled_dataset = Subset(self.pool_dataset, self.labeled_indices)
                 labeled_loader = DataLoader(
                     labeled_dataset,
-                    batch_size=self.batch_size,
+                    batch_size=self.scoring_batch_size,
                     shuffle=False,
                     **loader_kwargs,
                 )
