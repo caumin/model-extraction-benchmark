@@ -135,7 +135,7 @@ class ActiveThief(AttackRunner):
         dataset_config = state.metadata.get("dataset_config", {})
         self.pool_dataset = create_dataloader(
             dataset_config,
-            batch_size=self.batch_size,
+            batch_size=self.scoring_batch_size,
             shuffle=False,
         ).dataset
         
