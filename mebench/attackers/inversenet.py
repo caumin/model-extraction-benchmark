@@ -15,7 +15,7 @@ from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
-from mebench.data.loaders import create_dataloader
+from mebench.data.loaders import create_dataloader, get_surrogate_standard_normalization
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_pool_num_workers,
@@ -69,6 +69,7 @@ class InverseNet(AttackRunner):
         # Runtime caches (protocol-preserving)
         self._phase3_templates: Dict[str, torch.Tensor] = {}
         self._inversion_aug = None
+        self._phase3_norm_stats: Optional[Tuple[Tuple[float, ...], Tuple[float, ...]]] = None
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
@@ -140,6 +141,7 @@ class InverseNet(AttackRunner):
                 x = self.inversion_model(y_sample)
 
             x = self._augment_inversion(x, y_sample)
+            x = self._normalize_phase3_queries(x)
             meta = {"phase": phase, "synthetic": True, "augmented": True}
             return QueryBatch(x=x, meta=meta)
 
@@ -333,6 +335,7 @@ class InverseNet(AttackRunner):
 
     def _load_pool(self, state: BenchmarkState) -> None:
         dataset_config = self._get_dataset_config(state)
+        self._configure_phase3_normalization(dataset_config, state)
         self.pool_dataset = create_dataloader(
             dataset_config,
             batch_size=1,
@@ -392,6 +395,49 @@ class InverseNet(AttackRunner):
         state.attack_state["all_pool_indices"] = list(range(int(pool_len)))
         # Track used indices as a set for fast membership checks.
         state.attack_state["used_pool_set"] = set()
+
+    def _configure_phase3_normalization(self, dataset_config: dict, state: BenchmarkState) -> None:
+        self._phase3_norm_stats = None
+        if str(dataset_config.get("data_mode", "")).strip().lower() != "surrogate":
+            return
+
+        norm_mode = str(dataset_config.get("surrogate_normalization", "standard")).strip().lower()
+        if norm_mode not in {"standard", "dataset", "surrogate_standard"}:
+            return
+
+        surrogate_name = dataset_config.get("surrogate_name")
+        if surrogate_name is None:
+            return
+
+        channels = dataset_config.get("channels")
+        if channels is None:
+            input_shape = state.metadata.get("input_shape", (3, 32, 32))
+            if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
+                channels = int(input_shape[0])
+
+        try:
+            self._phase3_norm_stats = get_surrogate_standard_normalization(
+                surrogate_name=str(surrogate_name),
+                channels=int(channels) if channels is not None else None,
+            )
+        except ValueError:
+            self._phase3_norm_stats = None
+
+    def _normalize_phase3_queries(self, x: torch.Tensor) -> torch.Tensor:
+        if self._phase3_norm_stats is None:
+            return x
+
+        if x.ndim != 4:
+            return x
+
+        mean_vals, std_vals = self._phase3_norm_stats
+        mean = torch.tensor(mean_vals, device=x.device, dtype=x.dtype).view(1, -1, 1, 1)
+        std = torch.tensor(std_vals, device=x.device, dtype=x.dtype).view(1, -1, 1, 1)
+
+        if int(mean.size(1)) != int(x.size(1)):
+            return x
+
+        return (x - mean) / std
 
     def _update_phase(self, state: BenchmarkState) -> None:
         prev_phase = state.attack_state.get("phase")

@@ -110,6 +110,51 @@ def test_inversenet_rejects_soft_prob_observation() -> None:
         attack._handle_oracle_output(x, {"phase": 1}, OracleOutput(kind="soft_prob", y=soft), state)
 
 
+def test_inversenet_phase3_normalization_uses_surrogate_standard_stats() -> None:
+    state = _make_state(output_mode="hard_top1")
+    state.metadata["dataset_config"] = {
+        "data_mode": "surrogate",
+        "surrogate_name": "ImageNet",
+        "surrogate_normalization": "standard",
+        "channels": 3,
+    }
+    attack = InverseNet({}, state)
+
+    attack._configure_phase3_normalization(state.metadata["dataset_config"], state)
+    assert attack._phase3_norm_stats is not None
+
+    x = torch.full((2, 3, 4, 4), 0.5, dtype=torch.float32)
+    x_norm = attack._normalize_phase3_queries(x)
+
+    expected = torch.tensor(
+        [
+            (0.5 - 0.485) / 0.229,
+            (0.5 - 0.456) / 0.224,
+            (0.5 - 0.406) / 0.225,
+        ],
+        dtype=torch.float32,
+    ).view(1, 3, 1, 1)
+    assert torch.allclose(x_norm, expected.expand_as(x_norm), atol=1e-6)
+
+
+def test_inversenet_phase3_normalization_is_noop_when_disabled() -> None:
+    state = _make_state(output_mode="hard_top1")
+    state.metadata["dataset_config"] = {
+        "data_mode": "surrogate",
+        "surrogate_name": "ImageNet",
+        "surrogate_normalization": "none",
+        "channels": 3,
+    }
+    attack = InverseNet({}, state)
+
+    attack._configure_phase3_normalization(state.metadata["dataset_config"], state)
+    assert attack._phase3_norm_stats is None
+
+    x = torch.rand(2, 3, 4, 4)
+    x_norm = attack._normalize_phase3_queries(x)
+    assert torch.equal(x_norm, x)
+
+
 def test_disguide_target_format_modes() -> None:
     state = _make_state(num_classes=4, output_mode="soft_prob")
 
