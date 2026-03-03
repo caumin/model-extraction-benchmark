@@ -322,7 +322,22 @@ def generate_configs(
         AttackSpec("random", kind="pool", label_capability="both"),
         AttackSpec("knockoff_nets", kind="pool", label_capability="soft_only"),
         AttackSpec("cloudleak", kind="pool", label_capability="soft_only"),
-        AttackSpec("inversenet", kind="pool", label_capability="hard_only"),
+        AttackSpec(
+            "inversenet",
+            kind="pool",
+            label_capability="hard_only",
+            extra={
+                # Paper-aligned attack semantics (2021 Gong et al.):
+                # K1:K2:K3=0.45:0.45:0.1, truncation top-1, coreset seed=20,
+                # HCSS xi=0.02 and DeepFool max_iter=20.
+                "phase_ratios": [0.45, 0.45, 0.1],
+                "truncation_k": 1,
+                "coreset_seed": 20,
+                "hcss_xi": 0.02,
+                "hcss_max_iter": 20,
+                "batch_size": 128,
+            },
+        ),
         AttackSpec("blackbox_dissector", kind="pool", label_capability="hard_only"),
         AttackSpec(
             "marich",

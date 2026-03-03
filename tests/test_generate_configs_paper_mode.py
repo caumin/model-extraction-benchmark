@@ -110,6 +110,14 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     assert int(marich["attack"]["iterations"]) == 20
     assert "rounds" not in marich["attack"]
 
+    set_b_inversenet = _load("SET-B1_inversenet_hard_30k_seed0.yaml")
+    assert int(set_b_inversenet["attack"]["batch_size"]) == 128
+    assert set_b_inversenet["attack"]["phase_ratios"] == [0.45, 0.45, 0.1]
+    assert int(set_b_inversenet["attack"]["truncation_k"]) == 1
+    assert int(set_b_inversenet["attack"]["coreset_seed"]) == 20
+    assert float(set_b_inversenet["attack"]["hcss_xi"]) == pytest.approx(0.02)
+    assert int(set_b_inversenet["attack"]["hcss_max_iter"]) == 20
+
     # Guard condition: non-resnet18 setup should not be aligned.
     set_a_dfme = _load("SET-A1_dfme_soft_30m_seed0.yaml")
     assert "batch_size" not in set_a_dfme["attack"]
@@ -122,6 +130,14 @@ def test_generate_configs_aligns_lr_per_sample_for_explicit_set_b_resnet18_image
     assert "kd_lr" not in set_a_swift["attack"]
     assert int(set_a_swift["substitute"]["batch_size"]) == 512
     assert float(set_a_swift["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
+
+    set_a_inversenet = _load("SET-A1_inversenet_hard_30k_seed0.yaml")
+    assert int(set_a_inversenet["attack"]["batch_size"]) == 128
+    assert set_a_inversenet["attack"]["phase_ratios"] == [0.45, 0.45, 0.1]
+    assert int(set_a_inversenet["attack"]["truncation_k"]) == 1
+    assert int(set_a_inversenet["attack"]["coreset_seed"]) == 20
+    assert float(set_a_inversenet["attack"]["hcss_xi"]) == pytest.approx(0.02)
+    assert int(set_a_inversenet["attack"]["hcss_max_iter"]) == 20
 
 
 def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
