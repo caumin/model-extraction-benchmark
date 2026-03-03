@@ -12,7 +12,7 @@ Companion policy document:
 Current matrix-generation note (`generate_configs.py`, SET-B):
 - Matrix generation uses setup-level unified substitute defaults (no per-attack LR/batch alignment overrides).
 - SET-B1 (`resnet18`) substitute defaults: `batch=256`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
-- SET-A1 (`lenet_mnist`) substitute defaults: `batch=512`, `optimizer=sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+- SET-A1 (`lenet_mnist`) substitute defaults: `batch=512`, `optimizer=sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=200`, `patience=20`.
 
 ## 1) Inventory
 

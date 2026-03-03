@@ -53,7 +53,7 @@ Companion policy document:
 
 4. Matrix substitute policy is setup-level unified:
    - SET-B1 (`resnet18`) uses one substitute profile across attacks: `sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `batch=256`, `multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
-   - SET-A1 (`lenet_mnist`) uses one substitute profile across attacks: `sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `batch=512`, `multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+   - SET-A1 (`lenet_mnist`) uses one substitute profile across attacks: `sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `batch=512`, `multistep([0.5,0.75],gamma=0.1)`, `max_epochs=200`, `patience=20`.
    - Matrix generation does not apply per-attack LR/batch alignment overrides; attack-specific knobs remain only when semantic to the attack protocol.
 
 ## Evidence: key parity tests in this repo

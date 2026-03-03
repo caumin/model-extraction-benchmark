@@ -57,6 +57,8 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
         assert cfg["substitute"]["scheduler"]["name"] == "multistep"
         assert cfg["substitute"]["scheduler"]["milestones_ratio"] == [0.5, 0.75]
         assert float(cfg["substitute"]["scheduler"]["gamma"]) == pytest.approx(0.1)
+        assert int(cfg["substitute"]["max_epochs"]) == 1000
+        assert int(cfg["substitute"]["patience"]) == 100
 
     dfme = _load("SET-B1_dfme_soft_30m_seed0.yaml")
     _assert_set_b_uniform_substitute(dfme)
@@ -122,6 +124,8 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
     assert "batch_size" not in set_a_dfme["attack"]
     assert int(set_a_dfme["substitute"]["batch_size"]) == 512
     assert float(set_a_dfme["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
+    assert int(set_a_dfme["substitute"]["max_epochs"]) == 200
+    assert int(set_a_dfme["substitute"]["patience"]) == 20
 
     set_a_swift = _load("SET-A1_swiftthief_soft_30k_seed0.yaml")
     assert "batch_size" not in set_a_swift["attack"]
@@ -129,6 +133,8 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
     assert "kd_lr" not in set_a_swift["attack"]
     assert int(set_a_swift["substitute"]["batch_size"]) == 512
     assert float(set_a_swift["substitute"]["optimizer"]["lr"]) == pytest.approx(0.04)
+    assert int(set_a_swift["substitute"]["max_epochs"]) == 200
+    assert int(set_a_swift["substitute"]["patience"]) == 20
 
     set_a_inversenet = _load("SET-A1_inversenet_hard_30k_seed0.yaml")
     assert int(set_a_inversenet["attack"]["batch_size"]) == 128

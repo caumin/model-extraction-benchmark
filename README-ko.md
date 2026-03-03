@@ -48,7 +48,7 @@
 - **SET-A1 (`substitute.arch=lenet_mnist`)**:
   - 매트릭스 생성은 통합 heuristic substitute 기본값을 사용합니다.
   - 기본값: `optimizer=sgd`, `lr=0.04`, `momentum=0.9`, `weight_decay=5e-4`, `batch_size=512`.
-  - 스케줄/학습 길이: `multistep(milestones_ratio=[0.5,0.75], gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+  - 스케줄/학습 길이: `multistep(milestones_ratio=[0.5,0.75], gamma=0.1)`, `max_epochs=200`, `patience=20`.
 - 현재 매트릭스 정책은 공격별 LR/batch 정렬 override를 적용하지 않으며, 공격 고유 의미론적 파라미터만 유지합니다.
 
 ---

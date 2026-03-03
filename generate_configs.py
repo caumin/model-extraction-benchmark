@@ -275,13 +275,15 @@ def generate_configs(
     pool_iterations = 10
 
     # Unified simple substitute supervised training defaults.
-    # NOTE: these are heuristic benchmark defaults applied uniformly per setup.
+    # NOTE: these are heuristic benchmark defaults applied per setup.
     unified_substitute_lr = 0.04
+    set_a_unified_substitute_max_epochs = 200
+    set_a_unified_substitute_patience = 20
     # SET-B1 default profile.
     set_b_substitute_batch_size = 256
     set_b_unified_substitute_lr = 0.1
-    unified_substitute_max_epochs = 1000
-    unified_substitute_patience = 100
+    set_b_unified_substitute_max_epochs = 1000
+    set_b_unified_substitute_patience = 100
 
     # Synthetic/data-free attacks do not depend on the surrogate dataset.
     # Generate them once per victim. Prefer an ImageNet-based SET when available
@@ -362,9 +364,13 @@ def generate_configs(
                     
                     setup_substitute_batch_size = substitute_batch_size
                     target_lr = unified_substitute_lr
+                    setup_max_epochs = int(set_a_unified_substitute_max_epochs)
+                    setup_patience = int(set_a_unified_substitute_patience)
                     if str(setup.set_id).strip().upper() == "SET-B1":
                         setup_substitute_batch_size = int(set_b_substitute_batch_size)
                         target_lr = float(set_b_unified_substitute_lr)
+                        setup_max_epochs = int(set_b_unified_substitute_max_epochs)
+                        setup_patience = int(set_b_unified_substitute_patience)
 
                     # Default substitute config
                     substitute_config = {
@@ -382,8 +388,8 @@ def generate_configs(
                             "weight_decay": 5e-4,
                         },
                         "scheduler": {"name": "multistep", "milestones_ratio": [0.5, 0.75], "gamma": 0.1},
-                        "max_epochs": unified_substitute_max_epochs,
-                        "patience": unified_substitute_patience,
+                        "max_epochs": int(setup_max_epochs),
+                        "patience": int(setup_patience),
                     }
                     
                     # Merge override recursively (simple 1-level merge for optimizer)

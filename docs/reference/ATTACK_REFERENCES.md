@@ -39,7 +39,7 @@ Legend:
   - `mebench/attackers/HYPERPARAM_POLICY.md`
 - Matrix-generation policy (`generate_configs.py`) uses setup-level unified substitute defaults:
   - **SET-B1 (`substitute.arch=resnet18`)**: `batch=256`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
-  - **SET-A1 (`substitute.arch=lenet_mnist`)**: `batch=512`, `optimizer=sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+  - **SET-A1 (`substitute.arch=lenet_mnist`)**: `batch=512`, `optimizer=sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=200`, `patience=20`.
 - Matrix generation does not apply per-attack LR/batch alignment overrides; attack-specific fields are retained only for attack-semantic behavior.
 - "Official repository" can be listed as a provenance reference even when `Provenance` is `Paper-only`; direct code-port status is determined by the `Provenance` column.
 - Public GitHub links are provided so provenance remains verifiable even when local clone directories are excluded from release.

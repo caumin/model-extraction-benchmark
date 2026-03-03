@@ -49,7 +49,7 @@ Notes:
 - **SET-A1 (`substitute.arch=lenet_mnist`)**:
   - Matrix generation uses unified heuristic substitute defaults.
   - Defaults: `optimizer=sgd`, `lr=0.04`, `momentum=0.9`, `weight_decay=5e-4`, `batch_size=512`.
-  - Scheduler/training horizon: `multistep(milestones_ratio=[0.5,0.75], gamma=0.1)`, `max_epochs=1000`, `patience=100`.
+  - Scheduler/training horizon: `multistep(milestones_ratio=[0.5,0.75], gamma=0.1)`, `max_epochs=200`, `patience=20`.
 - Matrix policy does not apply per-attack LR/batch alignment overrides; attack-specific knobs remain only where they are semantic to the attack loop.
 
 ---
