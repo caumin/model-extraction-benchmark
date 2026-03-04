@@ -99,6 +99,37 @@ def test_load_victim_from_config_with_dropout_checkpoint():
 
         loaded_model = load_victim_from_config(config, device="cpu")
         assert loaded_model is not None
+    assert loaded_model.training is False
+
+
+def test_create_and_load_xie2019_checkpoint() -> None:
+    """Xie2019 architecture can be created and loaded from checkpoint."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = create_substitute(
+            arch="xie2019",
+            num_classes=17,
+            input_channels=3,
+            dropout_prob=0.6,
+        )
+        model.eval()
+
+        x = torch.randn(2, 3, 224, 224)
+        with torch.no_grad():
+            y = model(x)
+        assert y.shape == (2, 17)
+
+        checkpoint_path = Path(tmpdir) / "victim_xie2019.pt"
+        torch.save(model.state_dict(), checkpoint_path)
+
+        loaded_model = load_victim_checkpoint(
+            checkpoint_path=str(checkpoint_path),
+            arch="xie2019",
+            num_classes=17,
+            input_channels=3,
+            dropout_prob=0.6,
+            device="cpu",
+        )
+        assert loaded_model is not None
         assert loaded_model.training is False
 
 

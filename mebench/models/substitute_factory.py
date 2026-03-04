@@ -807,6 +807,50 @@ class LeNet5MNIST(nn.Module):
         return x
 
 
+class Xie2019(nn.Module):
+    """CNN architecture used in Sewer-ML related experiments."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        input_channels: int = 3,
+        dropout_prob: float = 0.6,
+    ) -> None:
+        super().__init__()
+        if int(input_channels) != 3:
+            raise ValueError(f"Xie2019 expects input_channels=3, got {input_channels}")
+
+        dropout = float(dropout_prob)
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=11, padding=5, stride=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1, stride=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1, stride=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((8, 8))
+        self.classifier = nn.Sequential(
+            nn.Linear(128 * 8 * 8, 1024),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(512, int(num_classes)),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
+
+
 def create_substitute(
     arch: str,
     num_classes: int,
@@ -927,6 +971,12 @@ def create_substitute(
             input_channels=input_channels, 
             dropout_prob=dropout_prob
         )
+    elif arch in {"xie2019", "xie_2019", "xie-2019"}:
+        return Xie2019(
+            num_classes=num_classes,
+            input_channels=input_channels,
+            dropout_prob=(dropout_prob if float(dropout_prob) > 0 else 0.6),
+        )
     else:
         raise ValueError(f"Unknown architecture: {arch}")
 
@@ -999,6 +1049,10 @@ def get_model_info(arch: str) -> Dict[str, Any]:
         },
         "activethief_cnn": {
             "num_params": 0, # TBD
+            "default_width": 1,
+        },
+        "xie2019": {
+            "num_params": 0,
             "default_width": 1,
         },
     }

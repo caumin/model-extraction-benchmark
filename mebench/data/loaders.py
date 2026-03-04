@@ -9,6 +9,7 @@ from typing import Dict, Any, Tuple, Optional
 import os
 import csv
 from pathlib import Path
+import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 import torchvision
@@ -34,6 +35,27 @@ GTSRB_MEAN = (0.3403, 0.3121, 0.3214)
 GTSRB_STD = (0.2724, 0.2608, 0.2669)
 BELGIUM_TSC_MEAN = GTSRB_MEAN
 BELGIUM_TSC_STD = GTSRB_STD
+SEWERML_MEAN = (0.523, 0.453, 0.345)
+SEWERML_STD = (0.210, 0.199, 0.154)
+SEWERML_LABELS = [
+    "RB",
+    "OB",
+    "PF",
+    "DE",
+    "FS",
+    "IS",
+    "RO",
+    "IN",
+    "AF",
+    "BE",
+    "FO",
+    "GR",
+    "PH",
+    "PB",
+    "OS",
+    "OP",
+    "OK",
+]
 
 
 def _rgb_to_grayscale_stats(
@@ -101,6 +123,7 @@ def get_surrogate_standard_normalization(
         "cifar100": (CIFAR100_MEAN, CIFAR100_STD),
         "gtsrb": (GTSRB_MEAN, GTSRB_STD),
         "belgiumtsc": (BELGIUM_TSC_MEAN, BELGIUM_TSC_STD),
+        "sewerml": (SEWERML_MEAN, SEWERML_STD),
         "imagenet": (IMAGENET_MEAN, IMAGENET_STD),
         "ilsvrc": (IMAGENET_MEAN, IMAGENET_STD),
         "ilsvrc2012": (IMAGENET_MEAN, IMAGENET_STD),
@@ -289,6 +312,76 @@ class GTSRBCSVDataset(Dataset):
         return img, int(label)
 
 
+def _resolve_sewerml_roots(
+    ann_root: Optional[str] = None,
+    img_root: Optional[str] = None,
+) -> Tuple[Path, Path]:
+    ann = str(ann_root or os.getenv("SEWERML_ANN_ROOT") or "./data/SewerML/annotations")
+    img = str(img_root or os.getenv("SEWERML_DATA_ROOT") or "./data/SewerML/Data")
+    ann_path = Path(ann)
+    img_path = Path(img)
+    return ann_path, img_path
+
+
+def _resolve_sewerml_csv_path(ann_root: Path, split: str) -> Path:
+    split_name = str(split).strip()
+    candidates = [
+        ann_root / f"{split_name}13.csv",
+        ann_root / f"SewerML_{split_name}.csv",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "SewerML annotation CSV not found. Checked: "
+        + ", ".join(str(c) for c in candidates)
+    )
+
+
+class SewerMLDataset(Dataset):
+    """Sewer-ML dataset adapter based on official annotation format.
+
+    The benchmark pipeline is single-label for ground-truth accuracy metrics.
+    We therefore derive a primary label by argmax over the 17-dim multilabel
+    vector. This keeps compatibility with existing metrics while preserving
+    class-space alignment with the victim/substitute heads.
+    """
+
+    def __init__(
+        self,
+        ann_root: str,
+        img_root: str,
+        split: str,
+        transform: Optional[transforms.Compose] = None,
+    ) -> None:
+        self.ann_root = Path(ann_root)
+        self.img_root = Path(img_root)
+        self.split = str(split)
+        self.transform = transform
+        self.classes = list(SEWERML_LABELS)
+
+        csv_path = _resolve_sewerml_csv_path(self.ann_root, self.split)
+        required = ["Filename", *SEWERML_LABELS]
+        gt = pd.read_csv(csv_path, sep=",", encoding="utf-8", usecols=required)
+        self.img_paths = [str(v) for v in gt["Filename"].values]
+        labels_raw = gt[SEWERML_LABELS].values.astype("float32")
+        labels_tensor = torch.from_numpy(labels_raw)
+        self.targets = torch.argmax(labels_tensor, dim=1).tolist()
+
+    def __len__(self) -> int:
+        return len(self.img_paths)
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
+        rel_path = str(self.img_paths[int(index)])
+        img_path = self.img_root / rel_path
+        if not img_path.exists():
+            raise FileNotFoundError(f"SewerML image missing: {img_path}")
+        img = Image.open(img_path).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, int(self.targets[int(index)])
+
+
 class SeedDataset(Dataset):
     """In-domain seed dataset (default 100 images)."""
 
@@ -302,6 +395,9 @@ class SeedDataset(Dataset):
         output_size: Optional[Tuple[int, int]] = None,
         output_channels: Optional[int] = None,
         emnist_split: str = "balanced",
+        sewerml_ann_root: Optional[str] = None,
+        sewerml_data_root: Optional[str] = None,
+        sewerml_split: Optional[str] = None,
     ):
         """Initialize seed dataset.
 
@@ -394,6 +490,21 @@ class SeedDataset(Dataset):
             full_dataset = BelgiumTSCDataset(
                 root="./data",
                 train=bool(train_split),
+                transform=transform,
+            )
+        elif name == "SewerML":
+            size = output_size if output_size is not None else (224, 224)
+            tf = [transforms.Resize(size), transforms.ToTensor(), transforms.Normalize(SEWERML_MEAN, SEWERML_STD)]
+            transform = transforms.Compose(tf)
+            ann_root, data_root = _resolve_sewerml_roots(
+                ann_root=sewerml_ann_root,
+                img_root=sewerml_data_root,
+            )
+            split = str(sewerml_split or ("Train" if train_split else "Test"))
+            full_dataset = SewerMLDataset(
+                ann_root=str(ann_root),
+                img_root=str(data_root),
+                split=split,
                 transform=transform,
             )
         else:
@@ -796,6 +907,20 @@ def get_test_dataloader(
             train=False,
             transform=transform,
         )
+    elif name == "SewerML":
+        size = input_size if input_size is not None else (224, 224)
+        transform = transforms.Compose([
+            transforms.Resize(size),
+            transforms.ToTensor(),
+            transforms.Normalize(SEWERML_MEAN, SEWERML_STD),
+        ])
+        ann_root, data_root = _resolve_sewerml_roots()
+        dataset = SewerMLDataset(
+            ann_root=str(ann_root),
+            img_root=str(data_root),
+            split="Test",
+            transform=transform,
+        )
     else:
         raise ValueError(f"Unknown dataset: {name}")
 
@@ -874,6 +999,9 @@ def create_dataloader(
             output_size=desired_resize,
             output_channels=output_channels,
             emnist_split=str(config.get("emnist_split", "balanced")),
+            sewerml_ann_root=config.get("sewerml_ann_root"),
+            sewerml_data_root=config.get("sewerml_data_root"),
+            sewerml_split=config.get("sewerml_split"),
         )
     else:
         raise ValueError(f"Unknown data_mode: {data_mode}")

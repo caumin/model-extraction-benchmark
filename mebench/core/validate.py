@@ -45,7 +45,7 @@ def validate_config(config: Dict[str, Any]) -> None:
     }
     if attack in data_free_attacks and data_mode != "data_free":
         raise ValueError(f"{attack.upper()} requires data_free mode")
-    if data_mode in {"seed", "surrogate"} and seed_name not in {"CIFAR10", "MNIST", "EMNIST", "FashionMNIST", "SVHN", "GTSRB"}:
+    if data_mode in {"seed", "surrogate"} and seed_name not in {"CIFAR10", "MNIST", "EMNIST", "FashionMNIST", "SVHN", "GTSRB", "BelgiumTSC", "SewerML"}:
         raise ValueError(f"Dataset '{seed_name}' not supported for {data_mode} mode")
 
     if data_mode == "surrogate":

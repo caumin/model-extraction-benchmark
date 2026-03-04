@@ -17,6 +17,8 @@ def _generate_matrix(out_dir: Path) -> int:
         set_a_synthetic_budget=30_000_000,
         set_b_pool_budget=30_000,
         set_b_synthetic_budget=30_000_000,
+        set_c_pool_budget=30_000,
+        set_c_synthetic_budget=30_000_000,
         include_both_hard=False,
         clean=True,
         pool_num_workers=0,
@@ -149,7 +151,7 @@ def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
     out_dir = tmp_path / "cfg"
     count = _generate_matrix(out_dir)
 
-    assert count == 32
+    assert count == 48
     assert not (out_dir / "SET-A1_maze_paper_soft_30m_seed0.yaml").exists()
     assert not (out_dir / "SET-B1_maze_paper_soft_30m_seed0.yaml").exists()
     assert not (out_dir / "SET-A1_dfms_paper_hard_30m_seed0.yaml").exists()
@@ -161,6 +163,8 @@ def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
     assert (out_dir / "SET-B1_ds_soft_30m_seed0.yaml").exists()
     assert (out_dir / "SET-A1_marich_hard_30k_seed0.yaml").exists()
     assert (out_dir / "SET-B1_marich_hard_30k_seed0.yaml").exists()
+    assert (out_dir / "SET-C1_dfme_soft_30m_seed0.yaml").exists()
+    assert (out_dir / "SET-C1_random_soft_30k_seed0.yaml").exists()
 
     set_b_cfg_path = out_dir / "SET-B1_random_soft_30k_seed0.yaml"
     set_b_cfg = yaml.safe_load(set_b_cfg_path.read_text(encoding="utf-8"))
@@ -170,6 +174,13 @@ def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
     set_a_cfg_path = out_dir / "SET-A1_random_soft_30k_seed0.yaml"
     set_a_cfg = yaml.safe_load(set_a_cfg_path.read_text(encoding="utf-8"))
     assert int(set_a_cfg["dataset"]["surrogate_max_samples"]) == 50_000
+
+    set_c_cfg_path = out_dir / "SET-C1_random_soft_30k_seed0.yaml"
+    set_c_cfg = yaml.safe_load(set_c_cfg_path.read_text(encoding="utf-8"))
+    assert set_c_cfg["victim"]["victim_id"] == "sewerml_xie2019_multilabel_e2e"
+    assert set_c_cfg["victim"]["arch"] == "xie2019"
+    assert set_c_cfg["victim"]["checkpoint_ref"] == "runs/victims/xie2019_multilabel-e2e-version_1.pth"
+    assert int(set_c_cfg["dataset"]["surrogate_max_samples"]) == 100_000
 
 
 def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) -> None:

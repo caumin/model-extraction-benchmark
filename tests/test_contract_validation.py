@@ -87,6 +87,18 @@ def test_valid_config_passes():
     validate_config(config)
 
 
+def test_valid_sewerml_config_passes() -> None:
+    config = {
+        "attack": {"name": "random", "output_mode": "soft_prob"},
+        "dataset": {"data_mode": "surrogate", "name": "SewerML", "surrogate_name": "ImageNet"},
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0},
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000, 100000]},
+    }
+
+    validate_config(config)
+
+
 def test_benchmark_policy_allows_missing_preprocess_declaration():
     """Benchmark inference policy no longer requires preprocess declaration."""
     config = {

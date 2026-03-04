@@ -108,6 +108,8 @@ def generate_configs(
     set_a_synthetic_budget: int,
     set_b_pool_budget: int,
     set_b_synthetic_budget: int,
+    set_c_pool_budget: int,
+    set_c_synthetic_budget: int,
     include_both_hard: bool,
     clean: bool,
     pool_num_workers: int,
@@ -125,6 +127,10 @@ def generate_configs(
         "SET-B1": {
             "pool": int(set_b_pool_budget),
             "synthetic": int(set_b_synthetic_budget),
+        },
+        "SET-C1": {
+            "pool": int(set_c_pool_budget),
+            "synthetic": int(set_c_synthetic_budget),
         },
     }
 
@@ -151,6 +157,16 @@ def generate_configs(
             channels=3,
             size=32,
             num_classes=10,
+        ),
+        Setup(
+            set_id="SET-C1",
+            victim_dataset="SewerML",
+            victim_arch="xie2019",
+            surrogate_name="ImageNet",
+            substitute_arch="xie2019",
+            channels=3,
+            size=224,
+            num_classes=17,
         ),
     ]
 
@@ -366,7 +382,8 @@ def generate_configs(
                     target_lr = unified_substitute_lr
                     setup_max_epochs = int(set_a_unified_substitute_max_epochs)
                     setup_patience = int(set_a_unified_substitute_patience)
-                    if str(setup.set_id).strip().upper() == "SET-B1":
+                    setup_set_id = str(setup.set_id).strip().upper()
+                    if setup_set_id in {"SET-B1", "SET-C1"}:
                         setup_substitute_batch_size = int(set_b_substitute_batch_size)
                         target_lr = float(set_b_unified_substitute_lr)
                         setup_max_epochs = int(set_b_unified_substitute_max_epochs)
@@ -421,6 +438,18 @@ def generate_configs(
                                 "width_mult": 1,
                                 "official_preprocess_profile": "dfme_cifar10_test",
                                 "checkpoint_ref": "runs/victims/cifar10-resnet34_8x.pt",
+                            }
+                        )
+                    elif setup.set_id == "SET-C1":
+                        victim_config.update(
+                            {
+                                "victim_id": "sewerml_xie2019_multilabel_e2e",
+                                "arch": "xie2019",
+                                "num_classes": 17,
+                                "channels": 3,
+                                "input_size": [224, 224],
+                                "checkpoint_ref": "runs/victims/xie2019_multilabel-e2e-version_1.pth",
+                                "inference_policy": "benchmark",
                             }
                         )
 
@@ -484,7 +513,8 @@ def generate_configs(
                             return
                         # ImageNet surrogate (ImageFolder format): use set-specific deterministic subset size.
                         # Default local path is configurable via --imagenet-root.
-                        surrogate_max_samples = 100_000 if str(setup.set_id).strip().upper() == "SET-B1" else 50_000
+                        setup_id_upper = str(setup.set_id).strip().upper()
+                        surrogate_max_samples = 100_000 if setup_id_upper in {"SET-B1", "SET-C1"} else 50_000
                         d.update(
                             {
                                 "surrogate_root": resolved_imagenet_root,
@@ -1320,6 +1350,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--set-a-synthetic-budget", type=int, default=10_000_000)
     parser.add_argument("--set-b-pool-budget", type=int, default=20_000)
     parser.add_argument("--set-b-synthetic-budget", type=int, default=20_000_000)
+    parser.add_argument("--set-c-pool-budget", type=int, default=20_000)
+    parser.add_argument("--set-c-synthetic-budget", type=int, default=20_000_000)
     parser.add_argument(
         "--imagenet-root",
         type=str,
@@ -1373,6 +1405,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         set_a_synthetic_budget=int(args.set_a_synthetic_budget),
         set_b_pool_budget=int(args.set_b_pool_budget),
         set_b_synthetic_budget=int(args.set_b_synthetic_budget),
+        set_c_pool_budget=int(args.set_c_pool_budget),
+        set_c_synthetic_budget=int(args.set_c_synthetic_budget),
         include_both_hard=bool(args.include_both_hard),
         clean=(not args.no_clean),
         pool_num_workers=int(args.pool_num_workers),
