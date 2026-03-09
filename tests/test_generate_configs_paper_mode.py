@@ -262,6 +262,7 @@ def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) ->
     assert ds_cfg["attack"]["generator_loss"] == "l1"
     assert float(ds_cfg["attack"]["student_lr"]) == 0.3
     assert float(ds_cfg["attack"]["generator_lr"]) == 1e-4
+    assert ds_cfg["attack"]["strict_iteration_budget"] is True
 
     assert int(dfms_cfg["attack"]["max_budget"]) == 8_000_000
     assert dfms_cfg["attack"]["use_official_stages"] is True

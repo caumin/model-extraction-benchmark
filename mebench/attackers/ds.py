@@ -6,6 +6,7 @@ Official reference:
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Optional
 
 import torch
@@ -19,17 +20,59 @@ from mebench.models.gan import DFMEGenerator
 from mebench.models.substitute_factory import create_substitute
 
 
-class _DualStudentEvalWrapper(nn.Module):
-    """Expose a single-model interface via soft-vote over students."""
+class _MovingAverageModel(nn.Module):
+    """Train/test model pair with official-style EMA updates."""
 
-    def __init__(self, students: list[nn.Module]) -> None:
+    def __init__(self, model: nn.Module, momentum: float) -> None:
+        super().__init__()
+        self.train_model = model
+        self.momentum = float(momentum)
+        self.test_model: Optional[nn.Module]
+        if self.momentum > 0.0:
+            self.test_model = copy.deepcopy(model)
+            self.test_model.eval()
+        else:
+            self.test_model = None
+        self._first_step = True
+
+    def forward(self, x: torch.Tensor, *, test: bool = False) -> torch.Tensor:
+        if test and self.test_model is not None and not self._first_step:
+            return self.test_model(x)
+        return self.train_model(x)
+
+    def step(self) -> None:
+        if self.test_model is None:
+            return
+        with torch.no_grad():
+            momentum = 0.0 if self._first_step else self.momentum
+            self._first_step = False
+            for train_param, test_param in zip(
+                self.train_model.parameters(),
+                self.test_model.parameters(),
+            ):
+                test_param.copy_(momentum * test_param + (1.0 - momentum) * train_param)
+            for train_buffer, test_buffer in zip(
+                self.train_model.buffers(),
+                self.test_model.buffers(),
+            ):
+                test_buffer.copy_(momentum * test_buffer + (1.0 - momentum) * train_buffer)
+
+
+class _DualStudentEvalWrapper(nn.Module):
+    """Expose official DS test-time student combine semantics."""
+
+    def __init__(self, students: list[_MovingAverageModel], combine_mode: str) -> None:
         super().__init__()
         self.students = nn.ModuleList(students)
+        self.combine_mode = str(combine_mode)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        probs = [F.softmax(model(x), dim=1) for model in self.students]
-        mean_probs = torch.stack(probs, dim=0).mean(dim=0).clamp_min(1e-10)
-        return torch.log(mean_probs)
+        logits = [model(x, test=True) for model in self.students]
+        if self.combine_mode == "first":
+            return logits[0]
+        if self.combine_mode == "mean":
+            return torch.stack(logits, dim=0).mean(dim=0)
+        raise ValueError(f"Unsupported combine_mode: {self.combine_mode}")
 
 
 class DualStudents(AttackRunner):
@@ -55,6 +98,13 @@ class DualStudents(AttackRunner):
 
         self.generator_lr = float(config.get("generator_lr", config.get("lr_G", 1e-4)))
         self.student_lr = float(config.get("student_lr", config.get("lr_S", 0.3)))
+        self.combine_student_outputs = str(config.get("combine_student_outputs", "first")).strip().lower()
+        if self.combine_student_outputs not in {"first", "mean"}:
+            raise ValueError(
+                "ds combine_student_outputs must be one of {'first', 'mean'}"
+            )
+        self.student_momentum = float(config.get("student_momentum", 0.9))
+        self.generator_momentum = float(config.get("generator_momentum", 0.9))
 
         self.output_mode = str(config.get("output_mode", "soft_prob")).strip().lower()
         self.loss_mode = str(config.get("loss", "")).strip().lower()
@@ -82,10 +132,11 @@ class DualStudents(AttackRunner):
         self._periodic_eval_done: set[int] = set()
 
         self.log_interval = int(config.get("log_interval", 30))
-        self.strict_iteration_budget = bool(config.get("strict_iteration_budget", False))
+        self.strict_iteration_budget = bool(config.get("strict_iteration_budget", True))
 
-        self.generator: Optional[nn.Module] = None
+        self.generator: Optional[_MovingAverageModel] = None
         self.students: list[nn.Module] = []
+        self.student_models: list[_MovingAverageModel] = []
         self.g_opt: Optional[torch.optim.Optimizer] = None
         self.s_opts: list[torch.optim.Optimizer] = []
         self._eval_substitute: Optional[nn.Module] = None
@@ -107,12 +158,13 @@ class DualStudents(AttackRunner):
         channels = int(input_shape[0])
         image_size = int(input_shape[1])
 
-        self.generator = DFMEGenerator(
+        generator = DFMEGenerator(
             noise_dim=self.noise_dim,
             output_channels=channels,
             output_size=image_size,
         ).to(device)
-        self.g_opt = torch.optim.Adam(self.generator.parameters(), lr=self.generator_lr)
+        self.generator = _MovingAverageModel(generator, self.generator_momentum).to(device)
+        self.g_opt = torch.optim.Adam(self.generator.train_model.parameters(), lr=self.generator_lr)
 
         sub_config = state.metadata.get("substitute_config", {})
         arch = str(sub_config.get("arch") or self.config.get("student_arch", "resnet18"))
@@ -120,6 +172,7 @@ class DualStudents(AttackRunner):
         dropout_prob = float(sub_config.get("dropout_prob", 0.0))
 
         self.students = []
+        self.student_models = []
         self.s_opts = []
         for _ in range(self.num_students):
             model = create_substitute(
@@ -129,10 +182,12 @@ class DualStudents(AttackRunner):
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
             ).to(device)
-            self.students.append(model)
+            wrapped = _MovingAverageModel(model, self.student_momentum).to(device)
+            self.student_models.append(wrapped)
+            self.students.append(wrapped.train_model)
             self.s_opts.append(
                 torch.optim.SGD(
-                    model.parameters(),
+                    wrapped.train_model.parameters(),
                     lr=self.student_lr,
                     momentum=0.9,
                     weight_decay=5e-4,
@@ -154,7 +209,10 @@ class DualStudents(AttackRunner):
 
     def _get_substitute_for_eval(self) -> nn.Module:
         if self._eval_substitute is None:
-            self._eval_substitute = _DualStudentEvalWrapper(self.students)
+            self._eval_substitute = _DualStudentEvalWrapper(
+                self.student_models,
+                combine_mode=self.combine_student_outputs,
+            )
         return self._eval_substitute
 
     def _publish_substitute(self) -> None:
@@ -295,9 +353,6 @@ class DualStudents(AttackRunner):
             )
             target = self._format_teacher_target(oracle_output.y.to(device))
 
-            self._publish_substitute()
-            self._maybe_periodic_eval(device)
-
             was_training = []
             if batch < 2:
                 for model in self.students:
@@ -318,11 +373,22 @@ class DualStudents(AttackRunner):
                     if was_training[idx]:
                         model.train()
 
+            self._publish_substitute()
+            self._maybe_periodic_eval(device)
+
             total_loss += student_loss_sum / float(max(1, len(self.students)))
             updates += 1
             pbar.update(int(batch))
 
         return total_loss / max(1, updates)
+
+    def _maybe_step_moving_averages(self, iter_idx: int) -> None:
+        if iter_idx % 10 != 9:
+            return
+        for model in self.student_models:
+            model.step()
+        if self.generator is not None:
+            self.generator.step()
 
     def run(self, ctx: BenchmarkContext) -> None:
         device = str(self.state.metadata.get("device", "cpu"))
@@ -350,6 +416,7 @@ class DualStudents(AttackRunner):
 
             g_loss = self._generator_step(device)
             s_loss = self._student_step(ctx, device, iter_idx, pbar)
+            self._maybe_step_moving_averages(iter_idx)
 
             self._publish_substitute()
             self._maybe_periodic_eval(device)

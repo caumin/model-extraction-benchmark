@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from mebench.attackers.copycatcnn import CopycatCNN
+from mebench.attackers.ds import DualStudents, _DualStudentEvalWrapper, _MovingAverageModel
 from mebench.attackers.disguide import DisGUIDE
 from mebench.attackers.inversenet import InverseNet
 from mebench.core.state import BenchmarkState
@@ -197,3 +198,79 @@ def test_disguide_hard_mode_requires_hl_loss() -> None:
             },
             state,
         )
+
+
+class _ConstantLogits(torch.nn.Module):
+    def __init__(self, logits: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("_logits", logits)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._logits.expand(x.size(0), -1)
+
+
+def test_ds_defaults_follow_official_eval_and_budget_semantics() -> None:
+    state = _make_state(output_mode="soft_prob")
+    attack = DualStudents({"batch_size": 2, "noise_dim": 16}, state)
+
+    assert attack.combine_student_outputs == "first"
+    assert attack.strict_iteration_budget is True
+    assert attack.student_momentum == pytest.approx(0.9)
+    assert attack.generator_momentum == pytest.approx(0.9)
+
+
+def test_ds_eval_wrapper_matches_official_combine_modes() -> None:
+    x = torch.randn(2, 3, 4, 4)
+    first_student = _MovingAverageModel(
+        _ConstantLogits(torch.tensor([[3.0, 1.0]], dtype=torch.float32)),
+        momentum=0.0,
+    )
+    second_student = _MovingAverageModel(
+        _ConstantLogits(torch.tensor([[1.0, 5.0]], dtype=torch.float32)),
+        momentum=0.0,
+    )
+
+    first_wrapper = _DualStudentEvalWrapper([first_student, second_student], combine_mode="first")
+    first_logits = first_wrapper(x)
+    assert torch.allclose(first_logits, torch.tensor([[3.0, 1.0], [3.0, 1.0]]))
+
+    mean_wrapper = _DualStudentEvalWrapper([first_student, second_student], combine_mode="mean")
+    mean_logits = mean_wrapper(x)
+    assert torch.allclose(mean_logits, torch.tensor([[2.0, 3.0], [2.0, 3.0]]))
+
+
+def test_ds_moving_average_step_matches_official_update_rule() -> None:
+    base = torch.nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        base.weight.fill_(1.0)
+
+    wrapped = _MovingAverageModel(base, momentum=0.9)
+    assert wrapped.test_model is not None
+
+    with torch.no_grad():
+        wrapped.train_model.weight.fill_(2.0)
+    wrapped.step()
+    assert torch.allclose(wrapped.test_model.weight, torch.full((2, 2), 2.0))
+
+    with torch.no_grad():
+        wrapped.train_model.weight.fill_(4.0)
+    wrapped.step()
+    assert torch.allclose(wrapped.test_model.weight, torch.full((2, 2), 2.2))
+
+
+def test_ds_moving_average_uses_train_model_until_first_sync() -> None:
+    base = torch.nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        base.weight.fill_(1.0)
+
+    wrapped = _MovingAverageModel(base, momentum=0.9)
+    x = torch.ones(1, 2)
+
+    with torch.no_grad():
+        wrapped.train_model.weight.fill_(3.0)
+    before_sync = wrapped(x, test=True)
+    assert torch.allclose(before_sync, torch.full((1, 2), 6.0))
+
+    wrapped.step()
+    after_sync = wrapped(x, test=True)
+    assert torch.allclose(after_sync, torch.full((1, 2), 6.0))
