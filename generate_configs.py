@@ -491,6 +491,8 @@ def generate_configs(
 
                     if setup.set_id == "SET-C1":
                         cfg["dataset"]["sewerml_label_mode"] = "binary"
+                        cfg["dataset"]["sewerml_ann_root"] = "D:/Sewer-ML"
+                        cfg["dataset"]["sewerml_data_root"] = "D:/Sewer-ML"
 
                     if attack.kind == "pool":
                         cfg["attack"].setdefault("initial_seed_ratio", pool_initial_seed_ratio)
