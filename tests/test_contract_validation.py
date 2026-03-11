@@ -99,6 +99,127 @@ def test_valid_sewerml_config_passes() -> None:
     validate_config(config)
 
 
+def test_valid_sewerml_config_with_binary_label_mode() -> None:
+    config = {
+        "attack": {"name": "random", "output_mode": "soft_prob"},
+        "dataset": {
+            "data_mode": "surrogate",
+            "name": "SewerML",
+            "surrogate_name": "ImageNet",
+            "sewerml_label_mode": "binary",
+        },
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0, "num_classes": 1},
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000, 100000]},
+    }
+
+    validate_config(config)
+
+
+def test_sewerml_binary_mode_requires_single_logit_victim() -> None:
+    config = {
+        "attack": {"name": "random", "output_mode": "soft_prob"},
+        "dataset": {
+            "data_mode": "surrogate",
+            "name": "SewerML",
+            "surrogate_name": "ImageNet",
+            "sewerml_label_mode": "binary",
+        },
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0, "num_classes": 2},
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000, 100000]},
+    }
+
+    with pytest.raises(ValueError, match="victim.num_classes=1"):
+        validate_config(config)
+
+
+def test_cloudleak_allowed_for_single_logit_binary() -> None:
+    config = {
+        "attack": {"name": "cloudleak", "output_mode": "soft_prob"},
+        "dataset": {"data_mode": "surrogate", "name": "SewerML", "surrogate_name": "ImageNet", "sewerml_label_mode": "binary"},
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0, "num_classes": 1},
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000]},
+    }
+
+    validate_config(config)
+
+
+@pytest.mark.parametrize(
+    ("attack_name", "output_mode"),
+    [
+        ("copycatcnn", "hard_top1"),
+        ("blackbox_dissector", "hard_top1"),
+        ("marich", "hard_top1"),
+        ("dfme", "soft_prob"),
+        ("ds", "soft_prob"),
+        ("maze", "soft_prob"),
+        ("es", "soft_prob"),
+        ("disguide", "soft_prob"),
+        ("dfms", "hard_top1"),
+        ("game", "soft_prob"),
+        ("inversenet", "hard_top1"),
+        ("blackbox_ripper", "soft_prob"),
+        ("swiftthief", "soft_prob"),
+    ],
+)
+def test_single_logit_binary_supported_attacks_validate(attack_name: str, output_mode: str) -> None:
+    data_mode = "data_free" if attack_name in {"dfme", "ds", "maze", "es", "disguide", "dfms", "game", "blackbox_ripper"} else "surrogate"
+    config = {
+        "attack": {"name": attack_name, "output_mode": output_mode},
+        "dataset": {
+            "data_mode": data_mode,
+            "name": "SewerML",
+            "surrogate_name": "ImageNet",
+            "sewerml_label_mode": "binary",
+        },
+        "victim": {"output_mode": output_mode, "temperature": 1.0, "num_classes": 1},
+        "substitute": {"max_epochs": 10, "patience": 2},
+        "budget": {"max_budget": 1000, "checkpoints": [1000]},
+    }
+
+    if attack_name == "blackbox_ripper":
+        config["attack"]["generator_checkpoint"] = "dummy.ckpt"
+
+    validate_config(config)
+
+
+def test_invalid_sewerml_label_mode_rejected() -> None:
+    config = {
+        "attack": {"name": "random", "output_mode": "soft_prob"},
+        "dataset": {
+            "data_mode": "surrogate",
+            "name": "SewerML",
+            "surrogate_name": "ImageNet",
+            "sewerml_label_mode": "not_a_mode",
+        },
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0},
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000, 100000]},
+    }
+
+    with pytest.raises(ValueError, match="Unsupported Sewerml label mode"):
+        validate_config(config)
+
+
+def test_sewerml_label_mode_is_ignored_for_non_sewerml_dataset() -> None:
+    """Non-SewerML datasets should ignore SewerML-specific keys."""
+    config = {
+        "attack": {"name": "random", "output_mode": "soft_prob"},
+        "dataset": {
+            "data_mode": "seed",
+            "seed_name": "MNIST",
+            "sewerml_label_mode": "not_a_mode",  # should not be validated here
+        },
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0},
+        "substitute": {"max_epochs": 200, "patience": 20},
+        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000, 100000]},
+    }
+
+    validate_config(config)
+
+
 def test_benchmark_policy_allows_missing_preprocess_declaration():
     """Benchmark inference policy no longer requires preprocess declaration."""
     config = {

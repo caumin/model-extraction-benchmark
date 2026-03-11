@@ -15,7 +15,8 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DCGANGenerator, ACGANGenerator
 from mebench.models.substitute_factory import create_substitute
-from mebench.utils.scaling import clamp_unit
+from mebench.utils.binary import binary_bce_loss, is_single_logit_binary_num_classes
+from mebench.utils.scaling import clamp_unit, tanh_to_unit
 
 
 class ESAttack(AttackRunner):
@@ -33,6 +34,13 @@ class ESAttack(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
+        self.semantic_num_classes = 2 if self.is_single_logit_binary else self.num_classes
+        self.output_mode = str(
+            config.get("output_mode", state.metadata.get("victim_config", {}).get("output_mode", "soft_prob"))
+        ).strip().lower()
+        if self.output_mode not in {"soft_prob", "hard_top1"}:
+            raise ValueError(f"Invalid output_mode for ESAttack: {self.output_mode!r}")
         self.base_channels = int(config.get("base_channels", 64))
         self.synthesis_mode = config.get("synthesis_mode", "dnn_syn")
         self.opt_steps = int(config.get("opt_steps", 30))
@@ -119,7 +127,7 @@ class ESAttack(AttackRunner):
         z = torch.randn(k, self.noise_dim, device=device)
         with torch.no_grad():
             if self.use_class_conditional:
-                y_g = torch.randint(0, self.num_classes, (k,), device=device)
+                y_g = torch.randint(0, self.semantic_num_classes, (k,), device=device)
                 x_raw = self.generator(z, y_g)
                 meta = {
                     "synthetic": True,
@@ -146,15 +154,21 @@ class ESAttack(AttackRunner):
 
         device = x_query.device
         if oracle_output.kind == "soft_prob":
-            victim_probs = oracle_output.y.to(device)
+            victim_targets = oracle_output.y.to(device)
+            if not self.is_single_logit_binary:
+                victim_targets = torch.clamp(victim_targets, min=1e-10)
+                victim_targets = victim_targets / victim_targets.sum(dim=1, keepdim=True)
         else:
-            victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
+            if self.is_single_logit_binary:
+                victim_targets = oracle_output.y.to(device).float().unsqueeze(1)
+            else:
+                victim_targets = oracle_output.y.to(device).long()
 
         # [CRITICAL FIX] Dataset accumulation - store queries in replay buffer
         self.replay_buffer_x.append(x_query.cpu())
-        self.replay_buffer_y.append(victim_probs.cpu())
+        self.replay_buffer_y.append(victim_targets.cpu())
 
-        self._train_student(x_query, victim_probs)
+        self._train_student(x_query, victim_targets)
 
         if self.synthesis_mode == "dnn_syn" and self.generator is not None:
             self._train_generator(meta.get("z"), meta.get("y_g"), device)
@@ -203,7 +217,7 @@ class ESAttack(AttackRunner):
                         noise_dim=self.noise_dim,
                         output_channels=int(self.config.get("output_channels", input_shape[0])),
                         base_channels=self.base_channels,
-                        num_classes=self.num_classes,
+                        num_classes=self.semantic_num_classes,
                         output_size=int(input_shape[1]),
                         dropout_prob=0.25,  # Paper-mandated dropout
                     ).to(device)
@@ -272,15 +286,15 @@ class ESAttack(AttackRunner):
             )
             
             for batch_x, batch_y in loader:
-                # batch_x/y are already on device (from x/victim_probs) if x was on device
+                # batch_x/y are already on device (from x/victim_targets) if x was on device
                 # But DataLoader might move them to CPU if num_workers>0 and tensors were on GPU (error cause).
                 # With num_workers=0 and tensors on GPU, they stay on GPU (or we ensure to move them).
-                
-                # If x was on GPU, TensorDataset keeps it there. 
+
+                # If x was on GPU, TensorDataset keeps it there.
                 # num_workers=0 just slices it.
-                
+
                 self.student_optimizer.zero_grad()
-                
+
                 if self.use_opt_augment and self.synthesis_mode == "opt_syn":
                      # Apply augmentation to input x which is in [0, 1]
                      x_aug = augmenter(batch_x)
@@ -291,14 +305,23 @@ class ESAttack(AttackRunner):
                      x_input = batch_x
 
                 logits = self.student(_norm(x_input))
-                # [CRITICAL FIX] Replace KL Divergence with Cross Entropy (Paper Equation 2)
-                # L_CE(f_s(x), f_v(x)) - minimize cross entropy between student and victim outputs
-                loss = F.cross_entropy(logits, batch_y)
+                if self.is_single_logit_binary:
+                    loss = binary_bce_loss(logits, batch_y)
+                elif self.output_mode == "soft_prob":
+                    target = batch_y
+                    if target.ndim != 2:
+                        target = F.one_hot(target.long(), num_classes=self.num_classes).float()
+                    target = torch.clamp(target, min=1e-10)
+                    target = target / target.sum(dim=1, keepdim=True)
+                    loss = F.kl_div(F.log_softmax(logits, dim=1), target, reduction="batchmean")
+                else:
+                    target = batch_y
+                    if target.ndim != 1:
+                        target = target.argmax(dim=1)
+                    loss = F.cross_entropy(logits, target.long())
                 loss.backward()
                 self.student_optimizer.step()
                 epoch_loss += loss.item()
-            
-            sub_pbar.set_postfix({"Loss": f"{epoch_loss/len(loader):.4f}"})
 
         self.logger.info(f"ESAttack substitute trained at step {self.state.attack_state['step']}")
         self._evaluate_current_substitute(self.student, x.device)
@@ -329,7 +352,7 @@ class ESAttack(AttackRunner):
             # Generate labels if needed
             if self.use_class_conditional:
                 if y_g_cpu is None:
-                    y = torch.randint(0, self.num_classes, (z1.size(0),), device=device)
+                    y = torch.randint(0, self.semantic_num_classes, (z1.size(0),), device=device)
                 else:
                     y = y_g_cpu.to(device)
             else:
@@ -376,13 +399,20 @@ class ESAttack(AttackRunner):
                 # [P0 FIX] Paper Equation 6 mandates Cross-Entropy, NOT KL Divergence
                 # ACGAN style: maximize prob of specific class y
                 # We want to MINIMIZE CrossEntropy(S(G(z)), y)
-                l_img = F.cross_entropy(logits_1, y)
+                if self.is_single_logit_binary:
+                    l_img = binary_bce_loss(logits_1, y.float().unsqueeze(1))
+                else:
+                    l_img = F.cross_entropy(logits_1, y)
             else:
                 # Unconditional: Maximize confidence of ANY class (entropy minimization)
                 # Or just maximize max-prob?
                 # Paper says "maximize confidence". So minimize entropy or minimize -max(prob).
-                probs = F.softmax(logits_1, dim=1)
-                l_img = -probs.max(dim=1).values.mean()
+                if self.is_single_logit_binary:
+                    probs = torch.sigmoid(logits_1)
+                    l_img = -torch.maximum(probs[:, 0], 1.0 - probs[:, 0]).mean()
+                else:
+                    probs = F.softmax(logits_1, dim=1)
+                    l_img = -probs.max(dim=1).values.mean()
 
             # 2. Mode Seeking Loss (L_ms)
             # L_ms = d(z1, z2) / d(G(z1), G(z2))
@@ -435,7 +465,7 @@ class ESAttack(AttackRunner):
         Dirichlet requires strictly-positive concentration, so we apply softplus(+eps).
         """
 
-        alpha_raw = torch.randn(int(batch_size), self.num_classes, device=device)
+        alpha_raw = torch.randn(int(batch_size), self.semantic_num_classes, device=device)
         alpha = F.softplus(alpha_raw) + 1e-3
         return torch.distributions.Dirichlet(alpha).sample()
 

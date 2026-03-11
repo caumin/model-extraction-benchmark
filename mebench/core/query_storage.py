@@ -22,7 +22,9 @@ class QueryStorage(Dataset):
     - queries.pt: Concatenated tensor [N, C, H, W] of all images
     - labels.pt: Tensor [N] of oracle outputs (labels or probs)
 
-    For soft_prob mode: labels stores probability distributions [N, K]
+    For soft_prob mode: labels stores probability outputs.
+    - Multiclass: probability distributions [N, K]
+    - Single-logit binary: positive-class probabilities [N, 1]
     For hard_top1 mode: labels stores class indices [N]
     """
 

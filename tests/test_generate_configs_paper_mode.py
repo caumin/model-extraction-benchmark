@@ -177,9 +177,11 @@ def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
 
     set_c_cfg_path = out_dir / "SET-C1_random_soft_30k_seed0.yaml"
     set_c_cfg = yaml.safe_load(set_c_cfg_path.read_text(encoding="utf-8"))
-    assert set_c_cfg["victim"]["victim_id"] == "sewerml_xie2019_multilabel_e2e"
+    assert set_c_cfg["victim"]["victim_id"] == "sewerml_xie2019_binary_defect_normal"
     assert set_c_cfg["victim"]["arch"] == "xie2019"
-    assert set_c_cfg["victim"]["checkpoint_ref"] == "runs/victims/xie2019_multilabel-e2e-version_1.pth"
+    assert int(set_c_cfg["victim"]["num_classes"]) == 1
+    assert set_c_cfg["dataset"]["sewerml_label_mode"] == "binary"
+    assert set_c_cfg["victim"]["checkpoint_ref"] == "runs/victims/xie2019_binary-binary-version_1.pth"
     assert int(set_c_cfg["dataset"]["surrogate_max_samples"]) == 100_000
 
 

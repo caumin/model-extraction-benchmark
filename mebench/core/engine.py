@@ -132,6 +132,7 @@ def run_experiment(
             metadata={
                 "seed": seed,  # [ADDED] Track current seed
                 "device": device,
+                "num_classes": int(config["victim"]["num_classes"]),
                 "input_shape": (
                     int(config["victim"]["channels"]),
                     *config["victim"].get("input_size", [32, 32]),
@@ -164,6 +165,7 @@ def run_experiment(
                 batch_size=128,
                 input_size=size,
                 channels=int(channels) if channels is not None else None,
+                sewerml_label_mode=str(config.get("dataset", {}).get("sewerml_label_mode", "argmax")),
             )
             victim_acc = compute_accuracy(victim, test_loader, device)
             print(f"[VERIFY] Victim Test Accuracy: {victim_acc*100:.2f}%")

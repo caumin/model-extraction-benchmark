@@ -58,6 +58,52 @@ SEWERML_LABELS = [
 ]
 
 
+def _normalize_sewerml_label_mode(raw_mode: Any) -> str:
+    """Normalize SewerML label mode to supported canonical value.
+
+    Supported values:
+    - "argmax": 17-class single-label via argmax over defect columns.
+    - "binary": binary defect classification from Defect column.
+    """
+
+    mode = str(raw_mode if raw_mode is not None else "argmax").strip().lower().replace("-", "_")
+    if mode in {"argmax", "single_label", "single", "multilabel", "multiclass"}:
+        return "argmax"
+    if mode in {"binary", "defect", "defect_binary", "binary_label", "is_defect"}:
+        return "binary"
+
+    raise ValueError(f"Unsupported Sewerml label mode: {raw_mode!r}")
+
+
+def _parse_sewerml_labels(gt: pd.DataFrame, label_mode: str) -> list[int]:
+    mode = _normalize_sewerml_label_mode(label_mode)
+
+    if mode == "binary":
+        if "Defect" not in gt.columns:
+            raise ValueError("SewerML binary mode requires Defect column")
+
+        defect_raw = gt["Defect"].astype(str).str.strip()
+        defect_clean = pd.to_numeric(defect_raw, errors="coerce")
+        if defect_clean.isna().all():
+            raise ValueError("SewerML Defect column is empty or non-numeric")
+
+        defect_tensor = torch.from_numpy(defect_clean.to_numpy(dtype="float32"))
+        defect_tensor = torch.nan_to_num(defect_tensor, nan=0.0)
+        y = defect_tensor.long()
+        y = (y != 0).long()
+        return y.tolist()
+
+    missing = [col for col in SEWERML_LABELS if col not in gt.columns]
+    if missing:
+        raise ValueError(f"SewerML annotations missing required columns: {', '.join(missing)}")
+
+    labels_raw = gt[SEWERML_LABELS].to_numpy(dtype="float32")
+    labels_tensor = torch.from_numpy(labels_raw)
+    labels_tensor = torch.nan_to_num(labels_tensor, nan=0.0)
+    labels = torch.argmax(labels_tensor, dim=1)
+    return labels.tolist()
+
+
 def _rgb_to_grayscale_stats(
     mean: Tuple[float, float, float],
     std: Tuple[float, float, float],
@@ -341,10 +387,10 @@ def _resolve_sewerml_csv_path(ann_root: Path, split: str) -> Path:
 class SewerMLDataset(Dataset):
     """Sewer-ML dataset adapter based on official annotation format.
 
-    The benchmark pipeline is single-label for ground-truth accuracy metrics.
-    We therefore derive a primary label by argmax over the 17-dim multilabel
-    vector. This keeps compatibility with existing metrics while preserving
-    class-space alignment with the victim/substitute heads.
+    The default behavior is single-label for ground-truth accuracy metrics.
+    Configure `label_mode="argmax"` (default) to derive a class index by
+    argmax over the 17 defect flags, or `label_mode="binary"` to use the
+    `Defect` column as a binary target.
     """
 
     def __init__(
@@ -353,20 +399,28 @@ class SewerMLDataset(Dataset):
         img_root: str,
         split: str,
         transform: Optional[transforms.Compose] = None,
+        *,
+        label_mode: str = "argmax",
     ) -> None:
         self.ann_root = Path(ann_root)
         self.img_root = Path(img_root)
         self.split = str(split)
         self.transform = transform
-        self.classes = list(SEWERML_LABELS)
+        mode = _normalize_sewerml_label_mode(label_mode)
+        self.classes = ["no_defect", "defect"] if mode == "binary" else list(SEWERML_LABELS)
 
         csv_path = _resolve_sewerml_csv_path(self.ann_root, self.split)
-        required = ["Filename", *SEWERML_LABELS]
-        gt = pd.read_csv(csv_path, sep=",", encoding="utf-8", usecols=required)
+        required = ["Filename"] + (["Defect"] if mode == "binary" else SEWERML_LABELS)
+        try:
+            gt = pd.read_csv(csv_path, sep=",", encoding="utf-8", usecols=required)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid SewerML annotation format for label_mode={mode}: {csv_path}"
+            ) from exc
+
         self.img_paths = [str(v) for v in gt["Filename"].values]
-        labels_raw = gt[SEWERML_LABELS].values.astype("float32")
-        labels_tensor = torch.from_numpy(labels_raw)
-        self.targets = torch.argmax(labels_tensor, dim=1).tolist()
+        full_gt = pd.read_csv(csv_path, sep=",", encoding="utf-8")
+        self.targets = _parse_sewerml_labels(full_gt, mode)
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -398,6 +452,7 @@ class SeedDataset(Dataset):
         sewerml_ann_root: Optional[str] = None,
         sewerml_data_root: Optional[str] = None,
         sewerml_split: Optional[str] = None,
+        sewerml_label_mode: str = "argmax",
     ):
         """Initialize seed dataset.
 
@@ -505,6 +560,7 @@ class SeedDataset(Dataset):
                 ann_root=str(ann_root),
                 img_root=str(data_root),
                 split=split,
+                label_mode=sewerml_label_mode,
                 transform=transform,
             )
         else:
@@ -819,6 +875,7 @@ def get_test_dataloader(
     *,
     input_size: Optional[Tuple[int, int]] = None,
     channels: Optional[int] = None,
+    sewerml_label_mode: str = "argmax",
 ) -> DataLoader:
     """Get test dataloader for victim dataset."""
     if name == "CIFAR10":
@@ -919,6 +976,7 @@ def get_test_dataloader(
             ann_root=str(ann_root),
             img_root=str(data_root),
             split="Test",
+            label_mode=sewerml_label_mode,
             transform=transform,
         )
     else:
@@ -1002,6 +1060,7 @@ def create_dataloader(
             sewerml_ann_root=config.get("sewerml_ann_root"),
             sewerml_data_root=config.get("sewerml_data_root"),
             sewerml_split=config.get("sewerml_split"),
+            sewerml_label_mode=config.get("sewerml_label_mode", "argmax"),
         )
     else:
         raise ValueError(f"Unknown data_mode: {data_mode}")

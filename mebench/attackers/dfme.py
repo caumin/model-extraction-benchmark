@@ -11,6 +11,7 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DFMEGenerator
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.binary import binary_logits_from_positive_probs, is_single_logit_binary_num_classes
 
 class DFME(AttackRunner):
     """DFME implementation strictly aligned with Truong et al. (2021).
@@ -41,6 +42,9 @@ class DFME(AttackRunner):
         self.student = None
         self.generator = None
         self._eval_substitute = None
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(
+            int(state.metadata.get("num_classes", config.get("num_classes", 10)))
+        )
         self._initialize_models(state)
 
     def _initialize_models(self, state: BenchmarkState):
@@ -88,6 +92,8 @@ class DFME(AttackRunner):
         """Mean Correction for Logit Recovery (Section 3.2).
         Approximate logit l_i = log(p_i) - 1/K * sum(log(p_j)).
         """
+        if self.is_single_logit_binary:
+            return binary_logits_from_positive_probs(probs)
         log_p = torch.log(probs + 1e-10)
         return log_p - log_p.mean(dim=1, keepdim=True)
 

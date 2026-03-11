@@ -15,6 +15,11 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_hard_labels_from_positive_probs,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.config_aliases import resolve_iterations
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
@@ -109,6 +114,7 @@ class CopycatCNN(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
 
         self.pool_dataset = None
         self.substitute: Optional[nn.Module] = None
@@ -172,7 +178,10 @@ class CopycatCNN(AttackRunner):
         state: BenchmarkState,
     ) -> None:
         if oracle_output.kind == "soft_prob":
-            labels = torch.argmax(oracle_output.y, dim=1)
+            if self.is_single_logit_binary:
+                labels = binary_hard_labels_from_positive_probs(oracle_output.y)
+            else:
+                labels = torch.argmax(oracle_output.y, dim=1)
         else:
             labels = oracle_output.y
 
@@ -334,6 +343,8 @@ class CopycatCNN(AttackRunner):
             return (x_batch - norm_mean) / norm_std
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if self.is_single_logit_binary:
+                return binary_bce_loss(outputs, targets)
             return F.cross_entropy(outputs, targets.long())
 
         def eval_fn(model_local: nn.Module, loader_local: torch.utils.data.DataLoader) -> float:
@@ -345,7 +356,10 @@ class CopycatCNN(AttackRunner):
                     x_val_b = x_val_b.to(device)
                     y_val_b = y_val_b.to(device)
                     outputs = model_local(preprocess_fn(x_val_b))
-                    loss = F.cross_entropy(outputs, y_val_b.long())
+                    if self.is_single_logit_binary:
+                        loss = binary_bce_loss(outputs, y_val_b)
+                    else:
+                        loss = F.cross_entropy(outputs, y_val_b.long())
                     total_loss += float(loss.item()) * int(x_val_b.size(0))
                     total_count += int(x_val_b.size(0))
             return total_loss / max(1, total_count)

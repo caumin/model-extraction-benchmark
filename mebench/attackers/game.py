@@ -19,6 +19,13 @@ from mebench.utils.config_aliases import (
     resolve_query_budget,
 )
 from mebench.utils.dataloader import load_pool_to_memory
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_labels,
+    binary_distribution_from_logits,
+    binary_hard_labels_from_positive_probs,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.scaling import clamp_unit, unit_to_tanh
 
 
@@ -40,6 +47,8 @@ class GAME(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
+        self.semantic_num_classes = 2 if self.is_single_logit_binary else self.num_classes
         self.proxy_num_classes = int(config.get("proxy_num_classes", 0))
         self.base_channels = int(config.get("base_channels", 64))
         # Official methods.game starts with uniform random sampler_weights.
@@ -365,7 +374,11 @@ class GAME(AttackRunner):
         if oracle_output.kind == "soft_prob":
             victim_probs = oracle_output.y.to(device)
         else:
-            victim_probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
+            victim_probs = (
+                binary_distribution_from_labels(oracle_output.y).float().to(device)
+                if self.is_single_logit_binary
+                else F.one_hot(oracle_output.y, num_classes=self.num_classes).float().to(device)
+            )
 
         qx = state.attack_state.setdefault("query_data_x", [])
         qy = state.attack_state.setdefault("query_data_y", [])
@@ -712,11 +725,16 @@ class GAME(AttackRunner):
                 x_b = x_b.to(device)
                 y_b = y_b.to(device)
                 logits = self.student((x_b - norm_mean) / norm_std)
-                probs = F.softmax(logits, dim=1)
-                if y_b.ndim == 1:
-                    y_b = F.one_hot(y_b.long(), num_classes=self.num_classes).float()
-                y_b = y_b / y_b.sum(dim=1, keepdim=True).clamp_min(1e-10)
-                loss = F.kl_div(torch.log(probs + 1e-10), y_b, reduction="batchmean")
+                if self.is_single_logit_binary:
+                    if y_b.ndim == 1:
+                        y_b = y_b.float().unsqueeze(1)
+                    loss = binary_bce_loss(logits, y_b)
+                else:
+                    probs = F.softmax(logits, dim=1)
+                    if y_b.ndim == 1:
+                        y_b = F.one_hot(y_b.long(), num_classes=self.num_classes).float()
+                    y_b = y_b / y_b.sum(dim=1, keepdim=True).clamp_min(1e-10)
+                    loss = F.kl_div(torch.log(probs + 1e-10), y_b, reduction="batchmean")
                 local_optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 local_optimizer.step()
@@ -778,10 +796,14 @@ class GAME(AttackRunner):
                 if oracle_output.kind == "soft_prob":
                     victim_probs_step = oracle_output.y.to(device)
                 else:
-                    victim_probs_step = F.one_hot(
-                        oracle_output.y,
-                        num_classes=self.num_classes,
-                    ).float().to(device)
+                    victim_probs_step = (
+                        binary_distribution_from_labels(oracle_output.y).float().to(device)
+                        if self.is_single_logit_binary
+                        else F.one_hot(
+                            oracle_output.y,
+                            num_classes=self.num_classes,
+                        ).float().to(device)
+                    )
 
             last_sample_labels = labels.detach()
             last_pred_victim_softmax = victim_probs_step.detach()
@@ -816,8 +838,12 @@ class GAME(AttackRunner):
             
             # Paper-aligned GAME objectives on generated samples.
             student_logits = self.student(_norm(fake_x))
-            student_probs = F.softmax(student_logits, dim=1)
-            student_log_probs = F.log_softmax(student_logits, dim=1)
+            if self.is_single_logit_binary:
+                student_probs = binary_distribution_from_logits(student_logits)
+                student_log_probs = torch.log(student_probs.clamp_min(1e-10))
+            else:
+                student_probs = F.softmax(student_logits, dim=1)
+                student_log_probs = F.log_softmax(student_logits, dim=1)
 
             last_pred_attacker_softmax = student_probs.detach()
             last_pred_attacker_logsoftmax = student_log_probs.detach()
@@ -836,13 +862,20 @@ class GAME(AttackRunner):
 
             if "bou" in active_loss_terms:
                 # L_bou (official): scaled top1-top2 margin sum over batch.
-                sorted_logits = torch.sort(student_logits, descending=True, dim=1).values
-                l_bou = (sorted_logits[:, 0] - sorted_logits[:, 1]).sum()
+                if self.is_single_logit_binary:
+                    l_bou = student_logits.abs().sum()
+                else:
+                    sorted_logits = torch.sort(student_logits, descending=True, dim=1).values
+                    l_bou = (sorted_logits[:, 0] - sorted_logits[:, 1]).sum()
                 g_loss = g_loss + (self.beta2 * l_bou)
 
             if "adv" in active_loss_terms:
                 # L_adv (paper): -CE(N_S(x), argmax N_S(x)).
-                l_adv = -F.cross_entropy(student_logits, student_logits.argmax(dim=1))
+                if self.is_single_logit_binary:
+                    pseudo = binary_hard_labels_from_positive_probs(victim_probs_step[:, 1:2] if victim_probs_step.ndim == 2 and victim_probs_step.size(1) == 2 else victim_probs_step)
+                    l_adv = -binary_bce_loss(student_logits, pseudo.float().unsqueeze(1))
+                else:
+                    l_adv = -F.cross_entropy(student_logits, student_logits.argmax(dim=1))
                 g_loss = g_loss + (self.beta3 * l_adv)
 
             if "dif" in active_loss_terms:

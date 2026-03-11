@@ -35,6 +35,7 @@ if str(project_root) not in sys.path:
 
 from mebench.core.seed import set_seed
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.binary import binary_bce_loss, binary_hard_labels_from_logits
 from mebench.utils.scaling import normalize_input_scale
 from mebench.data.loaders import BelgiumTSCDataset
 
@@ -208,7 +209,6 @@ def _evaluate(
     progress_desc: str = "eval",
 ) -> Tuple[float, float]:
     model.eval()
-    criterion = nn.CrossEntropyLoss()
     total_loss = 0.0
     total_correct = 0
     total = 0
@@ -225,9 +225,14 @@ def _evaluate(
         y = y.to(device)
         x = normalize_input_scale(x, "unit")
         logits = model(x)
-        loss = criterion(logits, y)
+        if logits.dim() == 1 or (logits.dim() == 2 and logits.size(1) == 1):
+            loss = binary_bce_loss(logits, y)
+            preds = binary_hard_labels_from_logits(logits)
+        else:
+            loss = nn.CrossEntropyLoss()(logits, y)
+            preds = torch.argmax(logits, dim=1)
         total_loss += float(loss.item()) * int(y.size(0))
-        total_correct += int((torch.argmax(logits, dim=1) == y).sum().item())
+        total_correct += int((preds == y).sum().item())
         total += int(y.size(0))
 
     if total == 0:
@@ -245,7 +250,6 @@ def _train_one_epoch(
     progress_desc: str = "train",
 ) -> Tuple[float, float]:
     model.train()
-    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     total_loss = 0.0
     total_correct = 0
     total = 0
@@ -264,12 +268,17 @@ def _train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
-        loss = criterion(logits, y)
+        if logits.dim() == 1 or (logits.dim() == 2 and logits.size(1) == 1):
+            loss = binary_bce_loss(logits, y)
+            preds = binary_hard_labels_from_logits(logits)
+        else:
+            loss = nn.CrossEntropyLoss(label_smoothing=label_smoothing)(logits, y)
+            preds = torch.argmax(logits, dim=1)
         loss.backward()
         optimizer.step()
 
         total_loss += float(loss.item()) * int(y.size(0))
-        total_correct += int((torch.argmax(logits, dim=1) == y).sum().item())
+        total_correct += int((preds == y).sum().item())
         total += int(y.size(0))
         if bool(show_progress):
             iterator.set_postfix(

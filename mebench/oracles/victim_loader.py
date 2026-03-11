@@ -63,6 +63,27 @@ def _infer_width_mult_from_state_dict(arch: str, state_dict: Dict[str, Any]) -> 
     return None
 
 
+def _resolve_victim_checkpoint_path(
+    checkpoint_path: str,
+    *,
+    suffixes: tuple[str, ...] = (".pt", ".pth", ".ckpt"),
+) -> Path:
+    """Resolve victim checkpoint path with extension fallback."""
+    path = Path(checkpoint_path)
+    if path.exists():
+        return path
+
+    if path.suffix:
+        raise FileNotFoundError(f"Victim checkpoint not found at {checkpoint_path}")
+
+    for suffix in suffixes:
+        candidate = path.with_suffix(suffix)
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(f"Victim checkpoint not found at {checkpoint_path}")
+
+
 def load_victim_checkpoint(
     checkpoint_path: str,
     arch: str,
@@ -98,13 +119,11 @@ def load_victim_checkpoint(
         FileNotFoundError: If checkpoint file doesn't exist
         RuntimeError: If checkpoint loading fails
     """
-    path = Path(checkpoint_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Victim checkpoint not found at {checkpoint_path}")
+    path = _resolve_victim_checkpoint_path(checkpoint_path)
 
     # Load checkpoint with security and device mapping
     checkpoint = torch.load(
-        checkpoint_path,
+        str(path),
         map_location=torch.device(device),
         weights_only=True,  # Security: prevent arbitrary code execution
     )
@@ -154,7 +173,7 @@ def load_victim_checkpoint(
     )
 
     print(
-        f"Loaded victim model from {checkpoint_path} to {device} "
+        f"Loaded victim model from {path} to {device} "
         f"(official_preprocess_profile={official_preprocess_profile}, no runtime wrapper transform)"
     )
     return wrapped_model

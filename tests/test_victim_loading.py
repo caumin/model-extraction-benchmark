@@ -102,6 +102,45 @@ def test_load_victim_from_config_with_dropout_checkpoint():
     assert loaded_model.training is False
 
 
+def test_load_victim_checkpoint_accepts_extensionless_path_with_pt_and_pth_suffixes():
+    """Support checkpoint paths that omit extension (.pt / .pth)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = create_substitute(arch="resnet18", num_classes=10, input_channels=3)
+        stem = Path(tmpdir) / "victim_no_ext"
+        torch.save(model.state_dict(), stem.with_suffix(".pt"))
+
+        loaded_model = load_victim_checkpoint(
+            checkpoint_path=str(stem),
+            arch="resnet18",
+            num_classes=10,
+            input_channels=3,
+            device="cpu",
+        )
+
+        assert loaded_model is not None
+        assert loaded_model.training is False
+
+        model_pth = create_substitute(arch="resnet18", num_classes=10, input_channels=3)
+        # make a different model so extension preference is observable if both exist
+        with torch.no_grad():
+            for param in model_pth.parameters():
+                param.add_(1.0)
+        torch.save(model_pth.state_dict(), stem.with_suffix(".pth"))
+
+        loaded_model_from_stem = load_victim_checkpoint(
+            checkpoint_path=str(stem),
+            arch="resnet18",
+            num_classes=10,
+            input_channels=3,
+            device="cpu",
+        )
+        # Resolve should prefer .pt before .pth when both are present
+        assert all(
+            torch.equal(a, b)
+            for a, b in zip(loaded_model.parameters(), loaded_model_from_stem.parameters())
+        )
+
+
 def test_create_and_load_xie2019_checkpoint() -> None:
     """Xie2019 architecture can be created and loaded from checkpoint."""
     with tempfile.TemporaryDirectory() as tmpdir:

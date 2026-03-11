@@ -28,6 +28,14 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DFMEGenerator
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_labels,
+    binary_distribution_from_logits,
+    binary_distribution_from_positive_probs,
+    binary_logits_from_positive_probs,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.scaling import normalize_input_scale
 
 
@@ -198,6 +206,10 @@ class DisGUIDE(AttackRunner):
         self._initialize_models(state)
 
     @property
+    def is_single_logit_binary(self) -> bool:
+        return is_single_logit_binary_num_classes(self.num_classes)
+
+    @property
     def num_classes(self) -> int:
         return int(
             self.state.metadata.get("num_classes")
@@ -349,7 +361,14 @@ class DisGUIDE(AttackRunner):
             for idx in range(self.student_ensemble.size()):
                 logits = self.student_ensemble(x_student, idx=idx)
                 preds.append(logits)
-            pred_probs = F.softmax(torch.stack(preds, dim=1), dim=2)
+            pred_logits = torch.stack(preds, dim=1)
+            if self.is_single_logit_binary:
+                pred_probs = torch.stack(
+                    [binary_distribution_from_logits(pred_logits[:, i, :]) for i in range(pred_logits.size(1))],
+                    dim=1,
+                )
+            else:
+                pred_probs = F.softmax(pred_logits, dim=2)
 
             g_loss = -torch.mean(torch.std(pred_probs, dim=1))
             if self.lambda_div != 0.0:
@@ -367,18 +386,31 @@ class DisGUIDE(AttackRunner):
         if self.loss_mode == "hl":
             if oracle_output.ndim == 1:
                 return oracle_output.long()
+            if self.is_single_logit_binary:
+                return (oracle_output.view(-1) >= 0.5).long()
             return oracle_output.argmax(dim=1).long()
         if self.loss_mode == "kl":
             if oracle_output.ndim == 1:
+                if self.is_single_logit_binary:
+                    return binary_distribution_from_labels(oracle_output.long())[:, 1:2]
                 return F.one_hot(oracle_output.long(), num_classes=self.num_classes).float()
+            if self.is_single_logit_binary:
+                return oracle_output.float()
             return oracle_output.float()
         # l1 path
         if oracle_output.ndim == 1:
+            if self.is_single_logit_binary:
+                probs = binary_distribution_from_labels(oracle_output.long())[:, 1:2]
+                return binary_logits_from_positive_probs(probs)
             probs = F.one_hot(oracle_output.long(), num_classes=self.num_classes).float()
             return self._recover_logits_from_probs(probs)
+        if self.is_single_logit_binary:
+            return binary_logits_from_positive_probs(oracle_output.float())
         return self._recover_logits_from_probs(oracle_output.float())
 
     def _student_loss(self, student_logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if self.is_single_logit_binary and self.loss_mode in {"hl", "kl"}:
+            return binary_bce_loss(student_logits, target)
         if self.loss_mode == "hl":
             return F.cross_entropy(student_logits, target.long())
         if self.loss_mode == "kl":

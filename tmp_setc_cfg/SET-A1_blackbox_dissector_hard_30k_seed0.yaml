@@ -1,0 +1,77 @@
+run:
+  name: SET-A1_blackbox_dissector_hard_30k_seed0
+  seeds:
+  - 0
+  device: cpu
+benchmark:
+  protocol_version: '1.3'
+victim:
+  victim_id: mnist_lenet_mnist
+  arch: lenet_mnist
+  channels: 1
+  num_classes: 10
+  input_size:
+  - 28
+  - 28
+  checkpoint_ref: runs/victims/mnist_lenet_mnist_seed0.pt
+  normalization: null
+  output_mode: hard_top1
+  temperature: 1.0
+dataset:
+  name: MNIST
+  data_mode: surrogate
+  surrogate_name: ImageNet
+  surrogate_normalization: standard
+  num_workers: 0
+  train_split: true
+  channels: 1
+  input_size:
+  - 28
+  - 28
+  surrogate_root: data/imagenet
+  surrogate_resize:
+  - 28
+  - 28
+  surrogate_max_samples: 50000
+  surrogate_subset_seed: 42
+attack:
+  name: blackbox_dissector
+  output_mode: hard_top1
+  pool_num_workers: 0
+  initial_seed_ratio: 0.1
+  validation_budget_ratio: 0.2
+  iterations: 10
+substitute:
+  arch: lenet_mnist
+  init_seed: 1234
+  batch_size: 512
+  num_workers: 0
+  train_num_workers: 0
+  val_num_workers: 0
+  trackA:
+    batch_size: 512
+    steps_coeff_c: 0.2
+  optimizer:
+    name: sgd
+    lr: 0.04
+    momentum: 0.9
+    weight_decay: 0.0005
+  scheduler:
+    name: multistep
+    milestones_ratio:
+    - 0.5
+    - 0.75
+    gamma: 0.1
+  max_epochs: 200
+  patience: 20
+budget:
+  max_budget: 30000
+  checkpoints:
+  - 1000
+  - 10000
+  - 20000
+  - 30000
+cache:
+  enabled: true
+  policy: temporary
+  delete_on_finish: true

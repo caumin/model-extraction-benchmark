@@ -24,6 +24,13 @@ from mebench.data.preprocessing import apply_official_preprocess_batch
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.utils.config_aliases import resolve_iterations
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_entropy_from_positive_probs,
+    binary_hard_labels_from_logits,
+    binary_positive_probs_from_logits,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_pool_num_workers,
@@ -81,6 +88,7 @@ class MARICH(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
         self.lr = float(config.get("lr", 0.01))
         self.weight_decay = float(config.get("weight_decay", 5e-4))
         self.patience = int(config.get("patience", 20))
@@ -169,7 +177,10 @@ class MARICH(AttackRunner):
             for x_batch, _ in loader:
                 x_query = self._apply_query_preprocess(x_batch)
                 logits = self.victim(x_query.to(device))
-                y = torch.argmax(logits, dim=1).detach().cpu().long()
+                if self.is_single_logit_binary:
+                    y = binary_hard_labels_from_logits(logits).detach().cpu().long()
+                else:
+                    y = torch.argmax(logits, dim=1).detach().cpu().long()
                 xs.append(x_query.detach().cpu())
                 ys.append(y)
 
@@ -332,8 +343,13 @@ class MARICH(AttackRunner):
             with torch.no_grad():
                 for x_batch, idx_batch in loader:
                     x_batch = self._apply_query_preprocess(x_batch).to(device)
-                    probs = F.softmax(self.substitute(x_batch), dim=1)
-                    ent = -(probs * torch.log(probs.clamp_min(1e-10))).sum(dim=1)
+                    logits = self.substitute(x_batch)
+                    if self.is_single_logit_binary:
+                        probs = binary_positive_probs_from_logits(logits)
+                        ent = binary_entropy_from_positive_probs(probs)
+                    else:
+                        probs = F.softmax(logits, dim=1)
+                        ent = -(probs * torch.log(probs.clamp_min(1e-10))).sum(dim=1)
                     for i, idx in enumerate(idx_batch.tolist()):
                         scored.append((int(idx), float(ent[i].item())))
                     if pbar is not None:
@@ -357,7 +373,10 @@ class MARICH(AttackRunner):
         self.substitute.eval()
         with torch.no_grad():
             logits = self.substitute(x_train)
-            losses = F.cross_entropy(logits, y_train.long(), reduction="none")
+            if self.is_single_logit_binary:
+                losses = binary_bce_loss(logits, y_train, reduction="none").view(-1)
+            else:
+                losses = F.cross_entropy(logits, y_train.long(), reduction="none")
         num_centers = max(1, min(int(self.num_clusters), int(losses.numel())))
         center_idx = torch.argsort(losses, descending=True)[:num_centers]
         centers = x_train[center_idx].view(num_centers, -1).detach().cpu()
@@ -530,6 +549,8 @@ class MARICH(AttackRunner):
                 )
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if self.is_single_logit_binary:
+                return binary_bce_loss(outputs, targets)
             return F.cross_entropy(outputs, targets.long())
 
         def eval_fn(model_local: nn.Module, loader_local: DataLoader) -> float:
@@ -541,7 +562,10 @@ class MARICH(AttackRunner):
                     x_val_b = x_val_b.to(device)
                     y_val_b = y_val_b.to(device)
                     outputs = model_local(x_val_b)
-                    loss = F.cross_entropy(outputs, y_val_b.long())
+                    if self.is_single_logit_binary:
+                        loss = binary_bce_loss(outputs, y_val_b)
+                    else:
+                        loss = F.cross_entropy(outputs, y_val_b.long())
                     total_loss += float(loss.item()) * int(x_val_b.size(0))
                     total_count += int(x_val_b.size(0))
             return total_loss / max(1, total_count)

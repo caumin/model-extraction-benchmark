@@ -48,7 +48,7 @@ def test_maze_basic_flow() -> None:
             self.net = nn.Sequential(nn.Flatten(), nn.Linear(3 * 32 * 32, num_classes))
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            assert x.min().item() >= -1e-6
+            assert x.min().item() >= -1.0 - 1e-6
             assert x.max().item() <= 1.0 + 1e-6
             return self.net(x)
 

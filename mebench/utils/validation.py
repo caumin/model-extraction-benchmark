@@ -45,7 +45,7 @@ class LearningRateValidator:
             "justification": "Generator and clone optimizers follow DisGUIDE training dynamics",
         },
         "ds": {
-            "student_lr": 0.01,
+            "student_lr": 0.3,
             "generator_lr": 1e-4,
             "justification": "Dual Students uses separate Adam generator and SGD student optimizers",
         },

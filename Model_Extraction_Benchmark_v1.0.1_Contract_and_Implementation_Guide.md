@@ -55,12 +55,20 @@ The victim oracle supports:
 
 | Mode | Name | Return |
 |---|---|---|
-| Soft | `soft_prob` | **Raw softmax probability vector** at **temperature T=1.0** |
+| Soft | `soft_prob` | **Raw probability output** at **temperature T=1.0**: multiclass returns `[N, K]`, single-logit binary returns positive-class probabilities `[N, 1]` |
 | Hard | `hard_top1` | **Top-1 class label** |
 
 #### Temperature Contract
 - The benchmark fixes **temperature T = 1.0** for `soft_prob`.
 - If a paper/setting uses T≠1.0, it must be represented as a **separate, explicit oracle profile** (not the default).
+
+#### Binary Output Contract
+- Binary classification is represented as **single-logit binary only**.
+- For binary tasks, set `victim.num_classes = 1` and use substitute architectures with a single output logit.
+- In `soft_prob`, the oracle returns the positive-class probability with shape `[N, 1]`.
+- In `hard_top1`, the oracle returns thresholded labels `0/1`.
+- The benchmark does **not** define a separate 2-logit / 2-class softmax binary mode.
+- For SewerML matrix experiments, the benchmark uses the defect-vs-normal binary checkpoint rather than the SewerML multilabel model, because the multilabel model is not a good fit for standard extraction-attack evaluation.
 
 ---
 
@@ -427,6 +435,7 @@ dataset:
   data_mode: "surrogate"                   # seed | surrogate | data_free
   seed_size: 100
   surrogate_name: "SVHN"
+  sewerml_label_mode: "argmax"             # SewerML-only optional: argmax(default) | binary
 
 substitute:
   arch: "resnet18"
@@ -455,6 +464,9 @@ cache:
 - `budget.checkpoints` increasing and <= `max_budget`
 - `victim.output_mode == attack.output_mode`
 - `victim.temperature == 1.0` for default `soft_prob` oracle (unless explicitly using a non-default oracle profile)
+- if `dataset.name == SewerML` and `dataset.sewerml_label_mode` is provided, it must normalize to `argmax` or `binary` (invalid values fail fast)
+- if `dataset.name == SewerML` and `dataset.sewerml_label_mode == binary`, then `victim.num_classes` must be `1`
+- `dataset.sewerml_label_mode` is ignored for non-SewerML datasets
 - attack × data_mode constraints:
   - DFME requires `data_free`
 - Track A constraints:

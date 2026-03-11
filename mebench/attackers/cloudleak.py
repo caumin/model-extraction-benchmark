@@ -24,6 +24,13 @@ from mebench.utils.dataloader import (
 )
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_hard_labels_from_logits,
+    binary_hard_targets,
+    binary_positive_probs_from_logits,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.config_aliases import resolve_iterations
 
 
@@ -382,6 +389,11 @@ class CloudLeak(AttackRunner):
         # Cache per-class computed margins (float) to avoid repeated full-pool scans.
         self._class_feature_cache: Dict[int, float] = {}
         self._class_indices_cache: Dict[int, List[int]] = {}
+        num_classes = int(
+            state.metadata.get("num_classes")
+            or state.metadata.get("dataset_config", {}).get("num_classes", 10)
+        )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(num_classes)
 
         self._initialize_state(state)
 
@@ -897,9 +909,13 @@ class CloudLeak(AttackRunner):
 
                 with torch.inference_mode():
                     logits = substitute(s_imgs_adv)
-                    probs = F.softmax(logits, dim=1)
-                    max_prob, _ = probs.max(dim=1)
-                    scores = 1.0 - max_prob
+                    if self.is_single_logit_binary:
+                        prob_pos = binary_positive_probs_from_logits(logits)[:, 0]
+                        scores = 1.0 - torch.maximum(prob_pos, 1.0 - prob_pos)
+                    else:
+                        probs = F.softmax(logits, dim=1)
+                        max_prob, _ = probs.max(dim=1)
+                        scores = 1.0 - max_prob
 
                 # Avoid per-element CUDA sync (`.item()`) and per-element D2H copies.
                 scores_list = scores.detach().cpu().tolist()
@@ -1098,8 +1114,10 @@ class CloudLeak(AttackRunner):
                 for x, y in loader:
                     x, y = x.to(device), y.to(device)
                     outputs = model(x)
-                    
-                    if first_y.ndim == 2: # Soft labels
+
+                    if self.is_single_logit_binary:
+                        loss = binary_bce_loss(outputs, y)
+                    elif first_y.ndim == 2: # Soft labels
                         log_probs = F.log_softmax(outputs, dim=1)
                         loss = loss_func(log_probs, y)
                     else: # Hard labels
@@ -1156,6 +1174,8 @@ class CloudLeak(AttackRunner):
                     all_params[-2].requires_grad = True
 
     def _compute_training_loss(self, outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        if self.is_single_logit_binary:
+            return binary_bce_loss(outputs, targets)
         if targets.ndim == 2:
             log_probs = F.log_softmax(outputs, dim=1)
             return F.kl_div(log_probs, targets, reduction="batchmean")
@@ -1171,10 +1191,15 @@ class CloudLeak(AttackRunner):
             for x_batch, y_batch in val_loader:
                 x_batch = x_batch.to(device)
                 outputs = model(x_batch)
-                preds = torch.argmax(outputs, dim=1).cpu().numpy()
+                if self.is_single_logit_binary:
+                    preds = binary_hard_labels_from_logits(outputs).cpu().numpy()
+                else:
+                    preds = torch.argmax(outputs, dim=1).cpu().numpy()
                 all_preds.extend(preds)
 
-                if y_batch.ndim > 1:
+                if self.is_single_logit_binary:
+                    targets = binary_hard_targets(y_batch).cpu().numpy()
+                elif y_batch.ndim > 1:
                     targets = torch.argmax(y_batch, dim=1).cpu().numpy()
                 else:
                     targets = y_batch.cpu().numpy()

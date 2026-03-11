@@ -24,6 +24,7 @@ from mebench.utils.dataloader import (
 )
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.binary import binary_bce_loss, is_single_logit_binary_num_classes
 
 
 class KnockoffNets(AttackRunner):
@@ -68,6 +69,7 @@ class KnockoffNets(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
         loss_reward_scale = float(
             config.get("loss_reward_scale", max(1.0, math.log(max(self.num_classes, 2))))
         )
@@ -668,6 +670,8 @@ class KnockoffNets(AttackRunner):
             return (x_batch - norm_mean) / norm_std
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if self.is_single_logit_binary:
+                return binary_bce_loss(outputs, targets)
             if output_mode == "soft_prob":
                 targets = torch.clamp(targets, min=1e-10)
                 targets = targets / targets.sum(dim=1, keepdim=True)
@@ -685,7 +689,9 @@ class KnockoffNets(AttackRunner):
                     x_val_b = x_val_b.to(device)
                     y_val_b = y_val_b.to(device)
                     outputs = model_local(preprocess_fn(x_val_b))
-                    if output_mode == "soft_prob":
+                    if self.is_single_logit_binary:
+                        loss = binary_bce_loss(outputs, y_val_b)
+                    elif output_mode == "soft_prob":
                         y_val_b = torch.clamp(y_val_b, min=1e-10)
                         y_val_b = y_val_b / y_val_b.sum(dim=1, keepdim=True)
                         loss = nn.KLDivLoss(reduction="batchmean")(

@@ -168,6 +168,9 @@ class AttackRunner(ABC):
                 batch_size=128,
                 input_size=size,
                 channels=int(channels) if channels is not None else None,
+                sewerml_label_mode=str(
+                    self.state.metadata.get("dataset_config", {}).get("sewerml_label_mode", "argmax")
+                ),
             )
 
         metrics = evaluate_substitute(

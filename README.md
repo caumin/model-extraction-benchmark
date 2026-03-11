@@ -154,6 +154,24 @@ python aggregate_matrix.py
 Official launcher scripts are in `scripts/launch/`.
 `IMAGENET_ROOT` should be changed to each user's local ImageNet path.
 
+### SewerML Label Mode (Optional)
+
+For `dataset.name: "SewerML"`, you can control how labels are parsed:
+
+```yaml
+dataset:
+  name: "SewerML"
+  data_mode: "seed"
+  sewerml_label_mode: "argmax"  # default; aliases: single_label, single, multilabel, multiclass
+  # sewerml_label_mode: "binary"  # aliases: defect, defect_binary, binary_label, is_defect
+```
+
+- `argmax` (default): convert 17 defect flags to a single class index via argmax.
+- `binary`: use the `Defect` column as a binary target (`0` or `1`).
+- In binary mode, the benchmark contract is **single-logit binary only**: use `victim.num_classes: 1` so the victim/substitute emit one logit and `soft_prob` returns positive-class probabilities with shape `[N, 1]`.
+- For the benchmark matrix, `SET-C1` uses the SewerML defect-vs-normal binary checkpoint only. SewerML also provides a multilabel model, but that model is not a good fit for standard model extraction attacks, so the benchmark uses the binary model instead.
+- Validation is enforced only for `SewerML`; non-SewerML datasets ignore this key.
+
 ### 3. Smoke Run (Recommended First)
 
 ```bash
@@ -201,9 +219,11 @@ For implementation details and provenance of specific attacks, see `docs/referen
 
 ### Key Rules
 1.  **Budget**: `1 query` = `1 image`. Batched queries count as `batch_size`.
-2.  **Oracle**: Default `soft_prob` uses Temperature `T=1.0`. `hard_top1` returns labels.
+2.  **Oracle**: Default `soft_prob` uses Temperature `T=1.0`. Multiclass victims return probability vectors `[N, K]`; single-logit binary victims return positive-class probabilities `[N, 1]`. `hard_top1` returns labels.
 3.  **Determinism**: Victims run in `eval()`/`no_grad()`. Seeds are fixed for Track A.
 4.  **BlackBox MLaaS Input Contract**: The attacker does not know victim normalization. Query images are sent as-is and forwarded directly to victim inference (no runtime wrapper transform at query time). Pool-based attacks query/train in surrogate-standard normalized space (`dataset.surrogate_normalization`, default `standard`); data-free attacks query in `[-1,1]` and must not apply attacker-side tanh->unit conversion on the victim query path. Evaluation uses a shared, normalized test loader for fair comparison.
+5.  **SewerML Label Contract**: `dataset.sewerml_label_mode` is optional and only applies when `dataset.name` is `SewerML`. Supported normalized modes are `argmax` (default) and `binary`; invalid values fail fast. When `sewerml_label_mode: binary` is used, `victim.num_classes` must be `1`.
+6.  **Binary Contract**: Binary classification is documented and implemented as **single-logit only**. The benchmark does not treat binary tasks as a special 2-logit / 2-class softmax mode.
 
 ### 🔄 Protocol v1.2: Track Logic & Control Experiments
 To ensure fair attribution of performance gains, we enforce **Protocol v1.2** branching rules:

@@ -18,6 +18,13 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader, get_test_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_logits,
+    binary_distribution_from_positive_probs,
+    binary_hard_labels_from_logits,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_pool_num_workers,
@@ -479,6 +486,11 @@ class BlackboxDissector(AttackRunner):
         # Initialize attack state
         # Pool dataset (loaded during selection/init)
         self.pool_dataset = None
+        num_classes = int(
+            state.metadata.get("num_classes")
+            or state.metadata.get("dataset_config", {}).get("num_classes", 10)
+        )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(num_classes)
         self._initialize_state(state)
 
     def run(self, ctx: BenchmarkContext) -> None:
@@ -864,7 +876,10 @@ class BlackboxDissector(AttackRunner):
             
             with torch.no_grad():
                 logits = substitute(variants)
-                probs = F.softmax(logits, dim=1)
+                if self.is_single_logit_binary:
+                    probs = binary_distribution_from_logits(logits)
+                else:
+                    probs = F.softmax(logits, dim=1)
                 
             p_y0 = probs.gather(1, labels_repeated.unsqueeze(1)).squeeze(1)
             p_y0 = p_y0.view(batch_size, self.n_variants)
@@ -983,7 +998,10 @@ class BlackboxDissector(AttackRunner):
                 )
                 x_variants_norm = (x_variants - norm_mean) / norm_std
                 logits_variants = teacher(x_variants_norm)
-                probs_variants = F.softmax(logits_variants, dim=1)
+                if self.is_single_logit_binary:
+                    probs_variants = binary_distribution_from_logits(logits_variants)
+                else:
+                    probs_variants = F.softmax(logits_variants, dim=1)
                 probs_variants = probs_variants.view(batch_size, self.n_variants, -1)
                 soft_targets = probs_variants.mean(dim=1)
 
@@ -1149,6 +1167,8 @@ class BlackboxDissector(AttackRunner):
         ).to(device)
 
         def soft_cross_entropy(logits: torch.Tensor, soft_targets: torch.Tensor) -> torch.Tensor:
+            if self.is_single_logit_binary:
+                return binary_bce_loss(logits, soft_targets[:, 1:2], reduction="none").view(-1)
             log_probs = F.log_softmax(logits, dim=1)
             return -(soft_targets * log_probs).sum(dim=1)
 
@@ -1162,7 +1182,10 @@ class BlackboxDissector(AttackRunner):
             nonlocal pseudo_iter
             x_norm = (x_batch - norm_mean) / norm_std
             outputs = model_local(x_norm)
-            loss_sup = F.cross_entropy(outputs, y_batch.long())
+            if self.is_single_logit_binary:
+                loss_sup = binary_bce_loss(outputs, y_batch)
+            else:
+                loss_sup = F.cross_entropy(outputs, y_batch.long())
 
             loss_kd = torch.tensor(0.0, device=device)
             if pseudo_loader is not None and pseudo_iter is not None:
@@ -1199,7 +1222,10 @@ class BlackboxDissector(AttackRunner):
                     x, y = x.to(device), y.to(device)
                     x_norm = (x - norm_mean) / norm_std
                     outputs = model_local(x_norm)
-                    loss = loss_func(outputs, y.long())
+                    if self.is_single_logit_binary:
+                        loss = binary_bce_loss(outputs, y)
+                    else:
+                        loss = loss_func(outputs, y.long())
                     total_loss += loss.item() * x.size(0)
                     total_count += x.size(0)
             return total_loss / total_count if total_count > 0 else float('inf')
@@ -1220,7 +1246,11 @@ class BlackboxDissector(AttackRunner):
         request = TrainRequest(
             model=model,
             train_loader=train_loader,
-            loss_fn=lambda outputs, targets: F.cross_entropy(outputs, targets.long()),
+            loss_fn=(
+                (lambda outputs, targets: binary_bce_loss(outputs, targets))
+                if self.is_single_logit_binary
+                else (lambda outputs, targets: F.cross_entropy(outputs, targets.long()))
+            ),
             step_fn=step_fn,
             val_loader=val_loader,
             eval_fn=eval_fn,

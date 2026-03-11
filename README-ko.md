@@ -152,6 +152,24 @@ python aggregate_matrix.py
 공식 런처 스크립트는 `scripts/launch/`에 정리되어 있습니다.
 `IMAGENET_ROOT`는 사용자 로컬 ImageNet 경로에 맞게 반드시 수정해야 합니다.
 
+### SewerML 라벨 모드 (선택)
+
+`dataset.name: "SewerML"`일 때 라벨 파싱 방식을 선택할 수 있습니다.
+
+```yaml
+dataset:
+  name: "SewerML"
+  data_mode: "seed"
+  sewerml_label_mode: "argmax"  # 기본값; alias: single_label, single, multilabel, multiclass
+  # sewerml_label_mode: "binary"  # alias: defect, defect_binary, binary_label, is_defect
+```
+
+- `argmax` (기본): 17개 결함 플래그를 argmax로 단일 클래스 인덱스로 변환합니다.
+- `binary`: `Defect` 컬럼을 이진 타깃(`0`/`1`)으로 사용합니다.
+- binary 모드에서는 벤치마크 계약이 **single-logit binary 전용**입니다. 즉 `victim.num_classes: 1`을 사용해야 하며, victim/substitute는 1개의 logit을 출력하고 `soft_prob`는 `[N, 1]` 형태의 positive-class probability를 반환합니다.
+- 벤치마크 matrix에서는 `SET-C1`이 SewerML의 defect-vs-normal binary checkpoint만 사용합니다. SewerML은 multilabel 모델도 제공하지만, 해당 모델은 일반적인 model extraction 공격과 잘 맞지 않아 벤치마크에서는 binary 모델을 채택합니다.
+- 유효성 검사는 `SewerML`에서만 적용되며, 다른 데이터셋에서는 이 키를 무시합니다.
+
 ### 3. 스모크 실행 (권장 시작점)
 
 ```bash
@@ -197,9 +215,11 @@ model-extraction-benchmark/
 
 ### 핵심 규칙
 1.  **예산 (Budget)**: `1 쿼리` = `1 이미지`. 배치 단위 쿼리는 `batch_size`만큼 예산이 차감됩니다.
-2.  **오라클 (Oracle)**: 기본 `soft_prob` 모드는 온도 `T=1.0`을 사용합니다. `hard_top1`은 라벨을 반환합니다.
+2.  **오라클 (Oracle)**: 기본 `soft_prob` 모드는 온도 `T=1.0`을 사용합니다. 멀티클래스 victim은 `[N, K]` 확률 벡터를 반환하고, single-logit binary victim은 `[N, 1]` positive-class probability를 반환합니다. `hard_top1`은 라벨을 반환합니다.
 3.  **결정론 (Determinism)**: 피해 모델은 항상 `eval()`/`no_grad()` 상태로 실행됩니다. Track A의 시드는 고정됩니다.
 4.  **BlackBox MLaaS 입력 계약**: 공격자는 Victim의 내부 정규화 정보를 알지 못한다고 가정합니다. 쿼리 이미지는 그대로 전송되며, 런타임 쿼리 경로에서는 wrapper 변환 없이 Victim 추론으로 직접 전달됩니다. Pool 기반 공격은 surrogate 표준 정규화 공간(`dataset.surrogate_normalization`, 기본 `standard`)에서 query/train을 수행하고, Data-free 공격은 `[-1,1]` 스케일로 쿼리하며 victim 쿼리 경로에서 attacker-side tanh->unit 변환을 하지 않습니다. 평가는 공정 비교를 위해 공통 정규화 test loader를 사용합니다.
+5.  **SewerML 라벨 계약**: `dataset.sewerml_label_mode`는 선택 항목이며 `dataset.name`이 `SewerML`일 때만 적용됩니다. 정규화된 지원 모드는 `argmax`(기본)와 `binary`이며, 지원하지 않는 값은 fail-fast로 거부됩니다. `sewerml_label_mode: binary`를 사용할 때는 `victim.num_classes`가 반드시 `1`이어야 합니다.
+6.  **Binary 계약**: Binary classification은 **single-logit 전용**으로 문서화/구현됩니다. 이 벤치마크는 binary task를 2-logit softmax 특수 케이스로 취급하지 않습니다.
 
 ---
 

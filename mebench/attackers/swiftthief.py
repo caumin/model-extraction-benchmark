@@ -33,6 +33,15 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_labels,
+    binary_distribution_from_positive_probs,
+    binary_entropy_from_positive_probs,
+    binary_hard_labels_from_positive_probs,
+    binary_positive_probs_from_logits,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_pool_num_workers,
@@ -157,7 +166,8 @@ class SoftSupSimSiamLossV17(nn.Module):
 
         entr = -(targets * targets.log()).sum(dim=1)
         entr[torch.isnan(entr)] = 0.0
-        norm_entr = entr / torch.log(torch.tensor(float(self.num_classes), device=self.device))
+        denom = torch.log(torch.tensor(float(max(2, int(self.num_classes))), device=self.device))
+        norm_entr = entr / denom.clamp_min(1e-12)
         reversed_norm_entr = 1.0 - norm_entr
         mask_similar_class1 = torch.outer(reversed_norm_entr, reversed_norm_entr)
 
@@ -430,6 +440,9 @@ class SwiftThief(AttackRunner):
         self.normalize: Optional[nn.Module] = None
         self.normalize_pair: Optional[nn.Module] = None
         self._ssl_transforms = None
+        self.output_dim = int(state.metadata.get("num_classes") or config.get("num_classes") or 10)
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.output_dim)
+        self.semantic_num_classes = 2 if self.is_single_logit_binary else self.output_dim
 
         self._initialize_state(state)
 
@@ -755,8 +768,13 @@ class SwiftThief(AttackRunner):
 
                 x_raw = x_raw.to(device, non_blocking=str(device).startswith("cuda"))
                 x = self.normalize(x_raw)
-                probs = F.softmax(substitute(x), dim=1)
-                entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1)
+                logits = substitute(x)
+                if self.is_single_logit_binary:
+                    probs = binary_positive_probs_from_logits(logits)
+                    entropy = binary_entropy_from_positive_probs(probs)
+                else:
+                    probs = F.softmax(logits, dim=1)
+                    entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1)
                 entropy_list = entropy.detach().cpu().tolist()
                 for idx, ent in zip(batch_indices, entropy_list):
                     scores.append((int(idx), float(ent)))
@@ -814,7 +832,7 @@ class SwiftThief(AttackRunner):
         if substitute is None or not hasattr(substitute, "features"):
             return self._select_entropy(k, state)
 
-        num_classes = int(state.metadata.get("num_classes") or self.config.get("num_classes") or 10)
+        num_classes = int(self.semantic_num_classes)
 
         total_q = sum(class_counts.values())
         mean_per_class = total_q / num_classes if num_classes > 0 else 0
@@ -823,7 +841,13 @@ class SwiftThief(AttackRunner):
             return self._select_entropy(k, state)
 
         y_n = min(rare_classes, key=lambda c: class_counts.get(c, 0))
-        q_y = [idx for idx in labeled if idx in victim_outputs and int(victim_outputs[idx].argmax().item()) == y_n]
+        if self.is_single_logit_binary:
+            q_y = [
+                idx for idx in labeled
+                if idx in victim_outputs and int(binary_hard_labels_from_positive_probs(victim_outputs[idx].view(1, 1))[0].item()) == y_n
+            ]
+        else:
+            q_y = [idx for idx in labeled if idx in victim_outputs and int(victim_outputs[idx].argmax().item()) == y_n]
         if not q_y:
             return self._select_entropy(k, state)
 
@@ -868,16 +892,25 @@ class SwiftThief(AttackRunner):
             for i, idx in enumerate(indices):
                 if int(idx) >= 0:
                     state.attack_state["victim_outputs"][int(idx)] = y[i].detach().cpu()
-            labels = [int(t.argmax().item()) for t in y]
+            if self.is_single_logit_binary:
+                labels = [int(binary_hard_labels_from_positive_probs(t.view(1, 1))[0].item()) for t in y]
+            else:
+                labels = [int(t.argmax().item()) for t in y]
         else:
-            num_classes = int(state.metadata.get("num_classes") or 10)
-            y_for_training = F.one_hot(y.long(), num_classes=num_classes).float().detach().cpu()
+            num_classes = int(self.semantic_num_classes)
+            if self.is_single_logit_binary:
+                y_for_training = y.float().view(-1, 1).detach().cpu()
+            else:
+                y_for_training = F.one_hot(y.long(), num_classes=num_classes).float().detach().cpu()
             for i, idx in enumerate(indices):
                 if int(idx) >= 0:
                     lab = int(y[i].item()) if y[i].ndim == 0 else int(y[i].argmax().item())
-                    one_hot = torch.zeros(num_classes)
-                    one_hot[lab] = 1.0
-                    state.attack_state["victim_outputs"][int(idx)] = one_hot
+                    if self.is_single_logit_binary:
+                        state.attack_state["victim_outputs"][int(idx)] = torch.tensor([float(lab)])
+                    else:
+                        one_hot = torch.zeros(num_classes)
+                        one_hot[lab] = 1.0
+                        state.attack_state["victim_outputs"][int(idx)] = one_hot
             labels = [int(t.item()) if t.ndim == 0 else int(t.argmax().item()) for t in y]
 
         state.attack_state["query_data_y"].append(y_for_training)
@@ -910,7 +943,10 @@ class SwiftThief(AttackRunner):
             x = self.normalize(x_raw)
             logits = substitute(x)
 
-            if y.ndim > 1 and y.shape[1] > 1:
+            if self.is_single_logit_binary:
+                y = y.to(device).float()
+                loss = binary_bce_loss(logits, y)
+            elif y.ndim > 1 and y.shape[1] > 1:
                 y = y.to(device).float()
                 y = y.clamp_min(1e-12)
                 y = y / y.sum(dim=1, keepdim=True).clamp_min(1e-12)
@@ -1049,7 +1085,8 @@ class SwiftThief(AttackRunner):
                 )
 
         device = torch.device(device_str)
-        num_classes = int(state.metadata.get("num_classes") or 10)
+        num_classes = int(self.output_dim)
+        semantic_num_classes = int(self.semantic_num_classes)
 
         # init / warm-start substitute
         arch = substitute_config.get("arch", "resnet18")
@@ -1097,8 +1134,8 @@ class SwiftThief(AttackRunner):
 
         # costs (effective number) from histogram (official repo swiftthief.py)
         # costs = (1 - beta) / (1 - beta^(cnt + 1.0)), then normalized.
-        cnt = torch.zeros(num_classes, device=device)
-        for c in range(num_classes):
+        cnt = torch.zeros(semantic_num_classes, device=device)
+        for c in range(semantic_num_classes):
             cnt[c] = float(state.attack_state["class_counts"].get(c, 0))
         beta = float(self.effective_beta)
         beta_t = torch.tensor(beta, device=device)
@@ -1107,7 +1144,7 @@ class SwiftThief(AttackRunner):
         costs = costs / costs.sum().clamp_min(1e-12)
 
         criterion = SimSiamLoss('simplified').to(device)
-        soft_criterion = SoftSupSimSiamLossV17(device, num_classes).to(device)
+        soft_criterion = SoftSupSimSiamLossV17(device, semantic_num_classes).to(device)
         cost_sensitive_criterion = SimSiamLoss_cost_sensitive(costs).to(device)
 
         fgsm_model = _SimSiamWrapper(substitute, self.projection_head, self.predictor_head).to(device)
@@ -1179,7 +1216,10 @@ class SwiftThief(AttackRunner):
 
                 # Minority class regularization (official repo): CL_FGSM generates adversarial view.
                 # Determine sample class indices for cost-sensitive weights.
-                if y.ndim > 1 and y.shape[1] > 1:
+                if self.is_single_logit_binary:
+                    targets_probs = binary_distribution_from_positive_probs(y.float())
+                    y_idx = binary_hard_labels_from_positive_probs(y.float())
+                elif y.ndim > 1 and y.shape[1] > 1:
                     targets_probs = y.clamp_min(1e-8)
                     targets_probs = targets_probs / targets_probs.sum(dim=1, keepdim=True).clamp_min(1e-12)
                     y_idx = targets_probs.argmax(dim=1)
@@ -1193,7 +1233,10 @@ class SwiftThief(AttackRunner):
 
                 if targets_probs is None:
                     # Treat hard labels as one-hot distributions.
-                    targets_probs = F.one_hot(y_idx, num_classes=num_classes).float()
+                    if self.is_single_logit_binary:
+                        targets_probs = binary_distribution_from_labels(y_idx)
+                    else:
+                        targets_probs = F.one_hot(y_idx, num_classes=semantic_num_classes).float()
 
                 loss2 = soft_criterion(
                     p=torch.cat([outs_l["p1"], outs_l["p2"]], dim=0),
@@ -1292,10 +1335,15 @@ class SwiftThief(AttackRunner):
                 x = self.normalize(x_raw)
                 logits = model(x)
 
-                preds = logits.argmax(dim=1).cpu().numpy().tolist()
+                if self.is_single_logit_binary:
+                    preds = binary_hard_labels_from_positive_probs(binary_positive_probs_from_logits(logits)).cpu().numpy().tolist()
+                else:
+                    preds = logits.argmax(dim=1).cpu().numpy().tolist()
                 all_preds.extend(preds)
 
-                if y.ndim > 1:
+                if self.is_single_logit_binary:
+                    targets = binary_hard_labels_from_positive_probs(y.float()).cpu().numpy().tolist()
+                elif y.ndim > 1:
                     targets = y.argmax(dim=1).cpu().numpy().tolist()
                 else:
                     targets = y.cpu().numpy().tolist()

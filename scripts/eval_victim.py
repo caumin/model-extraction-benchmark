@@ -91,6 +91,7 @@ def main() -> None:
         num_workers=num_workers,
         input_size=input_size,
         channels=channels,
+        sewerml_label_mode=str(_cfg_get(dataset_cfg, "sewerml_label_mode", default="argmax")),
     )
     acc = float(compute_accuracy(model, test_loader, device))
 

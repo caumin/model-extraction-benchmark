@@ -18,6 +18,13 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.state import BenchmarkState
 from mebench.models.gan import DFMEGenerator
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_labels,
+    binary_distribution_from_positive_probs,
+    binary_logits_from_positive_probs,
+    is_single_logit_binary_num_classes,
+)
 
 
 class _MovingAverageModel(nn.Module):
@@ -152,6 +159,10 @@ class DualStudents(AttackRunner):
             or 10
         )
 
+    @property
+    def is_single_logit_binary(self) -> bool:
+        return is_single_logit_binary_num_classes(self.num_classes)
+
     def _initialize_models(self, state: BenchmarkState) -> None:
         device = str(state.metadata.get("device", "cpu"))
         input_shape = state.metadata.get("input_shape", (3, 32, 32))
@@ -266,21 +277,34 @@ class DualStudents(AttackRunner):
         if self.loss_mode == "ce":
             if oracle_output.ndim == 1:
                 return oracle_output.long()
+            if self.is_single_logit_binary:
+                return (oracle_output.view(-1) >= 0.5).long()
             return oracle_output.argmax(dim=1).long()
 
         if self.loss_mode == "kl":
             if oracle_output.ndim == 1:
+                if self.is_single_logit_binary:
+                    return binary_distribution_from_labels(oracle_output.long())[:, 1:2]
                 return F.one_hot(oracle_output.long(), num_classes=self.num_classes).float()
+            if self.is_single_logit_binary:
+                return oracle_output.float().clamp(0.0, 1.0)
             target = oracle_output.float().clamp_min(1e-10)
             return target / target.sum(dim=1, keepdim=True).clamp_min(1e-10)
 
         # l1 path
         if oracle_output.ndim == 1:
+            if self.is_single_logit_binary:
+                probs = binary_distribution_from_labels(oracle_output.long())[:, 1:2]
+                return binary_logits_from_positive_probs(probs)
             probs = F.one_hot(oracle_output.long(), num_classes=self.num_classes).float()
             return self._recover_logits_from_probs(probs)
+        if self.is_single_logit_binary:
+            return binary_logits_from_positive_probs(oracle_output.float())
         return self._recover_logits_from_probs(oracle_output.float())
 
     def _student_loss(self, student_logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if self.is_single_logit_binary and self.loss_mode in {"ce", "kl"}:
+            return binary_bce_loss(student_logits, target)
         if self.loss_mode == "ce":
             return F.cross_entropy(student_logits, target.long())
         if self.loss_mode == "kl":

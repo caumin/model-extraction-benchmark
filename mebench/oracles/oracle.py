@@ -4,6 +4,11 @@ import torch
 import torch.nn as nn
 from mebench.core.types import OracleOutput
 from mebench.core.state import BenchmarkState
+from mebench.utils.binary import (
+    binary_hard_labels_from_logits,
+    binary_positive_probs_from_logits,
+    is_single_logit_binary_num_classes,
+)
 
 
 class Oracle:
@@ -23,6 +28,8 @@ class Oracle:
         self.state = state
 
         self.output_mode = config.get("output_mode", "soft_prob")
+        self.num_classes = int(config.get("num_classes", state.metadata.get("num_classes", 0) or 0))
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
         self.temperature = float(config.get("temperature", 1.0))
         # Default behavior historically returned oracle outputs on CPU. Keep that as
         # the default for backward compatibility and to avoid accidentally pinning
@@ -75,13 +82,17 @@ class Oracle:
         logits = logits / self.temperature
 
         if self.output_mode == "soft_prob":
-            # Soft softmax probabilities
-            probs = torch.softmax(logits, dim=1)
+            if self.is_single_logit_binary:
+                probs = binary_positive_probs_from_logits(logits)
+            else:
+                probs = torch.softmax(logits, dim=1)
             y = probs
             kind = "soft_prob"
         elif self.output_mode == "hard_top1":
-            # Hard class label (top-1)
-            labels = torch.argmax(logits, dim=1)
+            if self.is_single_logit_binary:
+                labels = binary_hard_labels_from_logits(logits)
+            else:
+                labels = torch.argmax(logits, dim=1)
             y = labels
             kind = "hard_top1"
         else:

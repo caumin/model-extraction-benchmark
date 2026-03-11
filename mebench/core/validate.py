@@ -3,6 +3,16 @@
 from typing import Dict, Any
 
 
+def _normalize_sewerml_label_mode(raw_mode: Any) -> str:
+    """Normalize SewerML label mode values used by the data loader."""
+    mode = str(raw_mode if raw_mode is not None else "argmax").strip().lower().replace("-", "_")
+    if mode in {"argmax", "single_label", "single", "multilabel", "multiclass"}:
+        return "argmax"
+    if mode in {"binary", "defect", "defect_binary", "binary_label", "is_defect"}:
+        return "binary"
+    raise ValueError(f"Unsupported Sewerml label mode: {raw_mode!r}")
+
+
 def _require_positive_int(config: Dict[str, Any], path: str) -> int:
     cur: Any = config
     for part in path.split("."):
@@ -47,6 +57,13 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError(f"{attack.upper()} requires data_free mode")
     if data_mode in {"seed", "surrogate"} and seed_name not in {"CIFAR10", "MNIST", "EMNIST", "FashionMNIST", "SVHN", "GTSRB", "BelgiumTSC", "SewerML"}:
         raise ValueError(f"Dataset '{seed_name}' not supported for {data_mode} mode")
+
+    if str(seed_name) == "SewerML" and "sewerml_label_mode" in config.get("dataset", {}):
+        normalized_label_mode = _normalize_sewerml_label_mode(config["dataset"]["sewerml_label_mode"])
+        if normalized_label_mode == "binary":
+            victim_num_classes = int(config.get("victim", {}).get("num_classes", 0) or 0)
+            if victim_num_classes != 1:
+                raise ValueError("SewerML binary mode requires victim.num_classes=1 (single-logit binary)")
 
     if data_mode == "surrogate":
         dataset_cfg = config.get("dataset", {})
@@ -128,6 +145,18 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError(f"{attack} requires hard_top1 output mode")
     if attack in both_attacks and attack_mode not in {"soft_prob", "hard_top1"}:
         raise ValueError(f"{attack} requires output_mode to be soft_prob or hard_top1")
+
+    victim_num_classes = int(config.get("victim", {}).get("num_classes", 0) or 0)
+    if victim_num_classes == 1:
+        unsupported_single_logit_attacks = {
+        }
+        if attack in unsupported_single_logit_attacks:
+            raise ValueError(f"{attack} does not support single-logit binary victims yet")
+
+        if attack == "activethief":
+            strategy = str(config.get("attack", {}).get("strategy", "uncertainty")).strip().lower()
+            if "dfal" in strategy:
+                raise ValueError("activethief single-logit binary support excludes DFAL-based strategies")
 
     # BlackboxRipper requires a pretrained generator checkpoint (official repo behavior).
     if attack == "blackbox_ripper":

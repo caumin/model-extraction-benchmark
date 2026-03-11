@@ -134,6 +134,7 @@ def generate_configs(
         },
     }
 
+
     global_pool_budget = int(pool_budget) if pool_budget is not None else None
     global_synthetic_budget = int(synthetic_budget) if synthetic_budget is not None else None
 
@@ -166,14 +167,20 @@ def generate_configs(
             substitute_arch="xie2019",
             channels=3,
             size=224,
-            num_classes=17,
+            num_classes=1,
         ),
     ]
+
+    # SET-C1 is the only SewerML matrix setup.
+    # SewerML publishes both a multilabel model and a defect-vs-normal binary model,
+    # but the multilabel model does not fit the standard extraction-attack contract
+    # used in this benchmark. We therefore benchmark the binary checkpoint only.
 
     # Attack taxonomy used for a single-run-per-attack evaluation.
     # - pool: selection from a public image pool (surrogate)
     # - synthetic: query synthesis / data-free generation
     attacks: List[AttackSpec] = [
+
         AttackSpec("random", kind="pool", label_capability="both"),
         AttackSpec("knockoff_nets", kind="pool", label_capability="soft_only"),
         AttackSpec("cloudleak", kind="pool", label_capability="soft_only"),
@@ -443,12 +450,12 @@ def generate_configs(
                     elif setup.set_id == "SET-C1":
                         victim_config.update(
                             {
-                                "victim_id": "sewerml_xie2019_multilabel_e2e",
+                                "victim_id": "sewerml_xie2019_binary_defect_normal",
                                 "arch": "xie2019",
-                                "num_classes": 17,
+                                "num_classes": 1,
                                 "channels": 3,
                                 "input_size": [224, 224],
-                                "checkpoint_ref": "runs/victims/xie2019_multilabel-e2e-version_1.pth",
+                                "checkpoint_ref": "runs/victims/xie2019_binary-binary-version_1.pth",
                                 "inference_policy": "benchmark",
                             }
                         )
@@ -481,6 +488,9 @@ def generate_configs(
                             "delete_on_finish": True,
                         },
                     }
+
+                    if setup.set_id == "SET-C1":
+                        cfg["dataset"]["sewerml_label_mode"] = "binary"
 
                     if attack.kind == "pool":
                         cfg["attack"].setdefault("initial_seed_ratio", pool_initial_seed_ratio)

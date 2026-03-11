@@ -8,6 +8,12 @@ from torch.utils.data import DataLoader
 from mebench.models.substitute_factory import create_substitute
 from mebench.eval.metrics import evaluate_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_hard_labels_from_logits,
+    binary_hard_targets,
+    is_single_logit_binary_num_classes,
+)
 
 
 class Evaluator:
@@ -63,8 +69,15 @@ class Evaluator:
         )
 
         # Ensure numeric defaults even if a metric is absent in a mode.
-        metrics.setdefault("kl_mean", 0.0)
-        metrics.setdefault("l1_mean", 0.0)
+        for metric_name in (
+            "kl_mean",
+            "l1_mean",
+            "binary_precision",
+            "binary_recall",
+            "binary_f1",
+            "binary_roc_auc",
+        ):
+            metrics.setdefault(metric_name, 0.0)
         return metrics
 
     def evaluate(
@@ -152,8 +165,12 @@ class Evaluator:
         num_steps = int(steps_coeff * checkpoint_budget + 0.9999)
 
         output_mode = self.config["victim"]["output_mode"]
+        victim_num_classes = int(self.config["victim"].get("num_classes", 0) or 0)
+        is_single_logit_binary = is_single_logit_binary_num_classes(victim_num_classes)
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if is_single_logit_binary:
+                return binary_bce_loss(outputs, targets.to(self.device))
             if output_mode == "soft_prob":
                 targets = targets.to(self.device)
                 targets = torch.clamp(targets, min=1e-10)
@@ -195,6 +212,8 @@ class Evaluator:
     ) -> None:
         """Minimal deterministic loop used by unit tests."""
         output_mode = self.config["victim"]["output_mode"]
+        victim_num_classes = int(self.config["victim"].get("num_classes", 0) or 0)
+        is_single_logit_binary = is_single_logit_binary_num_classes(victim_num_classes)
         model.train()
         step = 0
         it = iter(train_loader)
@@ -208,7 +227,9 @@ class Evaluator:
             x_batch = x_batch.to(self.device)
             outputs = model(x_batch)
 
-            if output_mode == "soft_prob":
+            if is_single_logit_binary:
+                loss = binary_bce_loss(outputs, y_batch.to(self.device))
+            elif output_mode == "soft_prob":
                 targets = y_batch.to(self.device)
                 targets = torch.clamp(targets, min=1e-10)
                 targets = targets / targets.sum(dim=1, keepdim=True)
@@ -238,11 +259,16 @@ class Evaluator:
                 outputs = model(x_batch)
 
                 # Get predictions
-                preds = torch.argmax(outputs, dim=1).cpu().numpy()
+                if outputs.dim() == 1 or (outputs.dim() == 2 and outputs.size(1) == 1):
+                    preds = binary_hard_labels_from_logits(outputs).cpu().numpy()
+                else:
+                    preds = torch.argmax(outputs, dim=1).cpu().numpy()
                 all_preds.extend(preds)
 
                 # Get true labels
-                if output_mode == "soft_prob":
+                if outputs.dim() == 1 or (outputs.dim() == 2 and outputs.size(1) == 1):
+                    targets = binary_hard_targets(y_batch).cpu().numpy()
+                elif output_mode == "soft_prob":
                     targets = torch.argmax(y_batch, dim=1).cpu().numpy()
                 else:
                     targets = y_batch.cpu().numpy()

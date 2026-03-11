@@ -28,7 +28,9 @@ class OracleOutput:
 
     Attributes:
         kind: Output mode - "soft_prob" or "hard_top1"
-        y: Softmax probs [B, K] if soft_prob, class labels [B] if hard_top1
+        y: Soft probabilities [B, K] for multiclass soft_prob, positive-class
+           probabilities [B, 1] for single-logit binary soft_prob, class labels
+           [B] if hard_top1
     """
 
     kind: str  # "soft_prob" or "hard_top1"

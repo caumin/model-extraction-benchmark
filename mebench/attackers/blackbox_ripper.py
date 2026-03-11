@@ -17,6 +17,12 @@ from mebench.models.blackbox_ripper import (
 from mebench.models.substitute_factory import create_substitute
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_logits,
+    binary_distribution_from_positive_probs,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.scaling import clamp_unit
 
 
@@ -100,6 +106,8 @@ class BlackboxRipper(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
+        self.semantic_num_classes = 2 if self.is_single_logit_binary else self.num_classes
 
         # Generator selection (upstream uses SNGAN or ProGAN checkpoints).
         self.generator_name = str(config.get("generator_name") or config.get("gan_backbone") or "cifar_sngan")
@@ -197,7 +205,10 @@ class BlackboxRipper(AttackRunner):
                 if self.log_interval > 0 and (iter_n % self.log_interval == 0):
                     with torch.no_grad():
                         logits = self.substitute(x_batch)
-                        probs = torch.softmax(logits, dim=-1)
+                        if self.is_single_logit_binary:
+                            probs = binary_distribution_from_logits(logits)
+                        else:
+                            probs = torch.softmax(logits, dim=-1)
                         acc = probs.argmax(dim=1).eq(y_batch.argmax(dim=1)).float().mean().item()
                     self.logger.info(
                         "Epoch %d/%d, iter %d/%d, acc=%.4f",
@@ -341,8 +352,8 @@ class BlackboxRipper(AttackRunner):
         latent_dim = int(getattr(self.generator, "latent_dim", 128))
         population = torch.empty(self.population_size, latent_dim, device=device)
         population.uniform_(-self.latent_bound, self.latent_bound)
-        target_cls = int(torch.randint(0, self.num_classes, (1,), device=device).item())
-        target_onehot = F.one_hot(torch.tensor(target_cls, device=device), num_classes=self.num_classes).float()
+        target_cls = int(torch.randint(0, self.semantic_num_classes, (1,), device=device).item())
+        target_onehot = F.one_hot(torch.tensor(target_cls, device=device), num_classes=self.semantic_num_classes).float()
 
         best_x: Optional[torch.Tensor] = None
         best_probs: Optional[torch.Tensor] = None
@@ -372,6 +383,8 @@ class BlackboxRipper(AttackRunner):
             if oracle_out.kind != "soft_prob":
                 raise ValueError("BlackboxRipper requires soft_prob oracle output")
             probs = oracle_out.y.to(device)
+            if self.is_single_logit_binary:
+                probs = binary_distribution_from_positive_probs(probs)
 
             obj = self._objective_mse_sum(probs, target_onehot)
             # Select top-10 elites by objective (lower is better).
@@ -413,6 +426,8 @@ class BlackboxRipper(AttackRunner):
             if out2.kind != "soft_prob":
                 raise ValueError("BlackboxRipper requires soft_prob oracle output")
             best_probs = out2.y.to(device)
+            if self.is_single_logit_binary:
+                best_probs = binary_distribution_from_positive_probs(best_probs)
 
         return best_x, best_probs
 
@@ -457,8 +472,11 @@ class BlackboxRipper(AttackRunner):
 
         self.substitute_optimizer.zero_grad(set_to_none=True)
         logits = self.substitute(x_batch)
-        probs = torch.softmax(logits, dim=-1)
-        loss = self.substitute_loss(probs, y_batch)
+        if self.is_single_logit_binary:
+            loss = binary_bce_loss(logits, y_batch[:, 1:2])
+        else:
+            probs = torch.softmax(logits, dim=-1)
+            loss = self.substitute_loss(probs, y_batch)
         loss.backward()
 
         # Upstream gradient clipping: clamp individual gradients.

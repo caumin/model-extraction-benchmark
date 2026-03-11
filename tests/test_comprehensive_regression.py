@@ -250,7 +250,7 @@ class TestLearningRateCompliance:
                 "generator_lr": 1e-4
             },
             "ds": {
-                "student_lr": 0.01,
+                "student_lr": 0.3,
                 "generator_lr": 1e-4,
             },
             "disguide": {

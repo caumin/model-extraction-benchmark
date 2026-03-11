@@ -23,6 +23,12 @@ from mebench.models.substitute_factory import create_substitute
 from mebench.attackers.dfms_budget import DFMSBudgetPlan, planned_stage5_epochs
 from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_logits,
+    binary_hard_labels_from_positive_probs,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.scaling import tanh_to_unit, clamp_unit, unit_to_tanh
 
 
@@ -48,6 +54,7 @@ class DFMSHL(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
         self.base_channels = int(config.get("base_channels", 64))
 
         dataset_name = state.metadata.get("dataset_config", {}).get("name", "cifar10")
@@ -1095,7 +1102,10 @@ class DFMSHL(AttackRunner):
                     self.clone.train()
                     self.clone_optimizer.zero_grad(set_to_none=True)
                     logits = self.clone(self._unit_to_internal(x_for_student))
-                    loss_s = F.cross_entropy(logits, y)
+                    if self.is_single_logit_binary:
+                        loss_s = binary_bce_loss(logits, y.float().unsqueeze(1))
+                    else:
+                        loss_s = F.cross_entropy(logits, y)
                     loss_s.backward()
                     self.clone_optimizer.step()
 
@@ -1173,7 +1183,10 @@ class DFMSHL(AttackRunner):
         if oracle_output.kind == "hard_top1":
             hard_labels = oracle_output.y
         else:
-            hard_labels = torch.argmax(oracle_output.y, dim=1)
+            if self.is_single_logit_binary:
+                hard_labels = binary_hard_labels_from_positive_probs(oracle_output.y)
+            else:
+                hard_labels = torch.argmax(oracle_output.y, dim=1)
 
         hard_labels = hard_labels.to(device)
         phase = state.attack_state["phase"]
@@ -1401,7 +1414,10 @@ class DFMSHL(AttackRunner):
                 p.requires_grad_(rg)
             if clone_was_training:
                 self.clone.train()
-        probs = F.softmax(clone_logits, dim=1)
+        if self.is_single_logit_binary:
+            probs = binary_distribution_from_logits(clone_logits)
+        else:
+            probs = F.softmax(clone_logits, dim=1)
         
         # Diversity (paper Eq.(5)-(7)): use batch-mean class distribution alpha.
         # Paper sets div=500 for CIFAR-10 and div=100 for CIFAR-100 (DFMS.pdf ablation).
@@ -1459,7 +1475,10 @@ class DFMSHL(AttackRunner):
             batch_y = batch_y_cpu.to(device)
             self.clone_optimizer.zero_grad()
             logits = self.clone(self._unit_to_internal(batch_x))
-            loss = F.cross_entropy(logits, batch_y)
+            if self.is_single_logit_binary:
+                loss = binary_bce_loss(logits, batch_y.float().unsqueeze(1))
+            else:
+                loss = F.cross_entropy(logits, batch_y)
             loss.backward()
             self.clone_optimizer.step()
 

@@ -18,6 +18,13 @@ from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.utils.config_aliases import resolve_iterations
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_entropy_from_positive_probs,
+    binary_hard_labels_from_positive_probs,
+    binary_positive_probs_from_logits,
+    is_single_logit_binary_num_classes,
+)
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_pool_num_workers,
@@ -50,6 +57,7 @@ class ActiveThief(AttackRunner):
             or self.config.get("num_classes")
             or self.state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
         
         # Fixed-required semantics: strategy family + pool-based querying.
         # Training knobs (rounds/step size) remain tunable in benchmark runs.
@@ -338,6 +346,8 @@ class ActiveThief(AttackRunner):
         output_mode = str(self.config.get("output_mode", "soft_prob"))
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if getattr(self, "is_single_logit_binary", False):
+                return binary_bce_loss(outputs, targets)
             if output_mode == "soft_prob":
                 targets = targets.to(device)
                 targets = torch.clamp(targets, min=1e-10)
@@ -355,7 +365,9 @@ class ActiveThief(AttackRunner):
                 for x, y in loader:
                     x, y = x.to(device), y.to(device)
                     outputs = model(x)
-                    if output_mode == "soft_prob":
+                    if getattr(self, "is_single_logit_binary", False):
+                        loss = binary_bce_loss(outputs, y)
+                    elif output_mode == "soft_prob":
                         y = torch.clamp(y, min=1e-10)
                         y = y / y.sum(dim=1, keepdim=True).clamp_min(1e-12)
                         loss = F.kl_div(F.log_softmax(outputs, dim=1), y, reduction="batchmean")
@@ -404,7 +416,10 @@ class ActiveThief(AttackRunner):
         Eq: H_n = -sum(y_nj * log(y_nj))
         """
         # Compute entropy
-        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
+        if getattr(self, "is_single_logit_binary", False):
+            entropy = binary_entropy_from_positive_probs(probs)
+        else:
+            entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
         # [OPTIMIZATION] topk on GPU is much faster
         _, indices = torch.topk(entropy, k)
         return indices.cpu().tolist()
@@ -473,7 +488,7 @@ class ActiveThief(AttackRunner):
         return selected
 
     def _collect_probs(self, loader: DataLoader, device: str) -> torch.Tensor:
-        """Collect softmax probabilities for a loader."""
+        """Collect probabilities for a loader."""
         all_probs = []
         self.substitute.eval()
         non_blocking = str(device).startswith("cuda")
@@ -481,7 +496,10 @@ class ActiveThief(AttackRunner):
             for x_batch, _ in loader:
                 x_batch = x_batch.to(device, non_blocking=non_blocking)
                 logits = self.substitute(x_batch)
-                probs = F.softmax(logits, dim=1)
+                if getattr(self, "is_single_logit_binary", False):
+                    probs = binary_positive_probs_from_logits(logits)
+                else:
+                    probs = F.softmax(logits, dim=1)
                 # [OPTIMIZATION] Keep on GPU to avoid Host-Device transfer bottleneck
                 all_probs.append(probs.detach())
         return torch.cat(all_probs, dim=0)
@@ -897,7 +915,10 @@ class ActiveThief(AttackRunner):
         # - hard_top1: store class indices for CE training
         if oracle_output.kind == "soft_prob":
             probs = oracle_output.y.detach().cpu().float()
-            hard_labels = probs.argmax(dim=1)
+            if getattr(self, "is_single_logit_binary", False):
+                hard_labels = binary_hard_labels_from_positive_probs(probs)
+            else:
+                hard_labels = probs.argmax(dim=1)
             y_cpu = probs
         else:
             hard_labels = oracle_output.y.detach().cpu().long()

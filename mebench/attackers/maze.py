@@ -13,6 +13,11 @@ from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.models.substitute_factory import create_substitute
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_positive_probs_from_logits,
+    is_single_logit_binary_num_classes,
+)
 
 
 class _OfficialMAZEConv3Generator(nn.Module):
@@ -125,6 +130,9 @@ class MAZE(AttackRunner):
         self.replay_buffer: List[Tuple[torch.Tensor, torch.Tensor]] = []
         self._cached_clone_x: Optional[torch.Tensor] = None
         self._cached_clone_y: Optional[torch.Tensor] = None
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(
+            int(state.metadata.get("num_classes", 10))
+        )
         
         self._initialize_models(state)
 
@@ -301,14 +309,22 @@ class MAZE(AttackRunner):
                 self._cached_clone_x = x_base.detach()
                 self._cached_clone_y = y_t_base.detach()
 
-                loss_base = -F.kl_div(torch.log(y_c_base + 1e-10), y_t_base, reduction='none').sum(dim=1)
+                if self.is_single_logit_binary:
+                    base_logits = self.clone(self._normalize(x_base))
+                    loss_base = -binary_bce_loss(base_logits, y_t_base, reduction="none").view(-1)
+                else:
+                    loss_base = -F.kl_div(torch.log(y_c_base + 1e-10), y_t_base, reduction='none').sum(dim=1)
 
                 for j in range(self.grad_approx_m):
                     u = u_list[j]
                     x_pert = torch.tanh(pre_tanh + self.epsilon * u)
-                    y_c_pert = self._clone_probs_eval(x_pert)
                     y_t_pert = y_t_pert_all[j]
-                    loss_pert = -F.kl_div(torch.log(y_c_pert + 1e-10), y_t_pert, reduction='none').sum(dim=1)
+                    if self.is_single_logit_binary:
+                        pert_logits = self.clone(self._normalize(x_pert))
+                        loss_pert = -binary_bce_loss(pert_logits, y_t_pert, reduction="none").view(-1)
+                    else:
+                        y_c_pert = self._clone_probs_eval(x_pert)
+                        loss_pert = -F.kl_div(torch.log(y_c_pert + 1e-10), y_t_pert, reduction='none').sum(dim=1)
                     grad_est_x += (d / self.grad_approx_m) * ((loss_pert - loss_base).view(-1, 1, 1, 1) / self.epsilon) * u
 
                 # Official implementation averages zeroth-order estimate over batch.
@@ -350,8 +366,12 @@ class MAZE(AttackRunner):
                 
                 # Minimize KL Divergence (Eq. 4)
                 self.c_opt.zero_grad()
-                y_c = F.log_softmax(self.clone(self._normalize(x_gen)), dim=1)
-                loss = F.kl_div(y_c, y_t, reduction='batchmean')
+                clone_logits = self.clone(self._normalize(x_gen))
+                if self.is_single_logit_binary:
+                    loss = binary_bce_loss(clone_logits, y_t)
+                else:
+                    y_c = F.log_softmax(clone_logits, dim=1)
+                    loss = F.kl_div(y_c, y_t, reduction='batchmean')
                 loss.backward(); self.c_opt.step()
 
                 if clone_was_training:
@@ -390,8 +410,12 @@ class MAZE(AttackRunner):
                         break
 
                     self.c_opt.zero_grad()
-                    y_c_r = F.log_softmax(self.clone(self._normalize(x_r.to(device))), dim=1)
-                    F.kl_div(y_c_r, y_r.to(device), reduction='batchmean').backward()
+                    replay_logits = self.clone(self._normalize(x_r.to(device)))
+                    if self.is_single_logit_binary:
+                        binary_bce_loss(replay_logits, y_r.to(device)).backward()
+                    else:
+                        y_c_r = F.log_softmax(replay_logits, dim=1)
+                        F.kl_div(y_c_r, y_r.to(device), reduction='batchmean').backward()
                     self.c_opt.step()
 
             if self.lr_schedule == "cosine":
@@ -425,6 +449,8 @@ class MAZE(AttackRunner):
         x_in = self._normalize(x).contiguous()
         with torch.no_grad():
             logits = self.clone(x_in)
+        if self.is_single_logit_binary:
+            return binary_positive_probs_from_logits(logits.float())
         return F.softmax(logits.float(), dim=1)
 
     def _query_scale(self, x_tanh: torch.Tensor) -> torch.Tensor:

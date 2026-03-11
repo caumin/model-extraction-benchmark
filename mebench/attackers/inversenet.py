@@ -26,6 +26,13 @@ from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
 from mebench.models.inversion import InversionGenerator
 from mebench.utils.adversarial import deepfool_distance_vectorized
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_labels,
+    binary_distribution_from_targets,
+    binary_hard_targets,
+    is_single_logit_binary_num_classes,
+)
 
 
 class InverseNet(AttackRunner):
@@ -42,6 +49,8 @@ class InverseNet(AttackRunner):
             or config.get("num_classes")
             or state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(self.num_classes)
+        self.semantic_num_classes = 2 if self.is_single_logit_binary else self.num_classes
         self.inversion_lr = float(config.get("inversion_lr", 1e-3))
         self.substitute_lr = float(config.get("substitute_lr", 0.01))
         self.inversion_epochs = int(config.get("inversion_epochs", 5))
@@ -226,7 +235,7 @@ class InverseNet(AttackRunner):
             raise ValueError("InverseNet requires hard_top1 oracle outputs.")
 
         victim_labels = oracle_output.y.detach().cpu().long()
-        victim_probs = F.one_hot(victim_labels, num_classes=self.num_classes).float()
+        victim_probs = binary_distribution_from_labels(victim_labels) if self.is_single_logit_binary else F.one_hot(victim_labels, num_classes=self.num_classes).float()
         query_targets = victim_labels
 
         # Phase 1 (K1): collect labeled coreset samples for initial substitute.
@@ -467,9 +476,9 @@ class InverseNet(AttackRunner):
 
         confidences = [1.0, 0.9, 0.8]
         templates = []
-        for c in range(self.num_classes):
+        for c in range(self.semantic_num_classes):
             for conf in confidences:
-                y = torch.zeros(self.num_classes, device=device)
+                y = torch.zeros(self.semantic_num_classes, device=device)
                 y[c] = float(conf)
                 templates.append(y)
 
@@ -568,7 +577,7 @@ class InverseNet(AttackRunner):
             device = state.metadata.get("device", "cpu")
             self.substitute = create_substitute(
                 arch=self.config.get("substitute_arch", "resnet18"),
-                num_classes=self.num_classes,
+                num_classes=self.semantic_num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
             ).to(device)
             
@@ -601,7 +610,10 @@ class InverseNet(AttackRunner):
                 self.substitute_optimizer.zero_grad(set_to_none=True)
                 logits = self.substitute(x_replay)
                 if y_replay.ndim == 1 or (y_replay.ndim == 2 and y_replay.size(1) == 1):
-                    loss = F.cross_entropy(logits, y_replay.long().view(-1))
+                    if self.is_single_logit_binary:
+                        loss = binary_bce_loss(logits, y_replay)
+                    else:
+                        loss = F.cross_entropy(logits, y_replay.long().view(-1))
                 else:
                     log_probs = F.log_softmax(logits, dim=1)
                     loss = F.kl_div(log_probs, y_replay, reduction="batchmean")
@@ -660,10 +672,12 @@ class InverseNet(AttackRunner):
         if labels is None or x_aug.size(0) < 2:
             return x_aug
 
-        if labels.ndim > 1:
-            class_ids = labels.argmax(dim=1)
-        else:
-            class_ids = labels
+            if self.is_single_logit_binary:
+                class_ids = binary_hard_targets(labels).to(torch.long)
+            elif labels.ndim > 1:
+                class_ids = labels.argmax(dim=1)
+            else:
+                class_ids = labels
 
         class_ids = class_ids.to(x_aug.device)
         x_mix = x_aug.clone()
@@ -723,7 +737,7 @@ class InverseNet(AttackRunner):
             dropout_prob = float(sub_config.get("dropout_prob", 0.0))
             self.substitute = create_substitute(
                 arch=arch,
-                num_classes=self.num_classes,
+            num_classes=self.semantic_num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
@@ -738,6 +752,8 @@ class InverseNet(AttackRunner):
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
             if targets.ndim == 1 or (targets.ndim == 2 and targets.size(1) == 1):
+                if self.is_single_logit_binary:
+                    return binary_bce_loss(outputs, targets)
                 return F.cross_entropy(outputs, targets.long().view(-1))
             log_probs = F.log_softmax(outputs, dim=1)
             return F.kl_div(log_probs, targets, reduction="batchmean")
@@ -752,7 +768,10 @@ class InverseNet(AttackRunner):
                     y_val_b = y_val_b.to(device)
                     outputs = model_local(x_val_b)
                     if y_val_b.ndim == 1 or (y_val_b.ndim == 2 and y_val_b.size(1) == 1):
-                        loss = F.cross_entropy(outputs, y_val_b.long().view(-1))
+                        if self.is_single_logit_binary:
+                            loss = binary_bce_loss(outputs, y_val_b)
+                        else:
+                            loss = F.cross_entropy(outputs, y_val_b.long().view(-1))
                     else:
                         loss = F.kl_div(F.log_softmax(outputs, dim=1), y_val_b, reduction="batchmean")
                     total_loss += float(loss.item()) * int(x_val_b.size(0))
@@ -839,6 +858,8 @@ class InverseNet(AttackRunner):
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
             if targets.ndim == 1 or (targets.ndim == 2 and targets.size(1) == 1):
+                if self.is_single_logit_binary:
+                    return binary_bce_loss(outputs, targets)
                 return F.cross_entropy(outputs, targets.long().view(-1))
             log_probs = F.log_softmax(outputs, dim=1)
             return F.kl_div(log_probs, targets, reduction="batchmean")
@@ -853,7 +874,10 @@ class InverseNet(AttackRunner):
                     y_val_b = y_val_b.to(device)
                     outputs = model_local(x_val_b)
                     if y_val_b.ndim == 1 or (y_val_b.ndim == 2 and y_val_b.size(1) == 1):
-                        loss = F.cross_entropy(outputs, y_val_b.long().view(-1))
+                        if self.is_single_logit_binary:
+                            loss = binary_bce_loss(outputs, y_val_b)
+                        else:
+                            loss = F.cross_entropy(outputs, y_val_b.long().view(-1))
                     else:
                         loss = F.kl_div(
                             F.log_softmax(outputs, dim=1),
