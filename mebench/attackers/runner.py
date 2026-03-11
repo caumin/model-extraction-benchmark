@@ -171,6 +171,8 @@ class AttackRunner(ABC):
                 sewerml_label_mode=str(
                     self.state.metadata.get("dataset_config", {}).get("sewerml_label_mode", "argmax")
                 ),
+                sewerml_ann_root=self.state.metadata.get("dataset_config", {}).get("sewerml_ann_root"),
+                sewerml_data_root=self.state.metadata.get("dataset_config", {}).get("sewerml_data_root"),
             )
 
         metrics = evaluate_substitute(

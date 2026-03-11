@@ -876,6 +876,8 @@ def get_test_dataloader(
     input_size: Optional[Tuple[int, int]] = None,
     channels: Optional[int] = None,
     sewerml_label_mode: str = "argmax",
+    sewerml_ann_root: Optional[str] = None,
+    sewerml_data_root: Optional[str] = None,
 ) -> DataLoader:
     """Get test dataloader for victim dataset."""
     if name == "CIFAR10":
@@ -971,7 +973,10 @@ def get_test_dataloader(
             transforms.ToTensor(),
             transforms.Normalize(SEWERML_MEAN, SEWERML_STD),
         ])
-        ann_root, data_root = _resolve_sewerml_roots()
+        ann_root, data_root = _resolve_sewerml_roots(
+            ann_root=sewerml_ann_root,
+            img_root=sewerml_data_root,
+        )
         dataset = SewerMLDataset(
             ann_root=str(ann_root),
             img_root=str(data_root),

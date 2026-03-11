@@ -75,6 +75,26 @@ def test_get_test_dataloader_sewerml_binary_mode(monkeypatch, tmp_path: Path) ->
     assert set(y.tolist()).issubset({0, 1})
 
 
+def test_get_test_dataloader_sewerml_explicit_roots(tmp_path: Path, monkeypatch) -> None:
+    ann_root, data_root = _write_dummy_sewerml(tmp_path)
+    monkeypatch.delenv("SEWERML_ANN_ROOT", raising=False)
+    monkeypatch.delenv("SEWERML_DATA_ROOT", raising=False)
+
+    loader = get_test_dataloader(
+        name="SewerML",
+        batch_size=2,
+        num_workers=0,
+        input_size=(224, 224),
+        sewerml_label_mode="binary",
+        sewerml_ann_root=str(ann_root),
+        sewerml_data_root=str(data_root),
+    )
+    x, y = next(iter(loader))
+
+    assert tuple(x.shape) == (2, 3, 224, 224)
+    assert y.tolist() == [1, 1]
+
+
 def test_get_test_dataloader_sewerml_invalid_binary_annotation(monkeypatch, tmp_path: Path) -> None:
     ann_root, data_root = _write_dummy_sewerml(tmp_path)
     # remove Defect column from CSV files

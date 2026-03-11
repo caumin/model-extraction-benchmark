@@ -166,6 +166,8 @@ def run_experiment(
                 input_size=size,
                 channels=int(channels) if channels is not None else None,
                 sewerml_label_mode=str(config.get("dataset", {}).get("sewerml_label_mode", "argmax")),
+                sewerml_ann_root=config.get("dataset", {}).get("sewerml_ann_root"),
+                sewerml_data_root=config.get("dataset", {}).get("sewerml_data_root"),
             )
             victim_acc = compute_accuracy(victim, test_loader, device)
             print(f"[VERIFY] Victim Test Accuracy: {victim_acc*100:.2f}%")

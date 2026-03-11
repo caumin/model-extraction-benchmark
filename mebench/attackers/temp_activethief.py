@@ -218,6 +218,8 @@ class TempActiveThief(AttackRunner):
                 batch_size=128,
                 input_size=size,
                 channels=int(channels) if channels is not None else None,
+                sewerml_ann_root=branch_attack.state.metadata.get("dataset_config", {}).get("sewerml_ann_root"),
+                sewerml_data_root=branch_attack.state.metadata.get("dataset_config", {}).get("sewerml_data_root"),
             )
 
         metrics = evaluate_substitute(
