@@ -42,6 +42,13 @@ def _write_dummy_sewerml(tmp_path: Path) -> tuple[Path, Path]:
     return ann_root, data_root
 
 
+def _move_images_into_split_dir(data_root: Path, split_dir: str) -> None:
+    split_root = data_root / split_dir
+    split_root.mkdir(parents=True, exist_ok=True)
+    for image_path in list(data_root.glob("*.jpg")):
+        image_path.rename(split_root / image_path.name)
+
+
 def test_get_test_dataloader_sewerml(monkeypatch, tmp_path: Path) -> None:
     ann_root, data_root = _write_dummy_sewerml(tmp_path)
     monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
@@ -93,6 +100,20 @@ def test_get_test_dataloader_sewerml_accepts_official_val_csv_name(monkeypatch, 
     _, y = next(iter(loader))
 
     assert y.tolist() == [0, 3]
+
+
+def test_get_test_dataloader_sewerml_reads_images_from_valid_subdirectory(monkeypatch, tmp_path: Path) -> None:
+    ann_root, data_root = _write_dummy_sewerml(tmp_path)
+    _move_images_into_split_dir(data_root, "valid")
+
+    monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
+    monkeypatch.setenv("SEWERML_DATA_ROOT", str(data_root))
+
+    loader = get_test_dataloader(name="SewerML", batch_size=2, num_workers=0, input_size=(224, 224))
+    x, y = next(iter(loader))
+
+    assert tuple(x.shape) == (2, 3, 224, 224)
+    assert y.tolist() == [3, 1]
 
 
 def test_get_test_dataloader_sewerml_binary_mode(monkeypatch, tmp_path: Path) -> None:

@@ -399,6 +399,25 @@ def _resolve_sewerml_csv_path(ann_root: Path, split: str) -> Path:
     )
 
 
+def _resolve_sewerml_image_path(img_root: Path, split: str, rel_path: str) -> Path:
+    rel = Path(rel_path)
+    candidates = [img_root / rel]
+
+    split_name = str(split).strip().lower()
+    if split_name:
+        candidates.append(img_root / split_name / rel)
+        if split_name == "valid":
+            candidates.append(img_root / "val" / rel)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(
+        "SewerML image missing. Checked: " + ", ".join(str(c) for c in candidates)
+    )
+
+
 class SewerMLDataset(Dataset):
     """Sewer-ML dataset adapter based on official annotation format.
 
@@ -445,9 +464,7 @@ class SewerMLDataset(Dataset):
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         rel_path = str(self.img_paths[int(index)])
-        img_path = self.img_root / rel_path
-        if not img_path.exists():
-            raise FileNotFoundError(f"SewerML image missing: {img_path}")
+        img_path = _resolve_sewerml_image_path(self.img_root, self.split, rel_path)
         img = Image.open(img_path).convert("RGB")
         if self.transform is not None:
             img = self.transform(img)
