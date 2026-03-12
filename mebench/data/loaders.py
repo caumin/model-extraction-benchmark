@@ -388,6 +388,8 @@ def _resolve_sewerml_csv_path(ann_root: Path, split: str) -> Path:
         ann_root / f"{split_name}13.csv",
         ann_root / f"SewerML_{split_name}.csv",
     ]
+    if split_name.lower() == "valid":
+        candidates.append(ann_root / "SewerML_Val.csv")
     for candidate in candidates:
         if candidate.exists():
             return candidate

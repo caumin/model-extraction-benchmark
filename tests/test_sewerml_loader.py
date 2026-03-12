@@ -75,6 +75,26 @@ def test_get_test_dataloader_sewerml_uses_valid_split_by_default(monkeypatch, tm
     assert y.tolist() == [0, 3]
 
 
+def test_get_test_dataloader_sewerml_accepts_official_val_csv_name(monkeypatch, tmp_path: Path) -> None:
+    ann_root, data_root = _write_dummy_sewerml(tmp_path)
+    valid_df = pd.read_csv(ann_root / "Valid13.csv")
+    valid_df["Defect"] = [0, 1]
+    valid_df.loc[0, SEWERML_LABELS] = 0
+    valid_df.loc[0, "RB"] = 1
+    valid_df.loc[1, SEWERML_LABELS] = 0
+    valid_df.loc[1, "DE"] = 1
+    (ann_root / "Valid13.csv").unlink()
+    valid_df.to_csv(ann_root / "SewerML_Val.csv", index=False)
+
+    monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
+    monkeypatch.setenv("SEWERML_DATA_ROOT", str(data_root))
+
+    loader = get_test_dataloader(name="SewerML", batch_size=2, num_workers=0, input_size=(224, 224))
+    _, y = next(iter(loader))
+
+    assert y.tolist() == [0, 3]
+
+
 def test_get_test_dataloader_sewerml_binary_mode(monkeypatch, tmp_path: Path) -> None:
     ann_root, data_root = _write_dummy_sewerml(tmp_path)
     monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
