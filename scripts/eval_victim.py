@@ -94,6 +94,7 @@ def main() -> None:
         sewerml_label_mode=str(_cfg_get(dataset_cfg, "sewerml_label_mode", default="argmax")),
         sewerml_ann_root=_cfg_get(dataset_cfg, "sewerml_ann_root", default=None),
         sewerml_data_root=_cfg_get(dataset_cfg, "sewerml_data_root", default=None),
+        sewerml_eval_split=_cfg_get(dataset_cfg, "sewerml_eval_split", default=None),
     )
     acc = float(compute_accuracy(model, test_loader, device))
 

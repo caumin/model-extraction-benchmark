@@ -80,7 +80,20 @@ def _parse_sewerml_labels(gt: pd.DataFrame, label_mode: str) -> list[int]:
 
     if mode == "binary":
         if "Defect" not in gt.columns:
-            raise ValueError("SewerML binary mode requires Defect column")
+            missing = [col for col in SEWERML_LABELS if col not in gt.columns]
+            if missing:
+                raise ValueError(
+                    "SewerML binary mode requires Defect column or all defect label columns: "
+                    + ", ".join(missing)
+                )
+
+            labels_raw = gt[SEWERML_LABELS].to_numpy(dtype="float32")
+            labels_tensor = torch.from_numpy(labels_raw)
+            labels_tensor = torch.nan_to_num(labels_tensor, nan=0.0)
+            ok_idx = SEWERML_LABELS.index("OK")
+            has_non_ok_defect = torch.sum(labels_tensor, dim=1) - labels_tensor[:, ok_idx]
+            y = (has_non_ok_defect > 0).long()
+            return y.tolist()
 
         defect_raw = gt["Defect"].astype(str).str.strip()
         defect_clean = pd.to_numeric(defect_raw, errors="coerce")
@@ -410,17 +423,20 @@ class SewerMLDataset(Dataset):
         self.classes = ["no_defect", "defect"] if mode == "binary" else list(SEWERML_LABELS)
 
         csv_path = _resolve_sewerml_csv_path(self.ann_root, self.split)
-        required = ["Filename"] + (["Defect"] if mode == "binary" else SEWERML_LABELS)
         try:
-            gt = pd.read_csv(csv_path, sep=",", encoding="utf-8", usecols=required)
+            gt = pd.read_csv(csv_path, sep=",", encoding="utf-8")
         except ValueError as exc:
             raise ValueError(
                 f"Invalid SewerML annotation format for label_mode={mode}: {csv_path}"
             ) from exc
 
+        if "Filename" not in gt.columns:
+            raise ValueError(
+                f"Invalid SewerML annotation format for label_mode={mode}: {csv_path}"
+            )
+
         self.img_paths = [str(v) for v in gt["Filename"].values]
-        full_gt = pd.read_csv(csv_path, sep=",", encoding="utf-8")
-        self.targets = _parse_sewerml_labels(full_gt, mode)
+        self.targets = _parse_sewerml_labels(gt, mode)
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -878,6 +894,7 @@ def get_test_dataloader(
     sewerml_label_mode: str = "argmax",
     sewerml_ann_root: Optional[str] = None,
     sewerml_data_root: Optional[str] = None,
+    sewerml_eval_split: Optional[str] = None,
 ) -> DataLoader:
     """Get test dataloader for victim dataset."""
     if name == "CIFAR10":
@@ -977,10 +994,11 @@ def get_test_dataloader(
             ann_root=sewerml_ann_root,
             img_root=sewerml_data_root,
         )
+        split = str(sewerml_eval_split or "Valid")
         dataset = SewerMLDataset(
             ann_root=str(ann_root),
             img_root=str(data_root),
-            split="Test",
+            split=split,
             label_mode=sewerml_label_mode,
             transform=transform,
         )

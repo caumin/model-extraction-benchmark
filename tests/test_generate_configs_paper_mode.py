@@ -181,6 +181,7 @@ def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
     assert set_c_cfg["victim"]["arch"] == "xie2019"
     assert int(set_c_cfg["victim"]["num_classes"]) == 1
     assert set_c_cfg["dataset"]["sewerml_label_mode"] == "binary"
+    assert set_c_cfg["dataset"]["sewerml_eval_split"] == "Valid"
     assert set_c_cfg["victim"]["checkpoint_ref"] == "runs/victims/xie2019_binary-binary-version_1.pth"
     assert int(set_c_cfg["dataset"]["surrogate_max_samples"]) == 100_000
 

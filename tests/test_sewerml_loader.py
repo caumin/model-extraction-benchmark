@@ -38,6 +38,7 @@ def _write_dummy_sewerml(tmp_path: Path) -> tuple[Path, Path]:
     df = pd.DataFrame(rows)
     df.to_csv(ann_root / "Train13.csv", index=False)
     df.to_csv(ann_root / "Test13.csv", index=False)
+    df.to_csv(ann_root / "Valid13.csv", index=False)
     return ann_root, data_root
 
 
@@ -53,6 +54,25 @@ def test_get_test_dataloader_sewerml(monkeypatch, tmp_path: Path) -> None:
     assert y.dtype == torch.int64
     assert set(y.tolist()).issubset(set(range(len(SEWERML_LABELS))))
     assert y.tolist() == [3, 1]
+
+
+def test_get_test_dataloader_sewerml_uses_valid_split_by_default(monkeypatch, tmp_path: Path) -> None:
+    ann_root, data_root = _write_dummy_sewerml(tmp_path)
+    valid_df = pd.read_csv(ann_root / "Valid13.csv")
+    valid_df["Defect"] = [0, 1]
+    valid_df.loc[0, SEWERML_LABELS] = 0
+    valid_df.loc[0, "RB"] = 1
+    valid_df.loc[1, SEWERML_LABELS] = 0
+    valid_df.loc[1, "DE"] = 1
+    valid_df.to_csv(ann_root / "Valid13.csv", index=False)
+
+    monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
+    monkeypatch.setenv("SEWERML_DATA_ROOT", str(data_root))
+
+    loader = get_test_dataloader(name="SewerML", batch_size=2, num_workers=0, input_size=(224, 224))
+    _, y = next(iter(loader))
+
+    assert y.tolist() == [0, 3]
 
 
 def test_get_test_dataloader_sewerml_binary_mode(monkeypatch, tmp_path: Path) -> None:
@@ -95,9 +115,10 @@ def test_get_test_dataloader_sewerml_explicit_roots(tmp_path: Path, monkeypatch)
     assert y.tolist() == [1, 1]
 
 
-def test_get_test_dataloader_sewerml_invalid_binary_annotation(monkeypatch, tmp_path: Path) -> None:
+def test_get_test_dataloader_sewerml_binary_mode_derives_target_without_defect_column(
+    monkeypatch, tmp_path: Path
+) -> None:
     ann_root, data_root = _write_dummy_sewerml(tmp_path)
-    # remove Defect column from CSV files
     ann_df = pd.read_csv(ann_root / "Test13.csv")
     ann_df = ann_df.drop(columns=["Defect"])
     ann_df.to_csv(ann_root / "Test13.csv", index=False)
@@ -108,7 +129,28 @@ def test_get_test_dataloader_sewerml_invalid_binary_annotation(monkeypatch, tmp_
     monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
     monkeypatch.setenv("SEWERML_DATA_ROOT", str(data_root))
 
-    with pytest.raises(ValueError, match="Invalid SewerML annotation format"):
+    loader = get_test_dataloader(
+        name="SewerML",
+        batch_size=2,
+        num_workers=0,
+        input_size=(224, 224),
+        sewerml_label_mode="binary",
+    )
+    _, y = next(iter(loader))
+
+    assert y.tolist() == [1, 1]
+
+
+def test_get_test_dataloader_sewerml_invalid_binary_annotation(monkeypatch, tmp_path: Path) -> None:
+    ann_root, data_root = _write_dummy_sewerml(tmp_path)
+    ann_df = pd.read_csv(ann_root / "Valid13.csv")
+    ann_df = ann_df.drop(columns=["Defect", *SEWERML_LABELS])
+    ann_df.to_csv(ann_root / "Valid13.csv", index=False)
+
+    monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
+    monkeypatch.setenv("SEWERML_DATA_ROOT", str(data_root))
+
+    with pytest.raises(ValueError, match="requires Defect column or all defect label columns"):
         get_test_dataloader(
             name="SewerML",
             batch_size=2,
@@ -173,3 +215,26 @@ def test_create_dataloader_seed_mode_sewerml_binary(monkeypatch, tmp_path: Path)
     assert tuple(x.shape) == (2, 3, 224, 224)
     assert y.dtype == torch.int64
     assert set(y.tolist()).issubset({0, 1})
+
+
+def test_get_test_dataloader_sewerml_allows_explicit_test_split(monkeypatch, tmp_path: Path) -> None:
+    ann_root, data_root = _write_dummy_sewerml(tmp_path)
+    test_df = pd.read_csv(ann_root / "Test13.csv")
+    test_df["Defect"] = [0, 1]
+    test_df.loc[0, SEWERML_LABELS] = 0
+    test_df.loc[0, "AF"] = 1
+    test_df.to_csv(ann_root / "Test13.csv", index=False)
+
+    monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
+    monkeypatch.setenv("SEWERML_DATA_ROOT", str(data_root))
+
+    loader = get_test_dataloader(
+        name="SewerML",
+        batch_size=2,
+        num_workers=0,
+        input_size=(224, 224),
+        sewerml_eval_split="Test",
+    )
+    _, y = next(iter(loader))
+
+    assert y.tolist() == [8, 1]

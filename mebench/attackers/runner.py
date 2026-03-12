@@ -173,6 +173,7 @@ class AttackRunner(ABC):
                 ),
                 sewerml_ann_root=self.state.metadata.get("dataset_config", {}).get("sewerml_ann_root"),
                 sewerml_data_root=self.state.metadata.get("dataset_config", {}).get("sewerml_data_root"),
+                sewerml_eval_split=self.state.metadata.get("dataset_config", {}).get("sewerml_eval_split"),
             )
 
         metrics = evaluate_substitute(
