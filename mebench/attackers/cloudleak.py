@@ -1045,7 +1045,7 @@ class CloudLeak(AttackRunner):
         sub_config = state.metadata.get("substitute_config", {})
         train_batch_size = int(
             sub_config.get("batch_size")
-            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+            or self.batch_size
         )
 
         if len(val_query_x) > 0 and len(val_query_y) > 0:

@@ -43,7 +43,6 @@ class RandomBaseline(AttackRunner):
         state.attack_state.setdefault("val_query_data_x", [])
         state.attack_state.setdefault("val_query_data_y", [])
         state.attack_state.setdefault("substitute", None)
-        state.attack_state.setdefault("track_a_checkpoints", [])
 
     def _ensure_pool_dataset(self, state: BenchmarkState) -> None:
         if self.pool_dataset is None:
@@ -70,7 +69,7 @@ class RandomBaseline(AttackRunner):
 
         total_budget = ctx.budget_remaining
         checkpoints = sorted(int(c) for c in ctx.checkpoints)
-        seen_checkpoints = set(int(c) for c in self.state.attack_state.get("track_a_checkpoints", []))
+        seen_checkpoints = set(int(c) for c in self.state.attack_state.get("checkpoint_reached", []))
 
         indices, pool_exhausted = self._sample_indices(total_budget, self.state)
         step_size = int(self.config.get("batch_size", self._default_step_size(ctx)))
@@ -97,7 +96,7 @@ class RandomBaseline(AttackRunner):
             offset += k
 
             current_queries = int(self.state.query_count)
-            self._maybe_train_and_log_track_a(
+            self._maybe_train_and_log_checkpoint(
                 current_queries=current_queries,
                 previous_queries=previous_queries,
                 checkpoints=checkpoints,
@@ -113,7 +112,7 @@ class RandomBaseline(AttackRunner):
 
         # Final evaluation is handled by the engine. Keep latest substitute available.
         
-    def _maybe_train_and_log_track_a(
+    def _maybe_train_and_log_checkpoint(
         self,
         current_queries: int,
         previous_queries: int,
@@ -147,10 +146,9 @@ class RandomBaseline(AttackRunner):
 
             x_subset = all_x[: int(checkpoint)]
             y_subset = all_y[: int(checkpoint)]
-            substitute = self._train_track_a(
+            substitute = self._train_substitute_checkpoint(
                 x_all=x_subset,
                 y_all=y_subset,
-                checkpoint_budget=int(checkpoint),
                 device=str(device),
             )
 
@@ -158,53 +156,45 @@ class RandomBaseline(AttackRunner):
                 continue
 
             seen_checkpoints.add(checkpoint)
-            self.state.attack_state["track_a_checkpoints"] = sorted(seen_checkpoints)
             self.state.attack_state["substitute"] = substitute
 
             self._evaluate_current_substitute(
                 substitute,
                 device=str(device),
-                track="track_a",
+                track="track_b",
                 query_count=checkpoint,
             )
 
-    def _track_a_num_steps(self, checkpoint_budget: int) -> int:
-        sub_config = self.state.metadata.get("substitute_config", {})
-        steps_coeff = float(sub_config.get("trackA", {}).get("steps_coeff_c", 0.2))
-        return max(1, int(math.ceil(steps_coeff * max(0, checkpoint_budget))))
-
-    def _track_a_batch_size(self) -> int:
+    def _train_batch_size(self) -> int:
         sub_config = self.state.metadata.get("substitute_config", {})
         return max(
             1,
             int(
                 sub_config.get("batch_size")
-                or sub_config.get("trackA", {}).get("batch_size")
                 or int(self.config.get("batch_size", 128))
             ),
         )
 
-    def _track_a_num_workers(self, kind: str = "train") -> int:
+    def _train_num_workers(self, kind: str = "train") -> int:
         sub_config = self.state.metadata.get("substitute_config", {})
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
         val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
         return int(val_workers) if kind == "val" else int(train_workers)
 
-    def _track_a_num_classes(self) -> int:
+    def _num_classes(self) -> int:
         return int(
             self.state.metadata.get("num_classes")
             or self.state.metadata.get("victim_config", {}).get("num_classes")
             or self.state.metadata.get("dataset_config", {}).get("num_classes", 10)
         )
 
-    def _track_a_input_channels(self) -> int:
+    def _input_channels(self) -> int:
         return int(self.state.metadata.get("input_shape", (3, 32, 32))[0])
 
-    def _train_track_a(
+    def _train_substitute_checkpoint(
         self,
         x_all: torch.Tensor,
         y_all: torch.Tensor,
-        checkpoint_budget: int,
         device: str,
     ):
         if x_all.size(0) == 0 or y_all.size(0) == 0:
@@ -216,19 +206,29 @@ class RandomBaseline(AttackRunner):
 
         substitute = create_substitute(
             arch=sub_config.get("arch", "resnet18"),
-            num_classes=self._track_a_num_classes(),
-            input_channels=self._track_a_input_channels(),
+            num_classes=self._num_classes(),
+            input_channels=self._input_channels(),
             width_mult=int(sub_config.get("width_mult", 1)),
             dropout_prob=float(sub_config.get("dropout_prob", 0.0)),
         ).to(device)
 
-        train_dataset = torch.utils.data.TensorDataset(x_all, y_all)
-        train_batch_size = self._track_a_batch_size()
-        num_steps = self._track_a_num_steps(checkpoint_budget)
+        full_dataset = torch.utils.data.TensorDataset(x_all, y_all)
+        total_size = int(x_all.size(0))
+        val_size = max(1, int(0.2 * total_size)) if total_size > 1 else 0
+        train_size = max(1, total_size - val_size)
+        if val_size > 0 and train_size > 0:
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                full_dataset,
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(init_seed + total_size),
+            )
+        else:
+            train_dataset = full_dataset
+            val_dataset = None
 
         output_mode = str(self.config.get("output_mode", "soft_prob"))
 
-        def train_loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
             if output_mode == "soft_prob":
                 targets = targets.clamp_min(1e-10)
                 targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
@@ -238,7 +238,8 @@ class RandomBaseline(AttackRunner):
         trainer_config = dict(sub_config)
         trainer_config.setdefault("grad_clip", 1.0)
 
-        train_generator = torch.Generator().manual_seed(init_seed + checkpoint_budget)
+        train_batch_size = self._train_batch_size()
+        train_generator = torch.Generator().manual_seed(init_seed + total_size)
         train_loader = DataLoader(
             train_dataset,
             batch_size=train_batch_size,
@@ -247,18 +248,56 @@ class RandomBaseline(AttackRunner):
             **pool_loader_kwargs(
                 device,
                 {
-                    "num_workers": self._track_a_num_workers("train"),
+                    "num_workers": self._train_num_workers("train"),
                 },
             ),
         )
+
+        val_loader = None
+        if val_dataset is not None:
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=train_batch_size,
+                shuffle=False,
+                **pool_loader_kwargs(
+                    device,
+                    {
+                        "num_workers": self._train_num_workers("val"),
+                    },
+                ),
+            )
+
+        def eval_fn(model: nn.Module, loader: DataLoader) -> float:
+            model.eval()
+            total_loss = 0.0
+            total_count = 0
+            with torch.no_grad():
+                for x_batch, y_batch in loader:
+                    x_batch = x_batch.to(device)
+                    y_batch = y_batch.to(device)
+                    outputs = model(x_batch)
+                    loss = loss_fn(outputs, y_batch)
+                    total_loss += float(loss.item()) * int(x_batch.size(0))
+                    total_count += int(x_batch.size(0))
+            return total_loss / total_count if total_count > 0 else float("inf")
+
+        batch_size = max(1, int(train_batch_size))
+        steps_per_epoch = max(1, int(math.ceil(len(train_dataset) / batch_size)))
+        max_epochs = int(sub_config.get("max_epochs", 200))
+        patience_epochs = int(sub_config.get("patience", 20))
 
         trainer = SubstituteTrainer(trainer_config, device=device)
         request = TrainRequest(
             model=substitute,
             train_loader=train_loader,
-            loss_fn=train_loss_fn,
-            max_steps=num_steps,
-            load_best=False,
+            val_loader=val_loader,
+            eval_fn=eval_fn if val_loader is not None else None,
+            loss_fn=loss_fn,
+            max_steps=max_epochs * steps_per_epoch,
+            validate_every=steps_per_epoch if val_loader is not None else None,
+            patience=patience_epochs * steps_per_epoch if val_loader is not None else None,
+            early_stop_mode="min",
+            load_best=val_loader is not None,
         )
         trainer.train(request)
 
@@ -372,7 +411,6 @@ class RandomBaseline(AttackRunner):
 
         train_batch_size = int(
             sub_config.get("batch_size")
-            or sub_config.get("trackA", {}).get("batch_size")
             or int(self.config.get("batch_size", 128))
         )
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)

@@ -98,9 +98,11 @@ class ArtifactLogger:
         Args:
             seed: Random seed
             checkpoint: Checkpoint budget
-            track: Track name (track_a or track_b)
+            track: Canonical runtime track name
             metrics: Dictionary of metrics
         """
+        track = "track_b"
+
         # Add to metrics rows
         row = {
             "seed": seed,

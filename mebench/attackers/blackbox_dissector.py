@@ -1102,7 +1102,7 @@ class BlackboxDissector(AttackRunner):
         sub_config = state.metadata.get("substitute_config", {})
         train_batch_size = int(
             sub_config.get("batch_size")
-            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+            or self.batch_size
         )
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
         val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)

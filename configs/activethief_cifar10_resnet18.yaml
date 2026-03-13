@@ -45,10 +45,6 @@ substitute:
   init_seed: 1234
   batch_size: 150
   
-  # Track A: Train from scratch parameters
-  trackA:
-    batch_size: 150
-  
   optimizer:
     name: adam
     lr: 0.001

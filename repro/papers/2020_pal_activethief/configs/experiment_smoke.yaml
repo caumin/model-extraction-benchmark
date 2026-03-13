@@ -49,8 +49,6 @@ substitute:
   num_workers: 0
   train_num_workers: 0
   val_num_workers: 0
-  trackA:
-    batch_size: 150
   optimizer:
     name: adam
     lr: 0.001

@@ -205,15 +205,12 @@ def run_experiment(
             )
             evaluated_track_b_checkpoints.add(q)
 
-        data_mode = str(config.get("dataset", {}).get("data_mode", "")).lower()
-        should_eval_track_b_on_checkpoint = data_mode == "data_free"
-
         ctx = BenchmarkContext(
             state=state,
             oracle=oracle,
             logger=logger,
             config=config,
-            checkpoint_callback=(_evaluate_track_b_once if should_eval_track_b_on_checkpoint else None),
+            checkpoint_callback=_evaluate_track_b_once,
         )
         
         # [ADDED] Inject context into attack runner for metric logging

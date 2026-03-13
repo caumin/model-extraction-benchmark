@@ -404,7 +404,6 @@ def generate_configs(
                         "num_workers": int(substitute_num_workers),
                         "train_num_workers": int(resolved_sub_train_workers),
                         "val_num_workers": int(resolved_sub_val_workers),
-                        "trackA": {"batch_size": int(setup_substitute_batch_size), "steps_coeff_c": 0.2},
                         "optimizer": {
                             "name": "sgd",
                             "lr": target_lr,

@@ -4,8 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from mebench.core.state import BenchmarkState
-from mebench.eval.evaluator import Evaluator
+from mebench.eval.metrics import evaluate_substitute
 
 
 class TinyDataset(Dataset):
@@ -22,29 +21,21 @@ class TinyDataset(Dataset):
         return self.x[idx], self.y[idx]
 
 
-def test_track_b_metrics_when_substitute_missing() -> None:
-    """Track B should return numeric metrics when substitute is missing."""
-    config = {
-        "run": {"device": "cpu"},
-        "victim": {"output_mode": "soft_prob", "temperature": 1.0, "channels": 3},
-        "substitute": {
-            "arch": "lenet",
-            "init_seed": 0,
-            "trackA": {"batch_size": 1, "steps_coeff_c": 1},
-            "optimizer": {"lr": 0.1, "momentum": 0.9, "weight_decay": 5e-4},
-        },
-    }
-
-    state = BenchmarkState()
-    state.metadata = {"device": "cpu"}
-    evaluator = Evaluator(config, state, query_storage=None)
-
+def test_track_b_metrics_are_numeric() -> None:
+    """Track B evaluation should emit numeric metrics."""
     victim = nn.Sequential(nn.Flatten(), nn.Linear(3 * 4 * 4, 10))
+    substitute = nn.Sequential(nn.Flatten(), nn.Linear(3 * 4 * 4, 10))
     test_loader = DataLoader(TinyDataset(), batch_size=2, shuffle=False)
 
-    metrics = evaluator._evaluate_track_b(victim, test_loader, checkpoint_budget=10)
+    metrics = evaluate_substitute(
+        substitute=substitute,
+        victim=victim,
+        test_loader=test_loader,
+        device="cpu",
+        output_mode="soft_prob",
+    )
 
-    assert metrics["acc_gt"] == 0.0
-    assert metrics["agreement"] == 0.0
-    assert metrics["kl_mean"] == 0.0
-    assert metrics["l1_mean"] == 0.0
+    assert isinstance(metrics["acc_gt"], float)
+    assert isinstance(metrics["agreement"], float)
+    assert isinstance(metrics["kl_mean"], float)
+    assert isinstance(metrics["l1_mean"], float)

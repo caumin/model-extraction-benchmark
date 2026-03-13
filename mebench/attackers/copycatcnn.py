@@ -297,7 +297,7 @@ class CopycatCNN(AttackRunner):
         sub_config = state.metadata.get("substitute_config", {})
         train_batch_size = int(
             sub_config.get("batch_size")
-            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+            or self.batch_size
         )
         device = state.metadata.get("device", "cpu")
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)

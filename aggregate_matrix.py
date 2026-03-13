@@ -86,7 +86,7 @@ def aggregate_matrix(root_dir: str = "runs", output_root: str = "reports") -> No
                 substitute_arch = data.get("substitute_arch", "unknown")
 
                 for cp_str, tracks in data.get("checkpoints", {}).items():
-                    if "track_a" not in tracks:
+                    if "track_b" not in tracks:
                         continue
 
                     try:
@@ -97,7 +97,7 @@ def aggregate_matrix(root_dir: str = "runs", output_root: str = "reports") -> No
                     if max_budget is not None and budget != int(max_budget):
                         continue
 
-                    metrics = tracks["track_a"]
+                    metrics = tracks["track_b"]
                     row = {
                         "Set": set_id,
                         "Attack": attack_name,

@@ -28,7 +28,6 @@ def test_dfme_track_b_evaluation():
         "substitute": {
             "arch": "resnet18",
             "init_seed": 1234,
-            "trackA": {"batch_size": 32, "steps_coeff_c": 0.2},
             "optimizer": {"name": "sgd", "lr": 0.01, "momentum": 0.9, "weight_decay": 5e-4},
             "patience": 5,
         },

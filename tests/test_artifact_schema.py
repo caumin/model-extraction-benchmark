@@ -21,14 +21,8 @@ def test_artifact_schema_fields(tmp_path: Path) -> None:
     logger.log_checkpoint(
         seed=0,
         checkpoint=10,
-        track="track_a",
-        metrics={"acc_gt": 0.1, "agreement": 0.2, "kl_mean": 0.3, "l1_mean": 0.4},
-    )
-    logger.log_checkpoint(
-        seed=0,
-        checkpoint=10,
         track="track_b",
-        metrics={"acc_gt": 0.0, "agreement": 0.0, "kl_mean": 0.0, "l1_mean": 0.0},
+        metrics={"acc_gt": 0.1, "agreement": 0.2, "kl_mean": 0.3, "l1_mean": 0.4},
     )
     logger.finalize()
 
@@ -45,13 +39,12 @@ def test_artifact_schema_fields(tmp_path: Path) -> None:
         assert key in summary
 
     assert "10" in summary["checkpoints"]
-    assert "track_a" in summary["checkpoints"]["10"]
     assert "track_b" in summary["checkpoints"]["10"]
 
     with open(metrics_path, newline="") as f:
         rows = list(csv.DictReader(f))
 
-    assert len(rows) == 2
+    assert len(rows) == 1
     required_columns = {
         "seed",
         "checkpoint_B",

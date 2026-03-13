@@ -37,7 +37,7 @@ class TrainResult:
 
 
 class SubstituteTrainer:
-    """Trainer for substitute models in Track A."""
+    """Trainer for substitute models used by attack-native loops."""
 
     def __init__(self, config: Dict[str, Any], device: str = "cpu", logger: Any = None):
         """Initialize trainer.

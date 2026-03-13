@@ -35,9 +35,6 @@ substitute:
   arch: lenet_mnist
   init_seed: 1234
   batch_size: 32
-  trackA:
-    batch_size: 32
-    steps_coeff_c: 0.2
   optimizer:
     name: sgd
     lr: 0.01

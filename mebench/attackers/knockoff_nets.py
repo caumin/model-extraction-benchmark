@@ -594,7 +594,7 @@ class KnockoffNets(AttackRunner):
         dataset = torch.utils.data.TensorDataset(x_all, y_all)
         train_batch_size = int(
             sub_config.get("batch_size")
-            or sub_config.get("trackA", {}).get("batch_size", self.batch_size)
+            or self.batch_size
         )
         train_dataset = dataset
         val_dataset = None

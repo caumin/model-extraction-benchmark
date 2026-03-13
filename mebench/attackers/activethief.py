@@ -318,7 +318,7 @@ class ActiveThief(AttackRunner):
 
         train_batch_size = int(
             sub_config.get("batch_size")
-            or sub_config.get("trackA", {}).get("batch_size", self.scoring_batch_size)
+            or self.scoring_batch_size
         )
 
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)

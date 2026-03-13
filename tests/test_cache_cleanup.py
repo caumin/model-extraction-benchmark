@@ -31,7 +31,6 @@ def _run_with_cleanup(tmp_path: Path, monkeypatch, delete_on_finish: bool) -> Pa
         "substitute": {
             "arch": "resnet18",
             "init_seed": 0,
-            "trackA": {"batch_size": 2, "steps_coeff_c": 1},
             "optimizer": {"lr": 0.1, "momentum": 0.9, "weight_decay": 5e-4},
             "patience": 2,
         },

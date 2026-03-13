@@ -25,6 +25,7 @@ def test_data_free_track_b_evaluates_each_checkpoint(tmp_path, monkeypatch) -> N
         *,
         input_size=None,
         channels=None,
+        **kwargs,
     ) -> DataLoader:
         c = int(channels) if channels is not None else 3
         if input_size is None:
@@ -65,7 +66,6 @@ def test_data_free_track_b_evaluates_each_checkpoint(tmp_path, monkeypatch) -> N
         "substitute": {
             "arch": "resnet18",
             "init_seed": 0,
-            "trackA": {"batch_size": 4, "steps_coeff_c": 1},
             "optimizer": {"lr": 0.1, "momentum": 0.9, "weight_decay": 5e-4},
             "patience": 5,
         },
