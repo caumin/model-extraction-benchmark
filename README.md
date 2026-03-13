@@ -45,6 +45,27 @@ python aggregate_matrix.py
 4. Pool-based attacks use the shared benchmark substitute defaults defined by configs.
 5. Data-free attacks keep their native loop and are evaluated through the same artifact/reporting contract.
 
+## Preprocessing Contract
+
+- Victim query path: attacker-produced query tensors are forwarded to the victim without an extra benchmark-side normalization wrapper.
+- Victim evaluation path: benchmark metrics are computed on the task's public test set using the dataset's official evaluation normalization.
+- Surrogate / pool path: attacker-side samples from public surrogate datasets use the surrogate dataset's official preprocessing or normalization for that attack path.
+- Data-free path: attacker-side tensors stay in their native data-free scale (typically `[-1,1]`) unless an attack explicitly owns a different internal convention.
+- Benchmark rule: preprocessing policy is path-specific. The benchmark does not force one shared normalization transform across victim query, victim evaluation, surrogate training, and data-free generation.
+
+## Benchmark Policy vs. Paper Parity
+
+- Matrix results are benchmark-policy comparisons: attacks run under a shared runtime contract, shared reporting, shared seeds, and setup-level substitute defaults.
+- Benchmark-policy results are designed for controlled cross-attack comparison, not as a claim that every attack is reproduced under its original paper training stack.
+- Paper-parity reproduction remains a separate objective under `repro/` and should be reported separately when claiming closeness to original paper numbers.
+
+## Interpreting SET-A/B/C
+
+- `SET-A1`, `SET-B1`, and `SET-C1` are benchmark cells with different victim/task regimes.
+- Within-set comparisons are the primary fairness target: attacks in the same set share the same victim family, budget policy, output mode constraints, and reporting contract.
+- Cross-set results should not be interpreted as a single absolute leaderboard because budgets, victim domains, and surrogate pool caps differ by set.
+- Use SET-level rankings and trends for headline benchmark conclusions; treat cross-set comparisons as contextual rather than directly commensurate.
+
 ## Artifacts
 
 Per seed run directory:

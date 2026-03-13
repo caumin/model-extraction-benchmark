@@ -41,8 +41,6 @@ def validate_config(config: Dict[str, Any]) -> None:
     # Check data mode compatibility
     attack = config["attack"]["name"]
     data_mode = config["dataset"]["data_mode"]
-    if "trackA" in config.get("substitute", {}):
-        raise ValueError("substitute.trackA is no longer supported; benchmark is Track-B-only")
 
     seed_name = config.get("dataset", {}).get("seed_name", config.get("dataset", {}).get("name"))
     # Data-free attacks must be in data_free mode; pool-based attacks must have a valid seed/surrogate config

@@ -87,23 +87,6 @@ def test_valid_config_passes():
     validate_config(config)
 
 
-def test_track_a_config_is_rejected() -> None:
-    config = {
-        "attack": {"name": "random", "output_mode": "soft_prob"},
-        "dataset": {"data_mode": "seed", "seed_name": "MNIST"},
-        "victim": {"output_mode": "soft_prob", "temperature": 1.0},
-        "substitute": {
-            "max_epochs": 200,
-            "patience": 20,
-            "trackA": {"batch_size": 32},
-        },
-        "budget": {"max_budget": 1000000, "checkpoints": [1000, 10000, 100000]},
-    }
-
-    with pytest.raises(ValueError, match="Track-B-only"):
-        validate_config(config)
-
-
 def test_valid_sewerml_config_passes() -> None:
     config = {
         "attack": {"name": "random", "output_mode": "soft_prob"},

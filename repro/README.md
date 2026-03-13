@@ -8,6 +8,13 @@ This folder is optimized for **low-resource local environments** where strict pa
 - Make runs reproducible with staged commands.
 - Support quick `smoke` runs first, then `full` runs when hardware/data are available.
 
+## Benchmark Policy vs. Paper Reproduction
+
+- `repro/` exists for paper-specific reproduction and parity debugging, not for the benchmark matrix itself.
+- Matrix benchmark results should be interpreted as benchmark-policy results under the shared `mebench` runtime contract.
+- Paper reproduction results may intentionally preserve attack-native training choices that are not part of the default benchmark matrix.
+- Keep benchmark-policy reporting and paper-parity reporting separate in writeups and tables.
+
 ## Layout
 
 Each paper uses this structure under `repro/papers/<paper_id>/`:
@@ -106,6 +113,13 @@ This applies to `experiment.yaml`, `victim_eval.yaml`, and `victim_train.yaml` (
 For data-free attacks in `@repro`, victim query tensors must remain tanh-scale (`[-1,1]`)
 at the attacker boundary. Do not add attacker-side tanh->unit conversion on query path.
 Runtime victim query path uses direct model input (no attacker-side wrapper normalization).
+
+## Runtime Preprocessing Contract
+
+- Victim query path: no extra benchmark-side normalization wrapper is applied before victim inference.
+- Victim evaluation path: dataset test-set evaluation uses the dataset's official normalization.
+- Surrogate / pool path: attacker-side surrogate data should follow the surrogate dataset's official preprocessing for that experiment.
+- Data-free path: preserve the attack-native tensor scale unless a paper-specific reproduction artifact explicitly documents a different convention.
 
 Remote/high-resource full run:
 
