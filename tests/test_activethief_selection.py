@@ -58,10 +58,19 @@ class FeatureModel(nn.Module):
         return torch.zeros(flat.size(0), 2)
 
 
+class BinaryLinearModel(nn.Module):
+    """Single-logit model with a linear decision boundary."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = x.view(x.size(0), -1)
+        return flat.sum(dim=1, keepdim=True)
+
+
 def _make_attack() -> ActiveThief:
     attack = ActiveThief.__new__(ActiveThief)
     attack.strategy = "uncertainty"
     attack.pool_dataset = None
+    attack.is_single_logit_binary = False
     return attack
 
 
@@ -181,6 +190,51 @@ def test_select_dfal_prefers_smallest_perturbation() -> None:
         return x.view(x.size(0), -1).mean(dim=1)
 
     attack._deepfool_distance_dfal = types.MethodType(fake_deepfool_distance_dfal, attack)
+
+    selected = attack._select_dfal(state, 1)
+
+    assert selected == [0]
+
+
+def test_single_logit_dfal_distance_matches_binary_boundary_distance() -> None:
+    attack = _make_attack()
+    attack.is_single_logit_binary = True
+
+    x = torch.tensor(
+        [
+            [[[0.1, 0.1]]],
+            [[[1.0, 1.0]]],
+        ],
+        dtype=torch.float32,
+    )
+
+    distances = attack._deepfool_distance_dfal(
+        BinaryLinearModel(),
+        x,
+        max_iter=5,
+        internal_batch_size=2,
+    )
+
+    expected = torch.tensor([
+        (0.1**2 + 0.1**2) ** 0.5,
+        (1.0**2 + 1.0**2) ** 0.5,
+    ])
+    assert torch.allclose(distances.cpu(), expected, atol=1e-5)
+
+
+def test_select_dfal_single_logit_prefers_closest_binary_boundary() -> None:
+    attack = _make_attack()
+    attack.is_single_logit_binary = True
+    state = BenchmarkState()
+    state.metadata = {"device": DEVICE, "dataset_config": {}}
+
+    close = torch.tensor([[[0.1, 0.1]]], dtype=torch.float32)
+    far = torch.tensor([[[1.0, 1.0]]], dtype=torch.float32)
+    attack.pool_dataset = IndexedDataset([close, far])
+    attack.unlabeled_indices = [0, 1]
+    attack.scoring_batch_size = 32
+    attack.substitute = BinaryLinearModel()
+    attack.dfal_max_iter = 5
 
     selected = attack._select_dfal(state, 1)
 

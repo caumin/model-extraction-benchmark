@@ -154,11 +154,6 @@ def validate_config(config: Dict[str, Any]) -> None:
         if attack in unsupported_single_logit_attacks:
             raise ValueError(f"{attack} does not support single-logit binary victims yet")
 
-        if attack == "activethief":
-            strategy = str(config.get("attack", {}).get("strategy", "uncertainty")).strip().lower()
-            if "dfal" in strategy:
-                raise ValueError("activethief single-logit binary support excludes DFAL-based strategies")
-
     # BlackboxRipper requires a pretrained generator checkpoint (official repo behavior).
     if attack == "blackbox_ripper":
         attack_cfg = config.get("attack", {})

@@ -185,6 +185,23 @@ def test_single_logit_binary_supported_attacks_validate(attack_name: str, output
     validate_config(config)
 
 
+def test_single_logit_binary_activethief_dfal_validates() -> None:
+    config = {
+        "attack": {"name": "activethief", "output_mode": "soft_prob", "strategy": "dfal"},
+        "dataset": {
+            "data_mode": "surrogate",
+            "name": "SewerML",
+            "surrogate_name": "ImageNet",
+            "sewerml_label_mode": "binary",
+        },
+        "victim": {"output_mode": "soft_prob", "temperature": 1.0, "num_classes": 1},
+        "substitute": {"max_epochs": 10, "patience": 10},
+        "budget": {"max_budget": 1000, "checkpoints": [1000]},
+    }
+
+    validate_config(config)
+
+
 def test_invalid_sewerml_label_mode_rejected() -> None:
     config = {
         "attack": {"name": "random", "output_mode": "soft_prob"},

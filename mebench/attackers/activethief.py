@@ -21,6 +21,7 @@ from mebench.utils.config_aliases import resolve_iterations
 from mebench.utils.binary import (
     binary_bce_loss,
     binary_entropy_from_positive_probs,
+    binary_hard_labels_from_logits,
     binary_hard_labels_from_positive_probs,
     binary_positive_probs_from_logits,
     is_single_logit_binary_num_classes,
@@ -510,6 +511,9 @@ class ActiveThief(AttackRunner):
         x: torch.Tensor,
         max_iter: int,
     ) -> torch.Tensor:
+        if getattr(self, "is_single_logit_binary", False):
+            return self._deepfool_distance_dfal_chunk_binary(model, x, max_iter)
+
         device = x.device
         batch = x.shape[0]
         if batch == 0:
@@ -569,6 +573,65 @@ class ActiveThief(AttackRunner):
             r_i = r_i / (best_w_norm.view(-1, 1, 1, 1) + 1e-8)
             with torch.no_grad():
                 perturb[active] = perturb[active] + r_i[active]
+
+        return torch.norm(perturb.view(batch, -1), dim=1)
+
+    def _deepfool_distance_dfal_chunk_binary(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        max_iter: int,
+    ) -> torch.Tensor:
+        device = x.device
+        batch = x.shape[0]
+        if batch == 0:
+            return torch.empty(0, device=device)
+
+        model.eval()
+        perturb = torch.zeros_like(x, device=device)
+        eps = 1e-8
+
+        with torch.no_grad():
+            base_logits = model(x)
+            original = binary_hard_labels_from_logits(base_logits)
+
+        active = torch.ones(batch, dtype=torch.bool, device=device)
+        for _ in range(max_iter):
+            if not active.any():
+                break
+
+            x_adv = (x + perturb).detach().clone().requires_grad_(True)
+            logits = model(x_adv)
+            if logits.ndim == 1:
+                logits = logits.unsqueeze(1)
+            if logits.ndim != 2 or logits.size(1) != 1:
+                raise ValueError(
+                    "Single-logit DFAL expects substitute logits shaped [N] or [N, 1], "
+                    f"got {tuple(logits.shape)}"
+                )
+
+            current = binary_hard_labels_from_logits(logits)
+            active = active & (current == original)
+            if not active.any():
+                break
+
+            signed_margin = logits[:, 0]
+            grad_margin = torch.autograd.grad(
+                signed_margin.sum(),
+                x_adv,
+                retain_graph=False,
+                create_graph=False,
+            )[0]
+            grad_norm_sq = grad_margin.view(batch, -1).pow(2).sum(dim=1)
+            valid = active & (grad_norm_sq > 0)
+            if not valid.any():
+                break
+
+            step_scale = torch.zeros(batch, device=device, dtype=x.dtype)
+            step_scale[valid] = -signed_margin[valid] / (grad_norm_sq[valid] + eps)
+            r_i = step_scale.view(-1, 1, 1, 1) * grad_margin
+            with torch.no_grad():
+                perturb[valid] = perturb[valid] + r_i[valid]
 
         return torch.norm(perturb.view(batch, -1), dim=1)
 
