@@ -72,6 +72,30 @@ python aggregate_matrix.py
 - Model selection is by best validation loss.
 - Early stopping is disabled in practice by setting `patience=max_epochs`, so runs always complete the full 90 epochs before restoring the best validation-loss checkpoint.
 
+## Implemented Attacks
+
+This section restores the attack/paper overview that previously lived in the README.
+
+| Category | Attack | Paper | Key Strategy |
+| :--- | :--- | :--- | :--- |
+| Baseline | Random | - | Uniform random sampling from the surrogate pool. |
+| Active Learning | ActiveThief | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | Uncertainty, K-Center, and DFAL-based pool selection. |
+| Active Learning | Blackbox Dissector | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | Erase-and-score active querying with Grad-CAM style masking. |
+| Active Learning | CloudLeak | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | FeatureFool-style adversarial query generation from public images. |
+| Active Learning | InverseNet | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | Inversion-inspired sample recovery and staged querying. |
+| Active Learning | MARICH | [Karmakar et al. (2023)](https://arxiv.org/abs/2302.08466) | Multi-round hard-label querying with staged sample selection. |
+| Active Learning | SwiftThief | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | SimSiam-style representation learning plus active selection. |
+| Pool-based / Offline | KnockoffNets | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | Bandit-style class sampling and offline substitute training. |
+| Pool-based / Offline | CopycatCNN | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | Large-scale offline labeling of natural images. |
+| Data-Free / Generative | DFME | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | Min-max data-free extraction with generator/student updates. |
+| Data-Free / Generative | DFMS | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | Diverse hard-label query synthesis with staged stealing. |
+| Data-Free / Generative | DisGUIDE | [Tan et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | Disagreement-guided data-free extraction with replay. |
+| Data-Free / Generative | MAZE | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | Zeroth-order gradient estimation for query synthesis. |
+| Data-Free / Generative | ES-Attack | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | Evolutionary query synthesis against black-box victims. |
+| Data-Free / Generative | GAME | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | Adaptive class-conditioned generation and extraction. |
+| Data-Free / Generative | Dual Students | [Beetham et al. (2023)](https://arxiv.org/abs/2309.10058) | Two-student disagreement-guided data-free extraction. |
+| Data-Free / Generative | Blackbox Ripper | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | Latent-space evolution on pretrained GAN priors. |
+
 ## Artifacts
 
 Per seed run directory:
@@ -87,11 +111,6 @@ runs/<run_name>/<timestamp>/seed_<seed>/
 - `summary.json`: checkpoint metrics keyed by budget, recorded under `track_b`
 - `metrics.csv`: long-form rows with `track=track_b`
 - `run_config.yaml`: exact config used for the run
-
-## Supported Attack Families
-
-- Pool-based: `random`, `activethief`, `marich`, `knockoff_nets`, `cloudleak`, `copycatcnn`, `inversenet`, `blackbox_dissector`, `swiftthief`
-- Data-free / generative: `dfme`, `ds`, `dfms`, `disguide`, `maze`, `es`, `game`, `blackbox_ripper`
 
 ## Methodology
 

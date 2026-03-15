@@ -77,6 +77,7 @@ results/
 temp/
 temp_configs/
 temp_*/
+tmp_*/
 TEMP_*/
 .paper_text/
 /paper_text/
@@ -85,3 +86,6 @@ NUL
 %TMPDIR%/
 Users*AppDataLocalTemp*/
 Users*desktop*model-extraction-benchmark*/
+/tmp_*.txt
+/SESSION_HANDOFF_*.md
+/repro/papers/*/TODO_ULTRAWORK.md
