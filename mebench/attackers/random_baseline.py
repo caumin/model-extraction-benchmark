@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.utils.binary import binary_bce_loss, is_single_logit_binary_num_classes
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
     resolve_train_num_workers,
@@ -33,6 +34,12 @@ class RandomBaseline(AttackRunner):
         self.iterator = None
         self._initial_batch_size = None
         self.pool_dataset = None
+        num_classes = int(
+            state.metadata.get("num_classes")
+            or state.metadata.get("victim_config", {}).get("num_classes")
+            or config.get("num_classes", 10)
+        )
+        self.is_single_logit_binary = is_single_logit_binary_num_classes(num_classes)
         self._initialize_state(state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
@@ -229,6 +236,8 @@ class RandomBaseline(AttackRunner):
         output_mode = str(self.config.get("output_mode", "soft_prob"))
 
         def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if self.is_single_logit_binary:
+                return binary_bce_loss(outputs, targets)
             if output_mode == "soft_prob":
                 targets = targets.clamp_min(1e-10)
                 targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
@@ -442,7 +451,9 @@ class RandomBaseline(AttackRunner):
                 for x, y in loader:
                     x, y = x.to(device), y.to(device)
                     outputs = model(x)
-                    if output_mode == "soft_prob":
+                    if self.is_single_logit_binary:
+                        loss = binary_bce_loss(outputs, y)
+                    elif output_mode == "soft_prob":
                         y = y.clamp_min(1e-10)
                         y = y / y.sum(dim=1, keepdim=True).clamp_min(1e-12)
                         log_probs = torch.log_softmax(outputs, dim=1)
@@ -454,6 +465,8 @@ class RandomBaseline(AttackRunner):
             return total_loss / total_count if total_count > 0 else float('inf')
 
         def train_loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            if self.is_single_logit_binary:
+                return binary_bce_loss(outputs, targets)
             if output_mode == "soft_prob":
                 targets = targets.clamp_min(1e-10)
                 targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
@@ -512,6 +525,8 @@ class RandomBaseline(AttackRunner):
         
         output_mode = str(self.config.get("output_mode", "soft_prob"))
         def loss_fn(outputs, targets):
+             if self.is_single_logit_binary:
+                return binary_bce_loss(outputs, targets)
              if output_mode == "soft_prob":
                 targets = targets.clamp_min(1e-10)
                 targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)

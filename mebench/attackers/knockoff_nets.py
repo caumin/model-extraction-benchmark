@@ -24,7 +24,13 @@ from mebench.utils.dataloader import (
 )
 from mebench.models.substitute_factory import create_substitute
 from mebench.training import SubstituteTrainer, TrainRequest
-from mebench.utils.binary import binary_bce_loss, is_single_logit_binary_num_classes
+from mebench.utils.binary import (
+    binary_bce_loss,
+    binary_distribution_from_labels,
+    binary_distribution_from_logits,
+    binary_distribution_from_positive_probs,
+    is_single_logit_binary_num_classes,
+)
 
 
 class KnockoffNets(AttackRunner):
@@ -235,10 +241,7 @@ class KnockoffNets(AttackRunner):
         state.attack_state["query_data_y"].append(oracle_output.y.detach().cpu())
         state.attack_state["query_count"] += x_batch.shape[0]
 
-        if oracle_output.kind == "soft_prob":
-            probs = oracle_output.y.detach().cpu()
-        else:
-            probs = F.one_hot(oracle_output.y, num_classes=self.num_classes).float().cpu()
+        probs = self._semantic_probs_from_oracle_output(oracle_output).detach().cpu()
 
         recent_probs = state.attack_state["recent_victim_probs"]
         for row in probs:
@@ -275,7 +278,11 @@ class KnockoffNets(AttackRunner):
             with torch.no_grad():
                 x_input = (x_batch.to(device) - norm_mean) / norm_std
                 logits = substitute(x_input)
-                log_probs = F.log_softmax(logits, dim=1)
+                if self.is_single_logit_binary:
+                    sub_probs = binary_distribution_from_logits(logits)
+                    log_probs = torch.log(sub_probs.clamp_min(1e-10))
+                else:
+                    log_probs = F.log_softmax(logits, dim=1)
                 loss_reward = -(probs.to(device) * log_probs).sum(dim=1).detach().cpu()
         else:
             loss_reward = torch.zeros(probs.size(0))
@@ -757,3 +764,12 @@ class KnockoffNets(AttackRunner):
         )
         state.attack_state["substitute"] = state.attack_state.get("offline_substitute")
         self._evaluate_current_substitute(state.attack_state.get("substitute"), state.metadata.get("device", "cpu"))
+
+    def _semantic_probs_from_oracle_output(self, oracle_output: OracleOutput) -> torch.Tensor:
+        if oracle_output.kind == "soft_prob":
+            if self.is_single_logit_binary:
+                return binary_distribution_from_positive_probs(oracle_output.y)
+            return oracle_output.y
+        if self.is_single_logit_binary:
+            return binary_distribution_from_labels(oracle_output.y)
+        return F.one_hot(oracle_output.y, num_classes=self.num_classes).float()
