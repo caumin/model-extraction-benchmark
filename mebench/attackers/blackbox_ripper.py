@@ -19,6 +19,7 @@ from mebench.data.loaders import create_dataloader
 from mebench.utils.dataloader import load_pool_to_memory
 from mebench.utils.binary import (
     binary_bce_loss,
+    binary_hard_labels_from_positive_probs,
     binary_distribution_from_logits,
     binary_distribution_from_positive_probs,
     is_single_logit_binary_num_classes,
@@ -209,7 +210,8 @@ class BlackboxRipper(AttackRunner):
                             probs = binary_distribution_from_logits(logits)
                         else:
                             probs = torch.softmax(logits, dim=-1)
-                        acc = probs.argmax(dim=1).eq(y_batch.argmax(dim=1)).float().mean().item()
+                        targets = self._semantic_hard_labels_from_targets(y_batch)
+                        acc = probs.argmax(dim=1).eq(targets).float().mean().item()
                     self.logger.info(
                         "Epoch %d/%d, iter %d/%d, acc=%.4f",
                         epoch,
@@ -225,6 +227,15 @@ class BlackboxRipper(AttackRunner):
 
         # Persist evaluation state.
         self.state.attack_state["bbr_evaluated_checkpoints"] = sorted(self._evaluated_checkpoints)
+
+    def _semantic_hard_labels_from_targets(self, targets: torch.Tensor) -> torch.Tensor:
+        if self.is_single_logit_binary:
+            if targets.ndim == 2 and targets.size(1) == 2:
+                return targets.argmax(dim=1).long()
+            return binary_hard_labels_from_positive_probs(targets)
+        if targets.ndim == 1:
+            return targets.long()
+        return targets.argmax(dim=1).long()
 
     def observe(self, query_batch, oracle_output, state) -> None:
         # This attack is implemented as a self-contained AttackRunner (Track B)

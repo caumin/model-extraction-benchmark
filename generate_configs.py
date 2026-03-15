@@ -215,6 +215,10 @@ def generate_configs(
                 "epochs": 20,
                 "budget_growth": 1.01,
                 "epochs_growth": 1.02,
+                # SET-B1 MARICH scoring can OOM on larger selection batches during
+                # full-pool scoring, so keep the generated matrix profile more
+                # conservative than the previous default.
+                "selection_batch_size": 32,
             },
         ),
 
@@ -554,9 +558,6 @@ def generate_configs(
 
                     if attack.name == "knockoff_nets":
                         cfg["attack"]["offline_train_epochs"] = cfg["substitute"]["max_epochs"]
-
-                    if attack.name == "marich" and setup_set_id == "SET-B1":
-                        cfg["attack"].setdefault("selection_batch_size", 64)
 
                     if attack.name in {"blackbox_ripper", "dfms"}:
                         cfg["attack"]["proxy_dataset"] = {
@@ -903,7 +904,7 @@ def generate_paperlike_configs(
             "budget_growth": 1.01,
             "epochs_growth": 1.02,
             "batch_size": 128,
-            "selection_batch_size": 64,
+            "selection_batch_size": 32,
             "lr": 0.01,
             "weight_decay": 5e-4,
             "patience": 20,

@@ -216,6 +216,21 @@ def test_blackbox_ripper_single_logit_uses_binary_semantic_classes() -> None:
     assert attack.semantic_num_classes == 2
 
 
+def test_blackbox_ripper_single_logit_target_labels_preserve_positive_class() -> None:
+    state = _state(output_mode="soft_prob")
+    attack = BlackboxRipper({"output_mode": "soft_prob", "generator_checkpoint": "dummy"}, state)
+
+    labels_from_prob = attack._semantic_hard_labels_from_targets(
+        torch.tensor([[0.2], [0.8]], dtype=torch.float32)
+    )
+    labels_from_dist = attack._semantic_hard_labels_from_targets(
+        torch.tensor([[0.8, 0.2], [0.2, 0.8]], dtype=torch.float32)
+    )
+
+    assert torch.equal(labels_from_prob.cpu(), torch.tensor([0, 1]))
+    assert torch.equal(labels_from_dist.cpu(), torch.tensor([0, 1]))
+
+
 def test_knockoffnets_single_logit_soft_prob_uses_semantic_binary_rewards() -> None:
     state = _state(output_mode="soft_prob")
     state.metadata["substitute_config"] = {"arch": "lenet_mnist", "optimizer": {"name": "sgd", "lr": 0.01}}

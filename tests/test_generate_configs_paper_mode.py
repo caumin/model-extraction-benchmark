@@ -123,6 +123,7 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
 
     marich = _load("SET-B1_marich_hard_30k_seed0.yaml")
     assert int(marich["attack"]["iterations"]) == 20
+    assert int(marich["attack"]["selection_batch_size"]) == 32
     assert "rounds" not in marich["attack"]
 
     set_b_inversenet = _load("SET-B1_inversenet_hard_30k_seed0.yaml")
@@ -305,6 +306,7 @@ def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) ->
     assert int(marich_cfg["attack"]["max_budget"]) == 30_000
     assert marich_cfg["attack"]["sampling"] == "all_elg"
     assert int(marich_cfg["attack"]["budget"]) == 300
+    assert int(marich_cfg["attack"]["selection_batch_size"]) == 32
     assert float(marich_cfg["attack"]["gamma1"]) == 0.8
     assert float(marich_cfg["attack"]["gamma2"]) == 0.8
 
