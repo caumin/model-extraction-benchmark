@@ -74,31 +74,55 @@ python aggregate_matrix.py
 
 ## Implemented Attacks
 
-This section restores the attack/paper overview that previously lived in the README.
+The benchmark currently includes `17` attacks across four families, all evaluated under the same Track-B runtime and reporting contract.
 
-| Category | Attack | Paper | Key Strategy |
-| :--- | :--- | :--- | :--- |
-| Baseline | Random | - | Uniform random sampling from the surrogate pool. |
-| Active Learning | ActiveThief | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | Uncertainty, K-Center, and DFAL-based pool selection. |
-| Active Learning | Blackbox Dissector | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | Erase-and-score active querying with Grad-CAM style masking. |
-| Active Learning | CloudLeak | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | FeatureFool-style adversarial query generation from public images. |
-| Active Learning | InverseNet | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | Inversion-inspired sample recovery and staged querying. |
-| Active Learning | MARICH | [Karmakar et al. (2023)](https://arxiv.org/abs/2302.08466) | Multi-round hard-label querying with staged sample selection. |
-| Active Learning | SwiftThief | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | SimSiam-style representation learning plus active selection. |
-| Pool-based / Offline | KnockoffNets | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | Bandit-style class sampling and offline substitute training. |
-| Pool-based / Offline | CopycatCNN | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | Large-scale offline labeling of natural images. |
-| Data-Free / Generative | DFME | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | Min-max data-free extraction with generator/student updates. |
-| Data-Free / Generative | DFMS | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | Diverse hard-label query synthesis with staged stealing. |
-| Data-Free / Generative | DisGUIDE | [Tan et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | Disagreement-guided data-free extraction with replay. |
-| Data-Free / Generative | MAZE | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | Zeroth-order gradient estimation for query synthesis. |
-| Data-Free / Generative | ES-Attack | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | Evolutionary query synthesis against black-box victims. |
-| Data-Free / Generative | GAME | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | Adaptive class-conditioned generation and extraction. |
-| Data-Free / Generative | Dual Students | [Beetham et al. (2023)](https://arxiv.org/abs/2309.10058) | Two-student disagreement-guided data-free extraction. |
-| Data-Free / Generative | Blackbox Ripper | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | Latent-space evolution on pretrained GAN priors. |
+| Family | Count | Coverage |
+| :--- | ---: | :--- |
+| Baseline | 1 | Reference strategy for pooled querying |
+| Active Learning | 6 | Query-efficient sample selection and adaptive acquisition |
+| Pool-based / Offline | 2 | Large-scale surrogate labeling and offline training |
+| Data-Free / Generative | 8 | Query synthesis without a public surrogate pool |
+
+### Baseline
+
+| Attack | Paper | Key Strategy |
+| :--- | :--- | :--- |
+| Random | - | Uniform random sampling from the surrogate pool. |
+
+### Active Learning
+
+| Attack | Paper | Key Strategy |
+| :--- | :--- | :--- |
+| ActiveThief | [Pal et al. (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5432) | Uncertainty, K-Center, and DFAL-based pool selection. |
+| Blackbox Dissector | [Wang et al. (2021)](https://arxiv.org/abs/2105.00623) | Erase-and-score active querying with Grad-CAM style masking. |
+| CloudLeak | [Yu et al. (2020)](https://www.ndss-symposium.org/wp-content/uploads/2020/02/24178.pdf) | FeatureFool-style adversarial query generation from public images. |
+| InverseNet | [Gong et al. (2021)](https://www.ijcai.org/proceedings/2021/336) | Inversion-inspired sample recovery and staged querying. |
+| MARICH | [Karmakar et al. (2023)](https://arxiv.org/abs/2302.08466) | Multi-round hard-label querying with staged sample selection. |
+| SwiftThief | [Lee et al. (2024)](https://www.ijcai.org/proceedings/2024/47) | SimSiam-style representation learning plus active selection. |
+
+### Pool-based / Offline
+
+| Attack | Paper | Key Strategy |
+| :--- | :--- | :--- |
+| KnockoffNets | [Orekondy et al. (2019)](https://arxiv.org/abs/1812.02766) | Bandit-style class sampling and offline substitute training. |
+| CopycatCNN | [Correia-Silva et al. (2018)](https://arxiv.org/abs/1806.05476) | Large-scale offline labeling of natural images. |
+
+### Data-Free / Generative
+
+| Attack | Paper | Key Strategy |
+| :--- | :--- | :--- |
+| DFME | [Truong et al. (2021)](https://arxiv.org/abs/2011.14779) | Min-max data-free extraction with generator/student updates. |
+| DFMS | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | Diverse hard-label query synthesis with staged stealing. |
+| DisGUIDE | [Tan et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | Disagreement-guided data-free extraction with replay. |
+| MAZE | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | Zeroth-order gradient estimation for query synthesis. |
+| ES-Attack | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | Evolutionary query synthesis against black-box victims. |
+| GAME | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | Adaptive class-conditioned generation and extraction. |
+| Dual Students | [Beetham et al. (2023)](https://arxiv.org/abs/2309.10058) | Two-student disagreement-guided data-free extraction. |
+| Blackbox Ripper | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | Latent-space evolution on pretrained GAN priors. |
 
 ## Artifacts
 
-Per seed run directory:
+Each seed run writes the same canonical artifact bundle:
 
 ```text
 runs/<run_name>/<timestamp>/seed_<seed>/
@@ -108,9 +132,10 @@ runs/<run_name>/<timestamp>/seed_<seed>/
   metrics_history.csv
 ```
 
-- `summary.json`: checkpoint metrics keyed by budget, recorded under `track_b`
-- `metrics.csv`: long-form rows with `track=track_b`
-- `run_config.yaml`: exact config used for the run
+- `run_config.yaml`: exact experiment config captured for reproducibility
+- `summary.json`: checkpoint metrics keyed by budget under `track_b`
+- `metrics.csv`: long-form result rows with `track=track_b`
+- `metrics_history.csv`: checkpoint-by-checkpoint metric history
 
 ## Methodology
 
@@ -118,9 +143,11 @@ See `Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md` for
 
 ## Contributing
 
-- Add new attacks under `mebench/attackers/`
-- Keep runtime compatible with `AttackRunner.run(ctx)`
-- Run `python -m pytest tests/ -q`
+When contributing a new attack or contract change, keep the benchmark surface consistent:
+
+- Implementation: add new attacks under `mebench/attackers/`
+- Runtime contract: keep implementations compatible with `AttackRunner.run(ctx)`
+- Verification: run `python -m pytest tests/ -q`
 
 ## License
 
