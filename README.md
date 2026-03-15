@@ -66,6 +66,12 @@ python aggregate_matrix.py
 - Cross-set results should not be interpreted as a single absolute leaderboard because budgets, victim domains, and surrogate pool caps differ by set.
 - Use SET-level rankings and trends for headline benchmark conclusions; treat cross-set comparisons as contextual rather than directly commensurate.
 
+## SET-C1 Substitute Policy
+
+- `SET-C1` uses a fixed substitute-training schedule for all attacks: `batch=256`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=90`.
+- Model selection is by best validation loss.
+- Early stopping is disabled in practice by setting `patience=max_epochs`, so runs always complete the full 90 epochs before restoring the best validation-loss checkpoint.
+
 ## Artifacts
 
 Per seed run directory:

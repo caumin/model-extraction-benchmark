@@ -62,6 +62,18 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
         assert int(cfg["substitute"]["max_epochs"]) == 1000
         assert int(cfg["substitute"]["patience"]) == 100
 
+    def _assert_set_c_uniform_substitute(cfg: dict) -> None:
+        assert int(cfg["substitute"]["batch_size"]) == 256
+        assert cfg["substitute"]["optimizer"]["name"] == "sgd"
+        assert float(cfg["substitute"]["optimizer"]["lr"]) == pytest.approx(0.1)
+        assert float(cfg["substitute"]["optimizer"]["momentum"]) == pytest.approx(0.9)
+        assert float(cfg["substitute"]["optimizer"]["weight_decay"]) == pytest.approx(5e-4)
+        assert cfg["substitute"]["scheduler"]["name"] == "multistep"
+        assert cfg["substitute"]["scheduler"]["milestones_ratio"] == [0.5, 0.75]
+        assert float(cfg["substitute"]["scheduler"]["gamma"]) == pytest.approx(0.1)
+        assert int(cfg["substitute"]["max_epochs"]) == 90
+        assert int(cfg["substitute"]["patience"]) == 90
+
     dfme = _load("SET-B1_dfme_soft_30m_seed0.yaml")
     _assert_set_b_uniform_substitute(dfme)
     assert "batch_size" not in dfme["attack"]
@@ -145,6 +157,12 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
     assert int(set_a_inversenet["attack"]["coreset_seed"]) == 20
     assert float(set_a_inversenet["attack"]["hcss_xi"]) == pytest.approx(0.02)
     assert int(set_a_inversenet["attack"]["hcss_max_iter"]) == 20
+
+    set_c_random = _load("SET-C1_random_soft_30k_seed0.yaml")
+    _assert_set_c_uniform_substitute(set_c_random)
+
+    set_c_dfme = _load("SET-C1_dfme_soft_30m_seed0.yaml")
+    _assert_set_c_uniform_substitute(set_c_dfme)
 
 
 def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:

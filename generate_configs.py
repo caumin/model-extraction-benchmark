@@ -307,6 +307,15 @@ def generate_configs(
     set_b_unified_substitute_lr = 0.1
     set_b_unified_substitute_max_epochs = 1000
     set_b_unified_substitute_patience = 100
+    # SET-C1 uses a fixed-length substitute schedule.
+    # We keep best-checkpoint selection by validation loss, but disable effective
+    # early stopping by setting patience equal to the full epoch budget. The
+    # generated configs are consumed by attack implementations that validate once
+    # per epoch and restore the best validation-loss checkpoint after training.
+    set_c_substitute_batch_size = 256
+    set_c_unified_substitute_lr = 0.1
+    set_c_unified_substitute_max_epochs = 90
+    set_c_unified_substitute_patience = 90
 
     # Synthetic/data-free attacks do not depend on the surrogate dataset.
     # Generate them once per victim. Prefer an ImageNet-based SET when available
@@ -390,11 +399,16 @@ def generate_configs(
                     setup_max_epochs = int(set_a_unified_substitute_max_epochs)
                     setup_patience = int(set_a_unified_substitute_patience)
                     setup_set_id = str(setup.set_id).strip().upper()
-                    if setup_set_id in {"SET-B1", "SET-C1"}:
+                    if setup_set_id == "SET-B1":
                         setup_substitute_batch_size = int(set_b_substitute_batch_size)
                         target_lr = float(set_b_unified_substitute_lr)
                         setup_max_epochs = int(set_b_unified_substitute_max_epochs)
                         setup_patience = int(set_b_unified_substitute_patience)
+                    elif setup_set_id == "SET-C1":
+                        setup_substitute_batch_size = int(set_c_substitute_batch_size)
+                        target_lr = float(set_c_unified_substitute_lr)
+                        setup_max_epochs = int(set_c_unified_substitute_max_epochs)
+                        setup_patience = int(set_c_unified_substitute_patience)
 
                     # Default substitute config
                     substitute_config = {

@@ -72,6 +72,12 @@ The benchmark goal is to compare model extraction attacks under a unified experi
 - Cross-set comparisons require caution because victim domain, budget policy, and surrogate-pool limits differ across sets.
 - A paper should treat cross-set results as contextual evidence unless it explicitly normalizes those differences.
 
+### SET-C1 Fixed-Length Substitute Training
+
+- `SET-C1` uses a setup-level fixed substitute profile across attacks: `batch=256`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=90`.
+- Substitute checkpoint selection is based on minimum validation loss.
+- The run is fixed-length rather than early-stopped: generated configs set `patience=max_epochs`, which keeps the existing attack training paths running through all 90 epochs while still restoring the best validation-loss checkpoint at the end.
+
 ## Config Rules
 
 - `victim.output_mode` and `attack.output_mode` must match
