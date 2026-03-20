@@ -368,15 +368,22 @@ class MARICH(AttackRunner):
         if len(self.state.attack_state.get("query_data_x", [])) == 0:
             return candidates[: min(int(budget), len(candidates))]
 
-        x_train = torch.cat(self.state.attack_state["query_data_x"], dim=0).to(device)
-        y_train = torch.cat(self.state.attack_state["query_data_y"], dim=0).to(device)
+        x_train = torch.cat(self.state.attack_state["query_data_x"], dim=0)
+        y_train = torch.cat(self.state.attack_state["query_data_y"], dim=0)
         self.substitute.eval()
+        loss_batches: List[torch.Tensor] = []
+        loss_batch_size = max(1, min(int(self.selection_batch_size), int(x_train.size(0))))
         with torch.no_grad():
-            logits = self.substitute(x_train)
-            if self.is_single_logit_binary:
-                losses = binary_bce_loss(logits, y_train, reduction="none").view(-1)
-            else:
-                losses = F.cross_entropy(logits, y_train.long(), reduction="none")
+            for start in range(0, int(x_train.size(0)), loss_batch_size):
+                x_batch = x_train[start : start + loss_batch_size].to(device)
+                y_batch = y_train[start : start + loss_batch_size].to(device)
+                logits = self.substitute(x_batch)
+                if self.is_single_logit_binary:
+                    batch_losses = binary_bce_loss(logits, y_batch, reduction="none").view(-1)
+                else:
+                    batch_losses = F.cross_entropy(logits, y_batch.long(), reduction="none")
+                loss_batches.append(batch_losses.detach().cpu())
+        losses = torch.cat(loss_batches, dim=0)
         num_centers = max(1, min(int(self.num_clusters), int(losses.numel())))
         center_idx = torch.argsort(losses, descending=True)[:num_centers]
         centers = x_train[center_idx].view(num_centers, -1).detach().cpu()

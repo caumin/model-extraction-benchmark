@@ -1029,7 +1029,8 @@ class SwiftThief(AttackRunner):
             "pin_memory": bool(pin_memory),
             "drop_last": False,
         }
-        if int(train_workers) > 0:
+        use_persistent_workers = bool(self.config.get("persistent_workers", False))
+        if int(train_workers) > 0 and use_persistent_workers:
             train_loader_kwargs["persistent_workers"] = True
             train_loader_kwargs["prefetch_factor"] = self.prefetch_factor
 
@@ -1038,7 +1039,7 @@ class SwiftThief(AttackRunner):
             "pin_memory": bool(pin_memory),
             "drop_last": False,
         }
-        if int(val_workers) > 0:
+        if int(val_workers) > 0 and use_persistent_workers:
             val_loader_kwargs["persistent_workers"] = True
             val_loader_kwargs["prefetch_factor"] = self.prefetch_factor
               

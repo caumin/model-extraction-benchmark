@@ -1,5 +1,6 @@
 """ActiveThief attack implementation with DFAL support using vectorized DeepFool."""
 
+import gc
 from typing import Dict, Any, List, Tuple, Optional
 import math
 import logging
@@ -279,6 +280,16 @@ class ActiveThief(AttackRunner):
         """Train substitute model from scratch on labeled data."""
         device = state.metadata.get("device", "cpu")
         input_shape = self.state.metadata.get("input_shape", (3, 32, 32))
+
+        previous_substitute = self.substitute
+        if previous_substitute is not None:
+            if state.attack_state.get("substitute") is previous_substitute:
+                state.attack_state["substitute"] = None
+            self.substitute = None
+            del previous_substitute
+            gc.collect()
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
         
         # Create fresh model (from scratch)
         self.substitute = self._create_substitute(input_shape).to(device)
@@ -501,8 +512,7 @@ class ActiveThief(AttackRunner):
                     probs = binary_positive_probs_from_logits(logits)
                 else:
                     probs = F.softmax(logits, dim=1)
-                # [OPTIMIZATION] Keep on GPU to avoid Host-Device transfer bottleneck
-                all_probs.append(probs.detach())
+                all_probs.append(probs.detach().cpu())
         return torch.cat(all_probs, dim=0)
 
     def _deepfool_distance_dfal_chunk(
@@ -758,10 +768,10 @@ class ActiveThief(AttackRunner):
             labeled_probs = self._collect_probs(labeled_loader, device)
         else:
             # No labeled data yet, pass empty tensor
-            labeled_probs = torch.empty(0, self.num_classes, device=device)
+            labeled_probs = torch.empty(0, self.num_classes)
         
         # Apply k-center on candidates using probability vectors with labeled centers
-        selected_local_in_candidates = self._select_k_center(probs.to(device), labeled_probs.to(device), k)
+        selected_local_in_candidates = self._select_k_center(probs, labeled_probs, k)
         selected_indices = [dfal_candidates[i] for i in selected_local_in_candidates]
         
         return selected_indices
@@ -877,10 +887,10 @@ class ActiveThief(AttackRunner):
                 labeled_probs = self._collect_probs(labeled_loader, device)
             else:
                 # No labeled data yet, pass empty tensor
-                labeled_probs = torch.empty(0, self.num_classes, device=device)
+                labeled_probs = torch.empty(0, self.num_classes)
             
             # Pass both to selector
-            selected_local = self._select_k_center(probs.to(device), labeled_probs.to(device), k)
+            selected_local = self._select_k_center(probs, labeled_probs, k)
             selected_indices = [self.unlabeled_indices[i] for i in selected_local]
             return self._finalize_query_batch(selected_indices, state, k)
 

@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, List, Tuple, Optional
 import copy
+import gc
 import logging
 import math
 import torch
@@ -960,6 +961,7 @@ class BlackboxDissector(AttackRunner):
         norm_mean = torch.zeros((1, channels, 1, 1), device=device)
         norm_std = torch.ones((1, channels, 1, 1), device=device)
 
+        teacher = teacher.to(device)
         teacher.eval()
         subset = Subset(self.pool_dataset, unlabeled_indices)
         loader = DataLoader(
@@ -1012,6 +1014,10 @@ class BlackboxDissector(AttackRunner):
         
         pseudo_pbar.close()
         state.attack_state["pseudo_labels"] = pseudo_labels
+        teacher = teacher.cpu()
+        gc.collect()
+        if str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
 
     def train_substitute(self, state: BenchmarkState) -> None:
         """Train substitute model with Self-KD on Unlabeled Data.
@@ -1158,6 +1164,14 @@ class BlackboxDissector(AttackRunner):
         # Initialize student model FROM SCRATCH each iteration
         width_mult = int(sub_config.get("width_mult", 1))
         dropout_prob = float(sub_config.get("dropout_prob", 0.0))
+        previous_substitute = state.attack_state.get("substitute")
+        if previous_substitute is not None:
+            state.attack_state["substitute"] = None
+            del previous_substitute
+            gc.collect()
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
+
         model = create_substitute(
             arch=sub_config.get("arch", "resnet18"),
             num_classes=num_classes,

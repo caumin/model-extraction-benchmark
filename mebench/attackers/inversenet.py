@@ -355,6 +355,7 @@ class InverseNet(AttackRunner):
         # avoid per-step DataLoader construction/spawn overhead (especially on Windows).
         if bool(self.config.get("cache_pool_to_memory", True)):
             device = str(state.metadata.get("device", "cpu"))
+            cache_device = str(self.config.get("cache_pool_device", "cpu"))
             cache_batch_size = int(self.config.get("pool_cache_batch_size", 512))
             cache_max_samples = int(self.config.get("pool_cache_max_samples", 0))
             cache_max_samples = max(0, cache_max_samples)
@@ -385,9 +386,14 @@ class InverseNet(AttackRunner):
                 if cache_max_samples and int(pool_x.size(0)) > cache_max_samples:
                     pool_x = pool_x[:cache_max_samples]
 
-                if device.startswith("cuda"):
+                if cache_device in {"runtime", "device", "same_as_runtime", "auto"}:
+                    cache_target = device
+                else:
+                    cache_target = cache_device
+
+                if cache_target.startswith("cuda"):
                     try:
-                        pool_x = pool_x.to(device)
+                        pool_x = pool_x.to(cache_target)
                     except RuntimeError:
                         pool_x = pool_x.cpu()
 
@@ -985,8 +991,6 @@ class InverseNet(AttackRunner):
         # 1. Extract features (flattened images) for all centers and remaining candidates ONCE
         # Note: InverseNet uses raw image L1 distance as "feature"
         
-        device = str(state.metadata.get("device", "cpu"))
-
         if isinstance(self.pool_data, torch.Tensor):
             pool = self.pool_data
             pool_flat = pool.view(int(pool.size(0)), -1)
@@ -1035,10 +1039,12 @@ class InverseNet(AttackRunner):
 
             centers_matrix = torch.cat(centers_matrix_list, dim=0)
 
-        if candidates_matrix.device != torch.device(device):
-            candidates_matrix = candidates_matrix.to(device)
-        if centers_matrix.device != torch.device(device):
-            centers_matrix = centers_matrix.to(device)
+        coreset_device = str(self.config.get("coreset_device", candidates_matrix.device))
+        target_device = torch.device(coreset_device)
+        if candidates_matrix.device != target_device:
+            candidates_matrix = candidates_matrix.to(target_device)
+        if centers_matrix.device != target_device:
+            centers_matrix = centers_matrix.to(target_device)
         
         # Initialize min_distances with current centers
         # dists: [N_remaining, N_centers]
@@ -1049,7 +1055,7 @@ class InverseNet(AttackRunner):
         # But for typical pool sizes (e.g. 50k), we can do it iteratively to save memory
         
         # Initialize with infinity
-        min_dists = torch.full((candidates_matrix.size(0),), float('inf'), device=device)
+        min_dists = torch.full((candidates_matrix.size(0),), float('inf'), device=target_device)
         
         # Update min_dists against existing centers.
         # Use torch.cdist(p=1) in chunks to avoid Python loops.

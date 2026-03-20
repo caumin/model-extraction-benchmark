@@ -41,6 +41,20 @@ def resolve_prefetch_factor(*, default: int = 2) -> int:
         return int(default)
 
 
+def resolve_persistent_workers(
+    config: Optional[Mapping[str, Any]] = None,
+    *,
+    default: bool = False,
+) -> bool:
+    if config is not None and "persistent_workers" in config:
+        return bool(config.get("persistent_workers"))
+
+    raw = os.environ.get("MEBENCH_PERSISTENT_WORKERS")
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def pool_loader_kwargs(device: str, config: Optional[Mapping[str, Any]] = None) -> dict:
     """Common DataLoader kwargs for pool scanning on GPU runs.
 
@@ -53,7 +67,7 @@ def pool_loader_kwargs(device: str, config: Optional[Mapping[str, Any]] = None) 
         "num_workers": int(num_workers),
         "pin_memory": bool(pin_memory),
     }
-    if num_workers and int(num_workers) > 0:
+    if num_workers and int(num_workers) > 0 and resolve_persistent_workers(config, default=False):
         kwargs["persistent_workers"] = True
         kwargs["prefetch_factor"] = int(resolve_prefetch_factor(default=2))
     return kwargs
@@ -207,13 +221,13 @@ def load_pool_to_memory(
     max_samples: int = 100_000,
     desc: str = "Loading pool to RAM",
 ) -> Any:
-    """Load entire pool dataset into a single tensor on CPU (or GPU if fits).
+    """Load entire pool dataset into a single tensor on CPU by default.
 
     Args:
         config: Dataset config dict
-        device: Target device (e.g. 'cuda:0' or 'cpu').
-                If 'cuda', tries to move entire tensor to GPU.
-                If OOM, falls back to CPU.
+        device: Runtime device (e.g. 'cuda:0' or 'cpu').
+                Cached tensors stay on CPU unless config explicitly opts into
+                device-resident caching via ``cache_device``.
         max_samples: Maximum number of samples to load.
         desc: Progress bar description.
 
@@ -250,10 +264,15 @@ def load_pool_to_memory(
     if full_tensor.size(0) > max_samples:
         full_tensor = full_tensor[:max_samples]
         
-    # Try moving to target device (e.g. GPU cache)
-    if str(device).startswith("cuda"):
+    cache_device = str(config.get("cache_device", "cpu")).strip().lower()
+    if cache_device in {"runtime", "device", "same_as_runtime", "auto"}:
+        cache_target = str(device)
+    else:
+        cache_target = cache_device
+
+    if cache_target.startswith("cuda"):
         try:
-            return full_tensor.to(device)
+            return full_tensor.to(cache_target)
         except RuntimeError:
             # Fallback to CPU if VRAM not enough
             return full_tensor.cpu()

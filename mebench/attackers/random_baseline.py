@@ -1,5 +1,6 @@
 """Random selection baseline attack."""
 
+import gc
 import logging
 import math
 import numpy as np
@@ -400,6 +401,14 @@ class RandomBaseline(AttackRunner):
 
         sub_config = state.metadata.get("substitute_config", {})
         device = state.metadata.get("device", "cpu")
+
+        previous_substitute = state.attack_state.get("substitute")
+        if previous_substitute is not None:
+            state.attack_state["substitute"] = None
+            del previous_substitute
+            gc.collect()
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
         
         # Create fresh substitute
         num_classes = int(
@@ -502,6 +511,14 @@ class RandomBaseline(AttackRunner):
         device = state.metadata.get("device", "cpu")
         num_classes = int(state.metadata.get("num_classes") or 10)
         input_channels = int(state.metadata.get("input_shape", (3, 32, 32))[0])
+
+        previous_substitute = state.attack_state.get("substitute")
+        if previous_substitute is not None:
+            state.attack_state["substitute"] = None
+            del previous_substitute
+            gc.collect()
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
         
         substitute = create_substitute(
             arch=sub_config.get("arch", "resnet18"),
