@@ -428,10 +428,18 @@ class MARICH(AttackRunner):
     def _engrad_select(self, candidates: List[int], budget: int, device: str) -> List[int]:
         if self.pool_dataset is None or self.substitute is None or budget <= 0 or not candidates:
             return []
+        engrad_batch_size = min(self.selection_batch_size, len(candidates))
+        engrad_microbatch_size = max(
+            1,
+            min(
+                int(self.config.get("engrad_microbatch_size", 64)),
+                engrad_batch_size,
+            ),
+        )
         subset = Subset(_IndexedDataset(self.pool_dataset), candidates)
         loader = DataLoader(
             subset,
-            batch_size=min(self.selection_batch_size, len(candidates)),
+            batch_size=engrad_batch_size,
             shuffle=False,
             **self._pool_scan_loader_kwargs(device),
         )
@@ -441,15 +449,51 @@ class MARICH(AttackRunner):
         pbar = self._create_scoring_pbar(len(candidates), "engrad", min(int(budget), len(candidates)))
         try:
             for x_batch, idx_batch in loader:
-                x_batch = self._apply_query_preprocess(x_batch).to(device)
-                x_batch.requires_grad_(True)
-                logits = self.substitute(x_batch)
-                probs = F.softmax(logits, dim=0)
-                ent = torch.special.entr(probs).sum()
-                self.substitute.zero_grad(set_to_none=True)
-                ent.backward()
-                grad = x_batch.grad.view(x_batch.size(0), -1).detach().cpu().numpy()
-                grads.append(grad)
+                x_batch = self._apply_query_preprocess(x_batch)
+
+                chunk_a_cpu: List[torch.Tensor] = []
+                chunk_b_cpu: List[torch.Tensor] = []
+                total_a_cpu: Optional[torch.Tensor] = None
+                total_b_cpu: Optional[torch.Tensor] = None
+                with torch.no_grad():
+                    for start in range(0, int(x_batch.size(0)), engrad_microbatch_size):
+                        x_chunk = x_batch[start : start + engrad_microbatch_size].to(device)
+                        logits_chunk = self.substitute(x_chunk)
+                        exp_chunk = torch.exp(logits_chunk)
+                        a_chunk = exp_chunk.sum(dim=0).detach().cpu()
+                        b_chunk = (exp_chunk * logits_chunk).sum(dim=0).detach().cpu()
+                        chunk_a_cpu.append(a_chunk)
+                        chunk_b_cpu.append(b_chunk)
+                        if total_a_cpu is None:
+                            total_a_cpu = a_chunk.clone()
+                            total_b_cpu = b_chunk.clone()
+                        else:
+                            total_a_cpu = total_a_cpu + a_chunk
+                            total_b_cpu = total_b_cpu + b_chunk
+
+                if total_a_cpu is None or total_b_cpu is None:
+                    continue
+
+                grad_chunks: List[np.ndarray] = []
+                total_a_device = total_a_cpu.to(device)
+                total_b_device = total_b_cpu.to(device)
+                for chunk_idx, start in enumerate(range(0, int(x_batch.size(0)), engrad_microbatch_size)):
+                    x_chunk = x_batch[start : start + engrad_microbatch_size].to(device)
+                    x_chunk.requires_grad_(True)
+                    logits_chunk = self.substitute(x_chunk)
+                    exp_chunk = torch.exp(logits_chunk)
+                    a_chunk = exp_chunk.sum(dim=0)
+                    b_chunk = (exp_chunk * logits_chunk).sum(dim=0)
+                    rest_a = total_a_device - chunk_a_cpu[chunk_idx].to(device)
+                    rest_b = total_b_device - chunk_b_cpu[chunk_idx].to(device)
+                    total_a = rest_a + a_chunk
+                    total_b = rest_b + b_chunk
+                    ent = (torch.log(total_a.clamp_min(1e-10)) - (total_b / total_a.clamp_min(1e-10))).sum()
+                    self.substitute.zero_grad(set_to_none=True)
+                    ent.backward()
+                    grad_chunks.append(x_chunk.grad.view(x_chunk.size(0), -1).detach().cpu().numpy())
+
+                grads.append(np.concatenate(grad_chunks, axis=0))
                 cand_indices.extend([int(idx) for idx in idx_batch.tolist()])
                 if pbar is not None:
                     pbar.update(int(x_batch.size(0)))
