@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, List, Optional, Tuple
 from collections import OrderedDict
+import gc
 import bisect
 import math
 import torch
@@ -581,7 +582,8 @@ class CloudLeak(AttackRunner):
     def _ensure_substitute(self, state: BenchmarkState) -> nn.Module:
         substitute = state.attack_state.get("substitute")
         if substitute is not None:
-            return substitute
+            device = state.metadata.get("device", "cpu")
+            return substitute.to(device)
 
         device = state.metadata.get("device", "cpu")
         num_classes = int(
@@ -676,7 +678,7 @@ class CloudLeak(AttackRunner):
         return None
 
     def _ensure_featurefool(self, substitute: nn.Module, device: str) -> None:
-        if self.featurefool is None:
+        if self.featurefool is None or getattr(self.featurefool, "model", None) is not substitute:
             if self.feature_layer is None and self.pretrained_arch == "vgg19_deepid":
                 self.feature_layer = "deepid"
             self.featurefool = FeatureFool(
@@ -1150,8 +1152,13 @@ class CloudLeak(AttackRunner):
         state.attack_state["substitute"] = substitute
         self._evaluate_current_substitute(substitute, device)
 
+        substitute = substitute.cpu()
+        state.attack_state["substitute"] = substitute
         self._class_feature_cache = {}
         self.featurefool = None
+        gc.collect()
+        if str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
 
     def _freeze_backbone(self, model: nn.Module) -> None:
         # For pretrained substitutes, keep the backbone frozen but allow training for:

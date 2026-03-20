@@ -1,4 +1,5 @@
 from typing import Dict, Any, List, Tuple, Optional
+import gc
 import logging
 import math
 import numpy as np
@@ -330,6 +331,8 @@ class CopycatCNN(AttackRunner):
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
             ).to(device)
+        else:
+            self.substitute = self.substitute.to(device)
         epochs = max(1, int(self.substitute_epochs))
         
         victim_config = state.metadata.get("victim_config", {})
@@ -388,4 +391,9 @@ class CopycatCNN(AttackRunner):
         state.attack_state["substitute"] = self.substitute
         self.logger.info("CopycatCNN substitute trained.")
         self._evaluate_current_substitute(self.substitute, device)
+        self.substitute = self.substitute.cpu()
+        state.attack_state["substitute"] = self.substitute
+        gc.collect()
+        if str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
 

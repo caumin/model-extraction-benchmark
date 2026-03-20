@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, List, Tuple, Optional
 from collections import deque
+import gc
 import logging
 import math
 import numpy as np
@@ -274,6 +275,7 @@ class KnockoffNets(AttackRunner):
         if substitute is not None:
             substitute.eval()
             device = state.metadata.get("device", "cpu")
+            substitute = substitute.to(device)
             norm_mean, norm_std = self._get_normalization(state, device)
             with torch.no_grad():
                 x_input = (x_batch.to(device) - norm_mean) / norm_std
@@ -284,6 +286,13 @@ class KnockoffNets(AttackRunner):
                 else:
                     log_probs = F.log_softmax(logits, dim=1)
                 loss_reward = -(probs.to(device) * log_probs).sum(dim=1).detach().cpu()
+            substitute = substitute.cpu()
+            state.attack_state["online_substitute"] = substitute
+            if state.attack_state.get("substitute") is not None:
+                state.attack_state["substitute"] = substitute
+            gc.collect()
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
         else:
             loss_reward = torch.zeros(probs.size(0))
 
@@ -669,6 +678,8 @@ class KnockoffNets(AttackRunner):
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,
             ).to(device)
+        else:
+            model = model.to(device)
 
         output_mode = self.config.get("output_mode", "soft_prob")
         norm_mean, norm_std = self._get_normalization(state, device)
@@ -737,7 +748,13 @@ class KnockoffNets(AttackRunner):
         )
         trainer.train(request)
 
+        model = model.cpu()
         state.attack_state[store_key] = model
+        if state.attack_state.get("substitute") is model or store_key == "offline_substitute":
+            state.attack_state["substitute"] = model
+        gc.collect()
+        if str(device).startswith("cuda"):
+            torch.cuda.empty_cache()
 
     def _get_normalization(self, state: BenchmarkState, device: str) -> tuple[torch.Tensor, torch.Tensor]:
         # Pool tensors are normalized in the surrogate loader path. Do not apply
@@ -763,7 +780,17 @@ class KnockoffNets(AttackRunner):
             store_key="offline_substitute",
         )
         state.attack_state["substitute"] = state.attack_state.get("offline_substitute")
-        self._evaluate_current_substitute(state.attack_state.get("substitute"), state.metadata.get("device", "cpu"))
+        final_substitute = state.attack_state.get("substitute")
+        device = state.metadata.get("device", "cpu")
+        if final_substitute is not None:
+            final_substitute = final_substitute.to(device)
+            self._evaluate_current_substitute(final_substitute, device)
+            final_substitute = final_substitute.cpu()
+            state.attack_state["offline_substitute"] = final_substitute
+            state.attack_state["substitute"] = final_substitute
+            gc.collect()
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
 
     def _semantic_probs_from_oracle_output(self, oracle_output: OracleOutput) -> torch.Tensor:
         if oracle_output.kind == "soft_prob":
