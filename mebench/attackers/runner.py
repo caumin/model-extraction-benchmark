@@ -212,8 +212,7 @@ class AttackRunner(ABC):
                     "labeled_duplicates": float(labeled_duplicates),
                 }
             )
-            # Log history (time-series)
-            self.ctx.logger.log_history(step=query_step, metrics=metrics_with_counts)
+            self.ctx.logger.log_progress(step=query_step, metrics=metrics_with_counts)
 
             # Log checkpoint (metrics.csv)
             seed = self.state.metadata.get("seed", 0)

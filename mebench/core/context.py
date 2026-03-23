@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict, Optional
 
 import torch
@@ -23,6 +24,7 @@ class BenchmarkContext:
         config: Optional[Dict[str, Any]] = None,
         checkpoint_callback: Optional[Callable[[int], None]] = None,
     ) -> None:
+        self._logger = logging.getLogger(__name__)
         self.state = state
         self.oracle = oracle
         self.logger = logger
@@ -78,12 +80,16 @@ class BenchmarkContext:
         # that oracle traffic has started, even if tqdm rendering is suppressed.
         if self._progress_interval:
             if prev_queries == 0:
-                print(
-                    f"[Query Progress] Used: {self.state.query_count} / Remaining: {self.state.budget_remaining}"
+                self._logger.info(
+                    "[Query Progress] Used: %d / Remaining: %d",
+                    self.state.query_count,
+                    self.state.budget_remaining,
                 )
             elif self.state.query_count % self._progress_interval < batch_size:
-                print(
-                    f"[Query Progress] Used: {self.state.query_count} / Remaining: {self.state.budget_remaining}"
+                self._logger.info(
+                    "[Query Progress] Used: %d / Remaining: %d",
+                    self.state.query_count,
+                    self.state.budget_remaining,
                 )
 
         self._maybe_checkpoint()
@@ -101,7 +107,7 @@ class BenchmarkContext:
                 else:
                     safe_payload[key] = str(value)
 
-        self.logger.log_history(self.state.query_count, {"event": name, **safe_payload})
+        self.logger.log_event(self.state.query_count, name, safe_payload)
 
     def on_checkpoint(self, query_count: int) -> None:
         self.log_event("checkpoint_reached", {"checkpoint": int(query_count)})

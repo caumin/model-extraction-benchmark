@@ -129,13 +129,13 @@ runs/<run_name>/<timestamp>/seed_<seed>/
   run_config.yaml
   summary.json
   metrics.csv
-  metrics_history.csv
+  experiment.log
 ```
 
 - `run_config.yaml`: exact experiment config captured for reproducibility
 - `summary.json`: checkpoint metrics keyed by budget under `track_b`
 - `metrics.csv`: long-form result rows with `track=track_b`
-- `metrics_history.csv`: checkpoint-by-checkpoint metric history
+- `experiment.log`: human-readable execution log with progress updates, events, warnings, and exceptions
 
 ## Methodology
 

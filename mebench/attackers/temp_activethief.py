@@ -280,7 +280,7 @@ class TempActiveThief(AttackRunner):
                     "labeled_duplicates": float(labeled_duplicates),
                 }
             )
-            branch_attack.ctx.logger.log_history(step=query_step, metrics=metrics_with_counts)
+            branch_attack.ctx.logger.log_progress(step=query_step, metrics=metrics_with_counts)
             seed = branch_attack.state.metadata.get("seed", 0)
             branch_attack.ctx.logger.log_checkpoint(
                 seed=seed,

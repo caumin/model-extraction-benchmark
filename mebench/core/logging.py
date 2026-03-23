@@ -44,33 +44,39 @@ class ArtifactLogger:
         }
 
         self.metrics_rows: List[Dict[str, Any]] = []
-        self.history_rows: List[Dict[str, Any]] = []  # New: Time-series history
         self.checkpoint_metrics: Dict[int, Dict[str, Any]] = {}
+        self.log_path = self.run_dir / "experiment.log"
+        self._file_handler: logging.Handler | None = None
+        self._attach_file_logging()
 
-    def log_history(self, step: int, metrics: Dict[str, float]) -> None:
-        """Log time-series metrics (e.g., loss, val_f1) at a specific step.
-        
-        Args:
-            step: Current query count or iteration
-            metrics: Dictionary of metric names and values
-        """
-        row = {"step": step, "timestamp": datetime.now().isoformat(), **metrics}
-        self.history_rows.append(row)
-        
-        # Flush to disk immediately for real-time monitoring
-        self._append_csv("metrics_history.csv", row)
+    def _attach_file_logging(self) -> None:
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        handler = logging.FileHandler(self.log_path, encoding="utf-8")
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        root_logger.addHandler(handler)
+        self._file_handler = handler
 
-    def _append_csv(self, filename: str, row: Dict[str, Any]) -> None:
-        """Append a single row to a CSV file."""
-        file_path = self.run_dir / filename
-        file_exists = file_path.exists()
-        
-        fieldnames = list(row.keys())
-        with open(file_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
+    def log_event(self, step: int, name: str, payload: Dict[str, Any] | None = None) -> None:
+        details = self._format_fields(payload or {})
+        suffix = f" {details}" if details else ""
+        logging.getLogger("mebench.event").info("[Event] step=%d name=%s%s", int(step), name, suffix)
+
+    def log_progress(self, step: int, metrics: Dict[str, Any]) -> None:
+        details = self._format_fields(metrics)
+        suffix = f" {details}" if details else ""
+        logging.getLogger("mebench.progress").info("[Progress] step=%d%s", int(step), suffix)
+
+    def _format_fields(self, fields: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        for key in sorted(fields.keys()):
+            value = fields[key]
+            if isinstance(value, float):
+                parts.append(f"{key}={value:.6f}")
+            else:
+                parts.append(f"{key}={value}")
+        return " ".join(parts)
 
     def set_run_metadata(self, config: Dict[str, Any]) -> None:
         """Set run metadata from config.
@@ -175,6 +181,15 @@ class ArtifactLogger:
         """Finalize logging (save all artifacts)."""
         self.save_summary()
         self.save_metrics_csv()
+
+    def close(self) -> None:
+        """Detach per-run file logging handler."""
+        if self._file_handler is None:
+            return
+        root_logger = logging.getLogger()
+        root_logger.removeHandler(self._file_handler)
+        self._file_handler.close()
+        self._file_handler = None
 
 
 def create_run_dir(

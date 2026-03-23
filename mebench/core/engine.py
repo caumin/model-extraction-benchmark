@@ -1,5 +1,6 @@
 """Benchmark engine core."""
 
+import logging
 from pathlib import Path
 from typing import Any, Dict
 
@@ -106,12 +107,13 @@ def run_experiment(
 
     # Setup logging
     setup_console_logging()
+    logger = logging.getLogger(__name__)
 
     # Run for each seed
     for seed in config["run"]["seeds"]:
-        print(f"\n{'='*60}")
-        print(f"Running seed {seed}")
-        print(f"{'='*60}")
+        logger.info("\n%s", "=" * 60)
+        logger.info("Running seed %s", seed)
+        logger.info("%s", "=" * 60)
 
         # Set seed for reproducibility
         set_seed(seed)
@@ -119,121 +121,131 @@ def run_experiment(
         # Create run directory
         base_dir = Path("runs")
         run_dir = create_run_dir(base_dir, config["run"]["name"], seed)
-        print(f"Run directory: {run_dir}")
 
         # Initialize logger
-        logger = ArtifactLogger(run_dir)
-        logger.set_run_metadata(config)
-        logger.save_config(config)
+        artifact_logger = ArtifactLogger(run_dir)
+        try:
+            artifact_logger.set_run_metadata(config)
+            artifact_logger.save_config(config)
+            logger.info("Run directory: %s", run_dir)
+            logger.info("Experiment log file: %s", artifact_logger.log_path)
 
-        # Initialize state
-        state = BenchmarkState(
-            budget_remaining=config["budget"]["max_budget"],
-            metadata={
-                "seed": seed,  # [ADDED] Track current seed
-                "device": device,
-                "num_classes": int(config["victim"]["num_classes"]),
-                "input_shape": (
-                    int(config["victim"]["channels"]),
-                    *config["victim"].get("input_size", [32, 32]),
-                ),
-                "dataset_config": config.get("dataset", {}),
-                "substitute_config": config.get("substitute", {}),
-                "victim_config": config.get("victim", {}),
-                "max_budget": config["budget"]["max_budget"],
-            },
-        )
-
-        # Load victim model from checkpoint or placeholder
-        victim = load_victim_from_config(config["victim"], device)
-        victim_ref = str(config.get("victim", {}).get("checkpoint_ref") or "")
-        is_placeholder_victim = victim_ref == "" or victim_ref == "/path/to/ckpt.pt"
-
-        # Optional: verify victim accuracy on the public test set.
-        # Disabled by default to avoid accidental dataset downloads in CI/unit tests.
-        if bool(config.get("benchmark", {}).get("verify_victim_accuracy", True)):
-            dataset_name = config.get("dataset", {}).get("name", "CIFAR10")
-            victim_cfg = config.get("victim", {})
-            input_size = victim_cfg.get("input_size")
-            size = None
-            if isinstance(input_size, (list, tuple)) and len(input_size) == 2:
-                size = (int(input_size[0]), int(input_size[1]))
-            channels = victim_cfg.get("channels")
-
-            test_loader = get_test_dataloader(
-                dataset_name,
-                batch_size=128,
-                input_size=size,
-                channels=int(channels) if channels is not None else None,
-                sewerml_label_mode=str(config.get("dataset", {}).get("sewerml_label_mode", "argmax")),
-                sewerml_ann_root=config.get("dataset", {}).get("sewerml_ann_root"),
-                sewerml_data_root=config.get("dataset", {}).get("sewerml_data_root"),
-                sewerml_eval_split=config.get("dataset", {}).get("sewerml_eval_split"),
+            # Initialize state
+            state = BenchmarkState(
+                budget_remaining=config["budget"]["max_budget"],
+                metadata={
+                    "seed": seed,  # [ADDED] Track current seed
+                    "device": device,
+                    "num_classes": int(config["victim"]["num_classes"]),
+                    "input_shape": (
+                        int(config["victim"]["channels"]),
+                        *config["victim"].get("input_size", [32, 32]),
+                    ),
+                    "dataset_config": config.get("dataset", {}),
+                    "substitute_config": config.get("substitute", {}),
+                    "victim_config": config.get("victim", {}),
+                    "max_budget": config["budget"]["max_budget"],
+                },
             )
-            victim_acc = compute_accuracy(victim, test_loader, device)
-            print(f"[VERIFY] Victim Test Accuracy: {victim_acc*100:.2f}%")
 
-        # Initialize oracle
-        oracle = Oracle(victim, config["victim"], state)
+            # Load victim model from checkpoint or placeholder
+            victim = load_victim_from_config(config["victim"], device)
+            victim_ref = str(config.get("victim", {}).get("checkpoint_ref") or "")
+            is_placeholder_victim = victim_ref == "" or victim_ref == "/path/to/ckpt.pt"
 
-        # Initialize attack
-        attack = create_runner(config["attack"]["name"], config, state)
+            # Optional: verify victim accuracy on the public test set.
+            # Disabled by default to avoid accidental dataset downloads in CI/unit tests.
+            if bool(config.get("benchmark", {}).get("verify_victim_accuracy", True)):
+                dataset_name = config.get("dataset", {}).get("name", "CIFAR10")
+                victim_cfg = config.get("victim", {})
+                input_size = victim_cfg.get("input_size")
+                size = None
+                if isinstance(input_size, (list, tuple)) and len(input_size) == 2:
+                    size = (int(input_size[0]), int(input_size[1]))
+                channels = victim_cfg.get("channels")
 
-        evaluated_track_b_checkpoints = set()
+                test_loader = get_test_dataloader(
+                    dataset_name,
+                    batch_size=128,
+                    input_size=size,
+                    channels=int(channels) if channels is not None else None,
+                    sewerml_label_mode=str(config.get("dataset", {}).get("sewerml_label_mode", "argmax")),
+                    sewerml_ann_root=config.get("dataset", {}).get("sewerml_ann_root"),
+                    sewerml_data_root=config.get("dataset", {}).get("sewerml_data_root"),
+                    sewerml_eval_split=config.get("dataset", {}).get("sewerml_eval_split"),
+                )
+                victim_acc = compute_accuracy(victim, test_loader, device)
+                logger.info("[VERIFY] Victim Test Accuracy: %.2f%%", victim_acc * 100.0)
 
-        def _evaluate_track_b_once(query_count: int) -> None:
-            if is_placeholder_victim:
-                return
+            # Initialize oracle
+            oracle = Oracle(victim, config["victim"], state)
 
-            q = int(query_count)
-            if q in evaluated_track_b_checkpoints:
-                return
+            # Initialize attack
+            attack = create_runner(config["attack"]["name"], config, state)
 
-            substitute_at_checkpoint = state.attack_state.get("substitute")
-            if substitute_at_checkpoint is None:
-                return
+            evaluated_track_b_checkpoints = set()
 
-            # Ensure victim is attached for metric computation.
-            if attack.victim is None:
-                attack.victim = victim
+            def _evaluate_track_b_once(query_count: int) -> None:
+                if is_placeholder_victim:
+                    return
 
-            attack._evaluate_current_substitute(
-                substitute_at_checkpoint,
-                device,
-                track="track_b",
-                query_count=q,
+                q = int(query_count)
+                if q in evaluated_track_b_checkpoints:
+                    return
+
+                substitute_at_checkpoint = state.attack_state.get("substitute")
+                if substitute_at_checkpoint is None:
+                    return
+
+                # Ensure victim is attached for metric computation.
+                if attack.victim is None:
+                    attack.victim = victim
+
+                attack._evaluate_current_substitute(
+                    substitute_at_checkpoint,
+                    device,
+                    track="track_b",
+                    query_count=q,
+                )
+                evaluated_track_b_checkpoints.add(q)
+
+            ctx = BenchmarkContext(
+                state=state,
+                oracle=oracle,
+                logger=artifact_logger,
+                config=config,
+                checkpoint_callback=_evaluate_track_b_once,
             )
-            evaluated_track_b_checkpoints.add(q)
 
-        ctx = BenchmarkContext(
-            state=state,
-            oracle=oracle,
-            logger=logger,
-            config=config,
-            checkpoint_callback=_evaluate_track_b_once,
-        )
-        
-        # [ADDED] Inject context into attack runner for metric logging
-        attack.ctx = ctx
+            # [ADDED] Inject context into attack runner for metric logging
+            attack.ctx = ctx
 
-        print("\nStarting attack run (Track B only)")
-        attack.run(ctx)
+            logger.info("Starting attack run (Track B only)")
+            attack.run(ctx)
 
-        # FINAL EVALUATION for Track B
-        substitute = state.attack_state.get("substitute")
-        if substitute is not None and not is_placeholder_victim:
-            reached_checkpoints = [
-                int(cp) for cp in state.attack_state.get("checkpoint_reached", [])
-            ]
-            for checkpoint in reached_checkpoints:
-                _evaluate_track_b_once(int(checkpoint))
-            _evaluate_track_b_once(state.query_count)
+            # FINAL EVALUATION for Track B
+            substitute = state.attack_state.get("substitute")
+            if substitute is not None and not is_placeholder_victim:
+                reached_checkpoints = [
+                    int(cp) for cp in state.attack_state.get("checkpoint_reached", [])
+                ]
+                for checkpoint in reached_checkpoints:
+                    _evaluate_track_b_once(int(checkpoint))
+                _evaluate_track_b_once(state.query_count)
 
-        print("\nAttack run complete!")
+            logger.info("Attack run complete")
 
-        # Finalize logging
-        logger.finalize()
+            # Finalize logging
+            artifact_logger.finalize()
+        except KeyboardInterrupt:
+            logger.exception("Seed %s interrupted", seed)
+            raise
+        except Exception:
+            logger.exception("Seed %s failed", seed)
+            raise
+        finally:
+            artifact_logger.close()
 
-    print(f"\n{'='*60}")
-    print("Experiment completed!")
-    print(f"{'='*60}")
+    logger.info("\n%s", "=" * 60)
+    logger.info("Experiment completed!")
+    logger.info("%s", "=" * 60)

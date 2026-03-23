@@ -93,7 +93,7 @@ runs/<run_name>/<timestamp>/seed_<seed>/
   run_config.yaml
   summary.json
   metrics.csv
-  metrics_history.csv
+  experiment.log
 ```
 
 ## Recommended Verification
