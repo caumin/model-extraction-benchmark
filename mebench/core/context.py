@@ -109,6 +109,23 @@ class BenchmarkContext:
 
         self.logger.log_event(self.state.query_count, name, safe_payload)
 
+    def log_resource_snapshot(
+        self,
+        phase: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        reset_peak: bool = False,
+    ) -> None:
+        if self.logger is None:
+            return
+        self.logger.log_resource_snapshot(
+            self.state.query_count,
+            phase,
+            device=str(self.state.metadata.get("device", "cpu")),
+            payload=payload,
+            reset_peak=reset_peak,
+        )
+
     def on_checkpoint(self, query_count: int) -> None:
         self.log_event("checkpoint_reached", {"checkpoint": int(query_count)})
         if self._checkpoint_callback is not None:

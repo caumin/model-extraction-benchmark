@@ -63,7 +63,9 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
         assert int(cfg["substitute"]["patience"]) == 100
 
     def _assert_set_c_uniform_substitute(cfg: dict) -> None:
-        assert int(cfg["substitute"]["batch_size"]) == 128
+        assert int(cfg["substitute"]["batch_size"]) == 64
+        assert int(cfg["substitute"]["val_batch_size"]) == 32
+        assert int(cfg["benchmark"]["eval_batch_size"]) == 32
         assert cfg["substitute"]["optimizer"]["name"] == "sgd"
         assert float(cfg["substitute"]["optimizer"]["lr"]) == pytest.approx(0.1)
         assert float(cfg["substitute"]["optimizer"]["momentum"]) == pytest.approx(0.9)
@@ -209,6 +211,8 @@ def test_generate_configs_emits_only_matrix_variants(tmp_path: Path) -> None:
     assert int(set_c_cfg["victim"]["num_classes"]) == 1
     assert set_c_cfg["dataset"]["sewerml_label_mode"] == "binary"
     assert set_c_cfg["dataset"]["sewerml_eval_split"] == "Valid"
+    assert int(set_c_cfg["dataset"]["sewerml_max_samples"]) == 10_000
+    assert int(set_c_cfg["dataset"]["sewerml_subset_seed"]) == 42
     assert set_c_cfg["victim"]["checkpoint_ref"] == "runs/victims/xie2019_binary-binary-version_1.pth"
     assert int(set_c_cfg["dataset"]["surrogate_max_samples"]) == 100_000
 

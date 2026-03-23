@@ -435,6 +435,8 @@ class SewerMLDataset(Dataset):
         transform: Optional[transforms.Compose] = None,
         *,
         label_mode: str = "argmax",
+        max_samples: int = 0,
+        subset_seed: int = 42,
     ) -> None:
         self.ann_root = Path(ann_root)
         self.img_root = Path(img_root)
@@ -458,6 +460,12 @@ class SewerMLDataset(Dataset):
 
         self.img_paths = [str(v) for v in gt["Filename"].values]
         self.targets = _parse_sewerml_labels(gt, mode)
+        max_samples = int(max_samples)
+        if 0 < max_samples < len(self.img_paths):
+            generator = torch.Generator().manual_seed(int(subset_seed))
+            selected = torch.randperm(len(self.img_paths), generator=generator)[:max_samples].tolist()
+            self.img_paths = [self.img_paths[idx] for idx in selected]
+            self.targets = [self.targets[idx] for idx in selected]
 
     def __len__(self) -> int:
         return len(self.img_paths)
@@ -488,6 +496,8 @@ class SeedDataset(Dataset):
         sewerml_data_root: Optional[str] = None,
         sewerml_split: Optional[str] = None,
         sewerml_label_mode: str = "argmax",
+        sewerml_max_samples: int = 0,
+        sewerml_subset_seed: int = 42,
     ):
         """Initialize seed dataset.
 
@@ -597,6 +607,8 @@ class SeedDataset(Dataset):
                 split=split,
                 label_mode=sewerml_label_mode,
                 transform=transform,
+                max_samples=int(sewerml_max_samples),
+                subset_seed=int(sewerml_subset_seed),
             )
         else:
             raise ValueError(f"Unknown dataset: {name}")
@@ -914,6 +926,8 @@ def get_test_dataloader(
     sewerml_ann_root: Optional[str] = None,
     sewerml_data_root: Optional[str] = None,
     sewerml_eval_split: Optional[str] = None,
+    sewerml_max_samples: int = 0,
+    sewerml_subset_seed: int = 42,
 ) -> DataLoader:
     """Get test dataloader for victim dataset."""
     if name == "CIFAR10":
@@ -1020,6 +1034,8 @@ def get_test_dataloader(
             split=split,
             label_mode=sewerml_label_mode,
             transform=transform,
+            max_samples=int(sewerml_max_samples),
+            subset_seed=int(sewerml_subset_seed),
         )
     else:
         raise ValueError(f"Unknown dataset: {name}")
@@ -1103,6 +1119,8 @@ def create_dataloader(
             sewerml_data_root=config.get("sewerml_data_root"),
             sewerml_split=config.get("sewerml_split"),
             sewerml_label_mode=config.get("sewerml_label_mode", "argmax"),
+            sewerml_max_samples=int(config.get("sewerml_max_samples", 0)),
+            sewerml_subset_seed=int(config.get("sewerml_subset_seed", 42)),
         )
     else:
         raise ValueError(f"Unknown data_mode: {data_mode}")

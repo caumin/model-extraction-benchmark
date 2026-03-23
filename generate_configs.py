@@ -316,9 +316,14 @@ def generate_configs(
     # early stopping by setting patience equal to the full epoch budget. The
     # generated configs are consumed by attack implementations that validate once
     # per epoch and restore the best validation-loss checkpoint after training.
-    # SET-C1 runs 224x224 SewerML/Xie2019 substitutes; 256 can OOM on 24GB GPUs.
-    # Keep the shared schedule but reduce the batch to a safer matrix default.
-    set_c_substitute_batch_size = 128
+    # SET-C1 runs 224x224 SewerML/Xie2019 substitutes; 128 can still OOM on 24GB GPUs
+    # once validation/eval overlap with larger checkpoint passes. Keep the shared
+    # schedule but reduce the train batch and evaluation batches to safer defaults.
+    set_c_substitute_batch_size = 64
+    set_c_substitute_val_batch_size = 32
+    set_c_eval_batch_size = 32
+    set_c_sewerml_eval_max_samples = 10_000
+    set_c_sewerml_eval_subset_seed = 42
     set_c_unified_substitute_lr = 0.1
     set_c_unified_substitute_max_epochs = 90
     set_c_unified_substitute_patience = 90
@@ -509,10 +514,14 @@ def generate_configs(
                     }
 
                     if setup.set_id == "SET-C1":
+                        cfg["benchmark"]["eval_batch_size"] = int(set_c_eval_batch_size)
                         cfg["dataset"]["sewerml_label_mode"] = "binary"
                         cfg["dataset"]["sewerml_ann_root"] = "D:/Sewer-ML"
                         cfg["dataset"]["sewerml_data_root"] = "D:/Sewer-ML"
                         cfg["dataset"]["sewerml_eval_split"] = "Valid"
+                        cfg["dataset"]["sewerml_max_samples"] = int(set_c_sewerml_eval_max_samples)
+                        cfg["dataset"]["sewerml_subset_seed"] = int(set_c_sewerml_eval_subset_seed)
+                        cfg["substitute"]["val_batch_size"] = int(set_c_substitute_val_batch_size)
                         # SET-C1 uses 224x224 SewerML inputs, so keep large scoring /
                         # selection passes more conservative than the CIFAR-style cells.
                         if attack.name == "activethief":

@@ -95,6 +95,8 @@ def main() -> None:
         sewerml_ann_root=_cfg_get(dataset_cfg, "sewerml_ann_root", default=None),
         sewerml_data_root=_cfg_get(dataset_cfg, "sewerml_data_root", default=None),
         sewerml_eval_split=_cfg_get(dataset_cfg, "sewerml_eval_split", default=None),
+        sewerml_max_samples=int(_cfg_get(dataset_cfg, "sewerml_max_samples", default=0)),
+        sewerml_subset_seed=int(_cfg_get(dataset_cfg, "sewerml_subset_seed", default=42)),
     )
     acc = float(compute_accuracy(model, test_loader, device))
 

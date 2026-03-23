@@ -163,9 +163,10 @@ class AttackRunner(ABC):
             if isinstance(input_size, (list, tuple)) and len(input_size) == 2:
                 size = (int(input_size[0]), int(input_size[1]))
             channels = victim_cfg.get("channels")
+            eval_batch_size = self._resolve_eval_batch_size(default=128)
             self.test_loader = get_test_dataloader(
                 dataset_name,
-                batch_size=128,
+                batch_size=eval_batch_size,
                 input_size=size,
                 channels=int(channels) if channels is not None else None,
                 sewerml_label_mode=str(
@@ -174,8 +175,18 @@ class AttackRunner(ABC):
                 sewerml_ann_root=self.state.metadata.get("dataset_config", {}).get("sewerml_ann_root"),
                 sewerml_data_root=self.state.metadata.get("dataset_config", {}).get("sewerml_data_root"),
                 sewerml_eval_split=self.state.metadata.get("dataset_config", {}).get("sewerml_eval_split"),
+                sewerml_max_samples=int(self.state.metadata.get("dataset_config", {}).get("sewerml_max_samples", 0)),
+                sewerml_subset_seed=int(self.state.metadata.get("dataset_config", {}).get("sewerml_subset_seed", 42)),
             )
 
+        query_step = self.state.query_count if query_count is None else int(query_count)
+        self._log_resource_snapshot(
+            "substitute_eval_start",
+            device=device,
+            step=query_step,
+            payload={"track": str(track)},
+            reset_peak=True,
+        )
         metrics = evaluate_substitute(
             substitute=substitute,
             victim=self.victim,
@@ -183,8 +194,12 @@ class AttackRunner(ABC):
             device=device,
             output_mode=self.config.get("output_mode", "soft_prob")
         )
-
-        query_step = self.state.query_count if query_count is None else int(query_count)
+        self._log_resource_snapshot(
+            "substitute_eval_end",
+            device=device,
+            step=query_step,
+            payload={"track": str(track)},
+        )
         labeled_total, labeled_unique, labeled_duplicates = self._compute_labeled_stats()
         labeled_display = int(labeled_total) if int(labeled_total) > 0 else int(query_step)
 
@@ -225,6 +240,37 @@ class AttackRunner(ABC):
 
             # Force save to ensure persistence even if crashed later
             self.ctx.logger.save_metrics_csv()
+
+    def _resolve_eval_batch_size(self, default: int = 128) -> int:
+        benchmark_cfg = self.state.metadata.get("benchmark_config", {}) or {}
+        substitute_cfg = self.state.metadata.get("substitute_config", {}) or {}
+        attack_cfg = self.config or {}
+        raw = (
+            benchmark_cfg.get("eval_batch_size")
+            or substitute_cfg.get("eval_batch_size")
+            or attack_cfg.get("eval_batch_size")
+            or default
+        )
+        return max(1, int(raw))
+
+    def _log_resource_snapshot(
+        self,
+        phase: str,
+        *,
+        device: str,
+        step: Optional[int] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        reset_peak: bool = False,
+    ) -> None:
+        if self.ctx is None or self.ctx.logger is None:
+            return
+        self.ctx.logger.log_resource_snapshot(
+            self.state.query_count if step is None else int(step),
+            phase,
+            device=str(device),
+            payload=payload,
+            reset_peak=reset_peak,
+        )
 
     def _compute_labeled_stats(self) -> tuple[int, int, int]:
         labeled_indices = self.state.attack_state.get("labeled_indices", [])

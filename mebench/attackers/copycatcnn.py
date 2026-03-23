@@ -300,9 +300,16 @@ class CopycatCNN(AttackRunner):
             sub_config.get("batch_size")
             or self.batch_size
         )
+        val_batch_size = int(sub_config.get("val_batch_size", train_batch_size))
         device = state.metadata.get("device", "cpu")
         train_workers = resolve_train_num_workers(sub_config, self.config, default=0)
         val_workers = resolve_val_num_workers(sub_config, self.config, default=train_workers)
+        self._log_resource_snapshot(
+            "copycat_train_start",
+            device=device,
+            payload={"train_batch_size": int(train_batch_size), "val_batch_size": int(val_batch_size)},
+            reset_peak=True,
+        )
         loader = torch.utils.data.DataLoader(
             dataset,
             batch_size=train_batch_size,
@@ -316,7 +323,7 @@ class CopycatCNN(AttackRunner):
             y_val = torch.cat(val_query_y, dim=0)
             val_loader = torch.utils.data.DataLoader(
                 torch.utils.data.TensorDataset(x_val, y_val),
-                batch_size=train_batch_size,
+                batch_size=val_batch_size,
                 shuffle=False,
                 **pool_loader_kwargs(device, {"num_workers": int(val_workers)}),
             )
@@ -387,6 +394,11 @@ class CopycatCNN(AttackRunner):
             load_best=True,
         )
         trainer.train(request)
+        self._log_resource_snapshot(
+            "copycat_train_end",
+            device=device,
+            payload={"train_batch_size": int(train_batch_size), "val_batch_size": int(val_batch_size)},
+        )
 
         state.attack_state["substitute"] = self.substitute
         self.logger.info("CopycatCNN substitute trained.")

@@ -107,7 +107,7 @@ runs/<run_name>/<timestamp>/seed_<seed>/
 - `run_config.yaml`: 실제 실행에 사용된 설정 스냅샷
 - `summary.json`: 예산 체크포인트 기준 `track_b` 핵심 metrics
 - `metrics.csv`: `track=track_b` long-form 결과 행
-- `experiment.log`: 진행 상황, 이벤트, 경고, 예외를 담는 사람이 읽기 쉬운 실행 로그
+- `experiment.log`: 진행 상황, 자원 스냅샷, 이벤트, 경고, 예외를 담는 사람이 읽기 쉬운 실행 로그
 
 ## 기여
 

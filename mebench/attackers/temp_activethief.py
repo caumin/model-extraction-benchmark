@@ -224,6 +224,8 @@ class TempActiveThief(AttackRunner):
                 sewerml_ann_root=branch_attack.state.metadata.get("dataset_config", {}).get("sewerml_ann_root"),
                 sewerml_data_root=branch_attack.state.metadata.get("dataset_config", {}).get("sewerml_data_root"),
                 sewerml_eval_split=branch_attack.state.metadata.get("dataset_config", {}).get("sewerml_eval_split"),
+                sewerml_max_samples=int(branch_attack.state.metadata.get("dataset_config", {}).get("sewerml_max_samples", 0)),
+                sewerml_subset_seed=int(branch_attack.state.metadata.get("dataset_config", {}).get("sewerml_subset_seed", 42)),
             )
 
         metrics = evaluate_substitute(

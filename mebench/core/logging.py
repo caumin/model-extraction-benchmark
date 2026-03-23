@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
 
+import torch
+
 
 def setup_console_logging():
     """Configure logging to show INFO level and above to console."""
@@ -67,6 +69,54 @@ class ArtifactLogger:
         details = self._format_fields(metrics)
         suffix = f" {details}" if details else ""
         logging.getLogger("mebench.progress").info("[Progress] step=%d%s", int(step), suffix)
+
+    def log_resource_snapshot(
+        self,
+        step: int,
+        phase: str,
+        *,
+        device: str | None = None,
+        payload: Dict[str, Any] | None = None,
+        reset_peak: bool = False,
+    ) -> None:
+        snapshot = dict(payload or {})
+        snapshot["phase"] = str(phase)
+        snapshot["device"] = str(device or "unknown")
+
+        cuda_device = self._resolve_cuda_device(device)
+        if cuda_device is not None:
+            try:
+                if reset_peak:
+                    torch.cuda.reset_peak_memory_stats(cuda_device)
+                snapshot.update(
+                    {
+                        "cuda_available": True,
+                        "alloc_mb": round(torch.cuda.memory_allocated(cuda_device) / (1024 ** 2), 2),
+                        "reserved_mb": round(torch.cuda.memory_reserved(cuda_device) / (1024 ** 2), 2),
+                        "peak_alloc_mb": round(torch.cuda.max_memory_allocated(cuda_device) / (1024 ** 2), 2),
+                        "peak_reserved_mb": round(torch.cuda.max_memory_reserved(cuda_device) / (1024 ** 2), 2),
+                    }
+                )
+            except RuntimeError as exc:
+                snapshot["cuda_available"] = False
+                snapshot["cuda_error"] = str(exc)
+        else:
+            snapshot["cuda_available"] = False
+
+        self.log_event(step, "resource_snapshot", snapshot)
+
+    def _resolve_cuda_device(self, device: str | None) -> torch.device | None:
+        if not torch.cuda.is_available():
+            return None
+        try:
+            resolved = torch.device(device or "cuda")
+        except (TypeError, RuntimeError, ValueError):
+            return None
+        if resolved.type != "cuda":
+            return None
+        if resolved.index is None:
+            return torch.device("cuda", torch.cuda.current_device())
+        return resolved
 
     def _format_fields(self, fields: Dict[str, Any]) -> str:
         parts: List[str] = []

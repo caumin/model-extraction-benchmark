@@ -68,7 +68,7 @@ python aggregate_matrix.py
 
 ## SET-C1 Substitute Policy
 
-- `SET-C1` uses a fixed substitute-training schedule for all attacks: `batch=128`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=90`.
+- `SET-C1` uses a fixed substitute-training schedule for all attacks: `batch=64`, `val_batch=32`, `eval_batch=32`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=90`.
 - Model selection is by best validation loss.
 - Early stopping is disabled in practice by setting `patience=max_epochs`, so runs always complete the full 90 epochs before restoring the best validation-loss checkpoint.
 
@@ -135,7 +135,7 @@ runs/<run_name>/<timestamp>/seed_<seed>/
 - `run_config.yaml`: exact experiment config captured for reproducibility
 - `summary.json`: checkpoint metrics keyed by budget under `track_b`
 - `metrics.csv`: long-form result rows with `track=track_b`
-- `experiment.log`: human-readable execution log with progress updates, events, warnings, and exceptions
+- `experiment.log`: human-readable execution log with progress updates, resource snapshots, warnings, and exceptions
 
 ## Methodology
 

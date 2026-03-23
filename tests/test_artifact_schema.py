@@ -25,6 +25,7 @@ def test_artifact_schema_fields(tmp_path: Path) -> None:
         logger.set_run_metadata(config)
         logger.log_event(step=5, name="checkpoint_reached", payload={"checkpoint": 5})
         logger.log_progress(step=10, metrics={"acc_gt": 0.1, "agreement": 0.2})
+        logger.log_resource_snapshot(step=10, phase="train_start", device="cpu", payload={"seed": 0})
         logger.log_checkpoint(
             seed=0,
             checkpoint=10,
@@ -73,6 +74,7 @@ def test_artifact_schema_fields(tmp_path: Path) -> None:
         log_text = experiment_log_path.read_text(encoding="utf-8")
         assert "[Event] step=5 name=checkpoint_reached checkpoint=5" in log_text
         assert "[Progress] step=10 acc_gt=0.100000 agreement=0.200000" in log_text
+        assert "[Event] step=10 name=resource_snapshot cuda_available=False device=cpu phase=train_start seed=0" in log_text
     finally:
         logger.close()
 

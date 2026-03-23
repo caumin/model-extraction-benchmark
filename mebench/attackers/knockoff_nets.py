@@ -612,6 +612,7 @@ class KnockoffNets(AttackRunner):
             sub_config.get("batch_size")
             or self.batch_size
         )
+        val_batch_size = int(sub_config.get("val_batch_size", train_batch_size))
         train_dataset = dataset
         val_dataset = None
 
@@ -651,6 +652,17 @@ class KnockoffNets(AttackRunner):
             train_workers = 0
             val_workers = 0
 
+        self._log_resource_snapshot(
+            "knockoff_train_start",
+            device=device,
+            payload={
+                "mode": str(store_key),
+                "train_batch_size": int(train_batch_size),
+                "val_batch_size": int(val_batch_size),
+            },
+            reset_peak=True,
+        )
+
         loader = DataLoader(
             train_dataset,
             batch_size=train_batch_size,
@@ -659,7 +671,7 @@ class KnockoffNets(AttackRunner):
         )
         val_loader = DataLoader(
             val_dataset,
-            batch_size=train_batch_size,
+            batch_size=val_batch_size,
             shuffle=False,
             **pool_loader_kwargs(device, {"num_workers": int(val_workers)}),
         )
@@ -747,6 +759,15 @@ class KnockoffNets(AttackRunner):
             load_best=True,
         )
         trainer.train(request)
+        self._log_resource_snapshot(
+            "knockoff_train_end",
+            device=device,
+            payload={
+                "mode": str(store_key),
+                "train_batch_size": int(train_batch_size),
+                "val_batch_size": int(val_batch_size),
+            },
+        )
 
         model = model.cpu()
         state.attack_state[store_key] = model

@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import copy
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -116,7 +114,10 @@ class SubstituteTrainer:
                 if is_improvement:
                     best_value = current_value
                     best_step = step
-                    best_state = copy.deepcopy(model.state_dict())
+                    best_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in model.state_dict().items()
+                    }
                     patience_counter = 0
                 else:
                     patience_counter += request.validate_every

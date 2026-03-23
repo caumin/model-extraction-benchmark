@@ -136,6 +136,7 @@ def run_experiment(
                 metadata={
                     "seed": seed,  # [ADDED] Track current seed
                     "device": device,
+                    "benchmark_config": config.get("benchmark", {}),
                     "num_classes": int(config["victim"]["num_classes"]),
                     "input_shape": (
                         int(config["victim"]["channels"]),
@@ -147,11 +148,13 @@ def run_experiment(
                     "max_budget": config["budget"]["max_budget"],
                 },
             )
+            artifact_logger.log_resource_snapshot(0, "seed_setup", device=device, reset_peak=True)
 
             # Load victim model from checkpoint or placeholder
             victim = load_victim_from_config(config["victim"], device)
             victim_ref = str(config.get("victim", {}).get("checkpoint_ref") or "")
             is_placeholder_victim = victim_ref == "" or victim_ref == "/path/to/ckpt.pt"
+            artifact_logger.log_resource_snapshot(0, "victim_loaded", device=device)
 
             # Optional: verify victim accuracy on the public test set.
             # Disabled by default to avoid accidental dataset downloads in CI/unit tests.
@@ -163,16 +166,19 @@ def run_experiment(
                 if isinstance(input_size, (list, tuple)) and len(input_size) == 2:
                     size = (int(input_size[0]), int(input_size[1]))
                 channels = victim_cfg.get("channels")
+                eval_batch_size = max(1, int(config.get("benchmark", {}).get("eval_batch_size", 128)))
 
                 test_loader = get_test_dataloader(
                     dataset_name,
-                    batch_size=128,
+                    batch_size=eval_batch_size,
                     input_size=size,
                     channels=int(channels) if channels is not None else None,
                     sewerml_label_mode=str(config.get("dataset", {}).get("sewerml_label_mode", "argmax")),
                     sewerml_ann_root=config.get("dataset", {}).get("sewerml_ann_root"),
                     sewerml_data_root=config.get("dataset", {}).get("sewerml_data_root"),
                     sewerml_eval_split=config.get("dataset", {}).get("sewerml_eval_split"),
+                    sewerml_max_samples=int(config.get("dataset", {}).get("sewerml_max_samples", 0)),
+                    sewerml_subset_seed=int(config.get("dataset", {}).get("sewerml_subset_seed", 42)),
                 )
                 victim_acc = compute_accuracy(victim, test_loader, device)
                 logger.info("[VERIFY] Victim Test Accuracy: %.2f%%", victim_acc * 100.0)
@@ -221,7 +227,9 @@ def run_experiment(
             attack.ctx = ctx
 
             logger.info("Starting attack run (Track B only)")
+            ctx.log_resource_snapshot("attack_run_start", {"seed": int(seed)}, reset_peak=True)
             attack.run(ctx)
+            ctx.log_resource_snapshot("attack_run_end", {"seed": int(seed)})
 
             # FINAL EVALUATION for Track B
             substitute = state.attack_state.get("substitute")
@@ -238,9 +246,11 @@ def run_experiment(
             # Finalize logging
             artifact_logger.finalize()
         except KeyboardInterrupt:
+            artifact_logger.log_resource_snapshot(0, "seed_interrupted", device=device, payload={"seed": int(seed)})
             logger.exception("Seed %s interrupted", seed)
             raise
         except Exception:
+            artifact_logger.log_resource_snapshot(0, "seed_failed", device=device, payload={"seed": int(seed)})
             logger.exception("Seed %s failed", seed)
             raise
         finally:
