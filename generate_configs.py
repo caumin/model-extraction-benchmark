@@ -316,15 +316,15 @@ def generate_configs(
     # early stopping by setting patience equal to the full epoch budget. The
     # generated configs are consumed by attack implementations that validate once
     # per epoch and restore the best validation-loss checkpoint after training.
-    # SET-C1 runs 224x224 SewerML/Xie2019 substitutes; 128 can still OOM on 24GB GPUs
-    # once validation/eval overlap with larger checkpoint passes. Keep the shared
-    # schedule but reduce the train batch and evaluation batches to safer defaults.
-    set_c_substitute_batch_size = 64
+    # SET-C1 runs 224x224 SewerML/Xie2019 substitutes. Keep the evaluation passes
+    # conservative, but use a 128-image training batch with a linearly scaled LR
+    # (0.05) relative to the previous 256->0.1 target.
+    set_c_substitute_batch_size = 128
     set_c_substitute_val_batch_size = 32
     set_c_eval_batch_size = 32
     set_c_sewerml_eval_max_samples = 10_000
     set_c_sewerml_eval_subset_seed = 42
-    set_c_unified_substitute_lr = 0.1
+    set_c_unified_substitute_lr = 0.05
     set_c_unified_substitute_max_epochs = 90
     set_c_unified_substitute_patience = 90
 

@@ -63,11 +63,11 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
         assert int(cfg["substitute"]["patience"]) == 100
 
     def _assert_set_c_uniform_substitute(cfg: dict) -> None:
-        assert int(cfg["substitute"]["batch_size"]) == 64
+        assert int(cfg["substitute"]["batch_size"]) == 128
         assert int(cfg["substitute"]["val_batch_size"]) == 32
         assert int(cfg["benchmark"]["eval_batch_size"]) == 32
         assert cfg["substitute"]["optimizer"]["name"] == "sgd"
-        assert float(cfg["substitute"]["optimizer"]["lr"]) == pytest.approx(0.1)
+        assert float(cfg["substitute"]["optimizer"]["lr"]) == pytest.approx(0.05)
         assert float(cfg["substitute"]["optimizer"]["momentum"]) == pytest.approx(0.9)
         assert float(cfg["substitute"]["optimizer"]["weight_decay"]) == pytest.approx(5e-4)
         assert cfg["substitute"]["scheduler"]["name"] == "multistep"
