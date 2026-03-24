@@ -12,10 +12,12 @@
 | Initial query points | 500 (CIFAR10 ResNet + ResNet18/ImageNet row in Table 7) | `attack.init_points` | `500` |
 | Round budget base | 750 (CIFAR10 ResNet + ResNet18/ImageNet row in Table 7) | `attack.budget` | `750` |
 | Gamma parameters | gamma1=0.8, gamma2=0.8 | `attack.gamma1`, `attack.gamma2` | `0.8`, `0.8` |
-| Rounds | 10 | `attack.rounds` | `10` |
+| Iterations | 10 | `attack.iterations` | `10` |
 | Epochs per round | 8 | `attack.epochs` | `8` |
 | Optimizer LR | 0.02 | `attack.lr`, `substitute.optimizer.lr` | `0.02` |
 | Round growth | official code path growth (`budget*=1.01`, `epochs*=1.02`) | `attack.budget_growth`, `attack.epochs_growth` | `1.01`, `1.02` |
 | Substitute model | image classifier substitute | `substitute.arch` | `resnet18` |
 | Substitute init | ImageNet-pretrained backbone initialization | `substitute.pretrained` | `true` |
 | Victim width | CIFAR10 ResNet34_8x official checkpoint | `victim.width_mult` | `8` |
+
+Legacy note: runnable repro configs may still accept `attack.rounds` through backward-compatibility aliases, but `attack.iterations` is the canonical key used by current matrix generation.

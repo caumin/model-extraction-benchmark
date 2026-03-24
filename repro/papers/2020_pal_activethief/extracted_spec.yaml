@@ -78,7 +78,7 @@ attack:
       initial_seed_ratio: 0.1
       dropout: 0.2
   hyperparameters:
-    rounds: 10
+    iterations: 10
     step_size: 2000
     strategy: uncertainty|k-center|dfal|dfal+k-center|random
 evaluation:

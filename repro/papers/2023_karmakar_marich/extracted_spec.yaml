@@ -44,7 +44,7 @@ attack:
     validation_source: pool_split
     validation_budget_ratio: 0.2
     init_points: 500
-    rounds: 10
+    iterations: 10
     per_round_budget: 750
     gamma1: 0.8
     gamma2: 0.8

@@ -12,7 +12,7 @@ attack:
   budget: 750
   gamma1: 0.8
   gamma2: 0.8
-  rounds: 10
+  iterations: 10
   epochs: 8
   budget_growth: 1.01
   epochs_growth: 1.02

@@ -38,7 +38,7 @@ Matrix generation enforces setup-level unified substitute defaults:
 
 - **SET-B1 (`substitute.arch=resnet18`)**: `batch=256`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=1000`, `patience=100`.
 - **SET-A1 (`substitute.arch=lenet_mnist`)**: `batch=512`, `optimizer=sgd(lr=0.04,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=200`, `patience=20`.
-- **SET-C1 (`substitute.arch=xie2019`)**: `batch=64`, `val_batch=32`, `eval_batch=32`, `optimizer=sgd(lr=0.1,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=90`, `patience=90`; best checkpoint is selected by validation loss and the run is intended to complete the full 90 epochs.
+- **SET-C1 (`substitute.arch=xie2019`)**: `batch=128`, `val_batch=32`, `eval_batch=32`, `optimizer=sgd(lr=0.05,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=90`, `patience=90`; best checkpoint is selected by validation loss and the run is intended to complete the full 90 epochs.
 - Matrix generation does not apply per-attack LR/batch alignment overrides; attack-level fields are retained only when they are semantic to the attack algorithm.
 
 Reference: `generate_configs.py` matrix policy section and `generate_configs()` default substitute block.

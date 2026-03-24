@@ -2,7 +2,7 @@ attack:
   name: activethief
   output_mode: hard_top1
   max_budget: 20000
-  rounds: 10
+  iterations: 10
   strategy: uncertainty
   batch_size: 150
   initial_seed_ratio: 0.1

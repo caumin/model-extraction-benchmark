@@ -3,7 +3,7 @@
 | Paper item | Paper value | Code target | Mapping |
 |---|---:|---|---|
 | Query budget | 20K (main curve) | `budget.max_budget` | `20000` (full); mini-run uses `2000` in `experiment.yaml` assumption profile |
-| Iterations | 10 | `attack.rounds` | `10` |
+| Iterations | 10 | `attack.iterations` | `10` |
 | Initial seed ratio | 10% | `attack.initial_seed_ratio` | `0.1` |
 | Validation ratio | 20% | `attack.validation_budget_ratio` | `0.2` |
 | Batch size (image) | 150 | `attack.batch_size`, `substitute.batch_size` | `150` |
@@ -16,6 +16,8 @@
 | Thief dataset | downsampled ILSVRC subset | `dataset.surrogate_name` | **ASSUMPTION**: set to `CIFAR10` in runnable config because local ImageNet subset unavailable |
 
 ## train_victim YAML support
+
+Legacy note: runnable repro configs may still accept `attack.rounds` through backward-compatibility aliases, but `attack.iterations` is the canonical key used by current matrix generation.
 
 - Added optional `--config <yaml>` support in `scripts/train_victim.py`.
 - CLI overrides YAML values when both are present.
