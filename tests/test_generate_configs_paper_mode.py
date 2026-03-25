@@ -65,7 +65,7 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
     def _assert_set_c_uniform_substitute(cfg: dict) -> None:
         assert int(cfg["substitute"]["batch_size"]) == 128
         assert int(cfg["substitute"]["val_batch_size"]) == 32
-        assert int(cfg["benchmark"]["eval_batch_size"]) == 32
+        assert int(cfg["benchmark"]["eval_batch_size"]) == 128
         assert cfg["substitute"]["optimizer"]["name"] == "sgd"
         assert float(cfg["substitute"]["optimizer"]["lr"]) == pytest.approx(0.05)
         assert float(cfg["substitute"]["optimizer"]["momentum"]) == pytest.approx(0.9)
@@ -118,6 +118,7 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
 
     activethief = _load("SET-B1_activethief_soft_30k_seed0.yaml")
     assert int(activethief["attack"]["scoring_batch_size"]) == 512
+    assert int(activethief["attack"]["query_batch_size"]) == 512
     assert "batch_size" not in activethief["attack"]
     assert int(activethief["attack"]["iterations"]) == 10
     assert "rounds" not in activethief["attack"]
@@ -125,6 +126,7 @@ def test_generate_configs_uses_unified_set_b_substitute_profile(tmp_path: Path) 
 
     set_c_activethief = _load("SET-C1_activethief_soft_30k_seed0.yaml")
     assert int(set_c_activethief["attack"]["scoring_batch_size"]) == 128
+    assert int(set_c_activethief["attack"]["query_batch_size"]) == 128
     _assert_set_c_uniform_substitute(set_c_activethief)
 
     set_c_dissector = _load("SET-C1_blackbox_dissector_hard_30k_seed0.yaml")

@@ -48,3 +48,26 @@ def test_context_query_rejects_empty_batch() -> None:
 
     with pytest.raises(ValueError):
         _ = ctx.query(x)
+
+
+def test_context_query_chunks_oracle_calls_by_query_batch_size() -> None:
+    ctx = _make_context(5)
+    ctx.config.setdefault("attack", {})["query_batch_size"] = 2
+    ctx._query_batch_size = ctx._resolve_query_batch_size()
+    x = torch.zeros(5, 3, 4, 4)
+
+    chunk_sizes = []
+    original_query = ctx.oracle.query
+
+    def wrapped_query(x_batch: torch.Tensor):
+        chunk_sizes.append(int(x_batch.size(0)))
+        return original_query(x_batch)
+
+    ctx.oracle.query = wrapped_query  # type: ignore[method-assign]
+
+    out = ctx.query(x)
+
+    assert chunk_sizes == [2, 2, 1]
+    assert out.y.shape == (5, 10)
+    assert ctx.query_count == 5
+    assert ctx.budget_remaining == 0

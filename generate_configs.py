@@ -93,6 +93,13 @@ def _clean_yaml_dir(out_dir: Path) -> None:
         p.unlink()
 
 
+def _default_query_batch_size_for_setup(set_id: str) -> int:
+    setup_id = str(set_id).strip().upper()
+    if setup_id == "SET-C1":
+        return 128
+    return 512
+
+
 # Matrix substitute policy:
 # - Keep a unified substitute training recipe per setup.
 # - Do not apply per-attack LR/batch alignment overrides in matrix generation.
@@ -321,7 +328,7 @@ def generate_configs(
     # (0.05) relative to the previous 256->0.1 target.
     set_c_substitute_batch_size = 128
     set_c_substitute_val_batch_size = 32
-    set_c_eval_batch_size = 32
+    set_c_eval_batch_size = 128
     set_c_sewerml_eval_max_samples = 10_000
     set_c_sewerml_eval_subset_seed = 42
     set_c_unified_substitute_lr = 0.05
@@ -512,6 +519,11 @@ def generate_configs(
                             "delete_on_finish": True,
                         },
                     }
+
+                    cfg["attack"].setdefault(
+                        "query_batch_size",
+                        int(cfg["attack"].get("batch_size", _default_query_batch_size_for_setup(setup.set_id))),
+                    )
 
                     if setup.set_id == "SET-C1":
                         cfg["benchmark"]["eval_batch_size"] = int(set_c_eval_batch_size)
@@ -753,6 +765,10 @@ def generate_paperlike_configs(
                 "delete_on_finish": True,
             },
         }
+        cfg["attack"].setdefault(
+            "query_batch_size",
+            int(cfg["attack"].get("batch_size", _default_query_batch_size_for_setup(cifar10_setup.set_id))),
+        )
         return cfg
 
     def _paper_surrogate_dataset(base_name: str, seed: int, *, name: str) -> Dict[str, Any]:
@@ -818,6 +834,10 @@ def generate_paperlike_configs(
                 "delete_on_finish": True,
             },
         }
+        cfg["attack"].setdefault(
+            "query_batch_size",
+            int(cfg["attack"].get("batch_size", _default_query_batch_size_for_setup(cifar10_setup.set_id))),
+        )
         return cfg
 
     def _blackbox_ripper_generator_cfg(victim_dataset: str) -> Tuple[str, str]:

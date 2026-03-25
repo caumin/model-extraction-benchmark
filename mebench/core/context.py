@@ -51,6 +51,8 @@ class BenchmarkContext:
             else:
                 self._progress_interval = 1000
 
+        self._query_batch_size = self._resolve_query_batch_size()
+
     @property
     def budget_remaining(self) -> int:
         return int(self.state.budget_remaining)
@@ -73,7 +75,27 @@ class BenchmarkContext:
             )
 
         prev_queries = int(self.state.query_count)
-        oracle_output = self.oracle.query(x)
+        query_batch_size = self._query_batch_size
+        if query_batch_size is None or batch_size <= query_batch_size:
+            oracle_output = self.oracle.query(x)
+        else:
+            outputs = []
+            output_kind: Optional[str] = None
+            for start in range(0, batch_size, query_batch_size):
+                x_chunk = x[start : start + query_batch_size]
+                chunk_output = self.oracle.query(x_chunk)
+                if output_kind is None:
+                    output_kind = chunk_output.kind
+                elif chunk_output.kind != output_kind:
+                    raise ValueError(
+                        "Oracle returned inconsistent output kinds across query chunks: "
+                        f"{output_kind} vs {chunk_output.kind}."
+                    )
+                outputs.append(chunk_output.y)
+
+            if output_kind is None:
+                raise ValueError("BenchmarkContext.query failed to produce oracle outputs.")
+            oracle_output = OracleOutput(kind=output_kind, y=torch.cat(outputs, dim=0))
 
         # Print progress at coarse intervals (handles batch jumps).
         # Always print once on the first successful query so users can confirm
@@ -141,3 +163,11 @@ class BenchmarkContext:
                 reached = sorted(self._checkpoint_reached)
                 self.state.attack_state["checkpoint_reached"] = reached
                 self.on_checkpoint(checkpoint)
+
+    def _resolve_query_batch_size(self) -> Optional[int]:
+        attack_cfg = self.config.get("attack", {}) or {}
+        raw = attack_cfg.get("query_batch_size") or attack_cfg.get("batch_size")
+        if raw is None:
+            return None
+        resolved = int(raw)
+        return max(1, resolved)
