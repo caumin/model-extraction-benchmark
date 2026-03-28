@@ -1427,7 +1427,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument(
         "--imagenet-root",
         type=str,
-        default="D:/imagenet",
+        default="D:/images/imagenet",
         help="Local ImageNet root path used as dataset.surrogate_root in generated configs",
     )
     parser.add_argument(
