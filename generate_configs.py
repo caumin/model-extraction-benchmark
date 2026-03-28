@@ -528,8 +528,8 @@ def generate_configs(
                     if setup.set_id == "SET-C1":
                         cfg["benchmark"]["eval_batch_size"] = int(set_c_eval_batch_size)
                         cfg["dataset"]["sewerml_label_mode"] = "binary"
-                        cfg["dataset"]["sewerml_ann_root"] = "D:/Sewer-ML"
-                        cfg["dataset"]["sewerml_data_root"] = "D:/Sewer-ML"
+                        cfg["dataset"]["sewerml_ann_root"] = "D:/Sewer/Sewer-ML"
+                        cfg["dataset"]["sewerml_data_root"] = "D:/Sewer/Sewer-ML"
                         cfg["dataset"]["sewerml_eval_split"] = "Valid"
                         cfg["dataset"]["sewerml_max_samples"] = int(set_c_sewerml_eval_max_samples)
                         cfg["dataset"]["sewerml_subset_seed"] = int(set_c_sewerml_eval_subset_seed)
