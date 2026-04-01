@@ -191,9 +191,10 @@ class DFMSHL(AttackRunner):
         self.state.attack_state["substitute"] = substitute
 
     def _maybe_periodic_eval(self, device: str) -> None:
-        if self.eval_interval_queries <= 0:
-            return
         if self.victim is None:
+            return
+        self._drain_deferred_track_b_checkpoints(device)
+        if self.eval_interval_queries <= 0:
             return
         current_queries = int(self.state.query_count)
         if current_queries < int(self._next_eval_query):
