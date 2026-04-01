@@ -155,6 +155,11 @@ class AttackRunner(ABC):
         if substitute is None or self.victim is None:
             return
 
+        query_step = self.state.query_count if query_count is None else int(query_count)
+        eval_key = (str(track), int(query_step))
+        if eval_key in self._tracked_eval_points:
+            return
+
         if self.test_loader is None:
             dataset_name = self.state.metadata.get("dataset_config", {}).get("name", "CIFAR10")
             victim_cfg = self.state.metadata.get("victim_config", {}) or {}
@@ -179,7 +184,6 @@ class AttackRunner(ABC):
                 sewerml_subset_seed=int(self.state.metadata.get("dataset_config", {}).get("sewerml_subset_seed", 42)),
             )
 
-        query_step = self.state.query_count if query_count is None else int(query_count)
         self._log_resource_snapshot(
             "substitute_eval_start",
             device=device,
@@ -203,9 +207,6 @@ class AttackRunner(ABC):
         labeled_total, labeled_unique, labeled_duplicates = self._compute_labeled_stats()
         labeled_display = int(labeled_total) if int(labeled_total) > 0 else int(query_step)
 
-        eval_key = (str(track), int(query_step))
-        if eval_key in self._tracked_eval_points:
-            return
         self._tracked_eval_points.add(eval_key)
 
         msg = (
@@ -240,6 +241,25 @@ class AttackRunner(ABC):
 
             # Force save to ensure persistence even if crashed later
             self.ctx.logger.save_metrics_csv()
+
+    def _drain_deferred_track_b_checkpoints(self, device: str) -> None:
+        if self.victim is None:
+            return
+
+        substitute = self.state.attack_state.get("substitute")
+        if substitute is None:
+            return
+
+        reached_checkpoints = sorted(
+            int(cp) for cp in self.state.attack_state.get("checkpoint_reached", [])
+        )
+        for checkpoint in reached_checkpoints:
+            self._evaluate_current_substitute(
+                substitute,
+                device,
+                track="track_b",
+                query_count=checkpoint,
+            )
 
     def _resolve_eval_batch_size(self, default: int = 128) -> int:
         benchmark_cfg = self.state.metadata.get("benchmark_config", {}) or {}
