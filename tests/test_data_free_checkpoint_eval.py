@@ -101,3 +101,6 @@ def test_data_free_track_b_evaluates_each_checkpoint(tmp_path, monkeypatch) -> N
         if row.get("track") == "track_b" and row.get("checkpoint_B")
     }
     assert track_b_checkpoints == {10, 20}
+
+    track_b_rows = [row for row in rows if row.get("track") == "track_b"]
+    assert len(track_b_rows) == 2

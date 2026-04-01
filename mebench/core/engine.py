@@ -189,38 +189,12 @@ def run_experiment(
             # Initialize attack
             attack = create_runner(config["attack"]["name"], config, state)
 
-            evaluated_track_b_checkpoints = set()
-
-            def _evaluate_track_b_once(query_count: int) -> None:
-                if is_placeholder_victim:
-                    return
-
-                q = int(query_count)
-                if q in evaluated_track_b_checkpoints:
-                    return
-
-                substitute_at_checkpoint = state.attack_state.get("substitute")
-                if substitute_at_checkpoint is None:
-                    return
-
-                # Ensure victim is attached for metric computation.
-                if attack.victim is None:
-                    attack.victim = victim
-
-                attack._evaluate_current_substitute(
-                    substitute_at_checkpoint,
-                    device,
-                    track="track_b",
-                    query_count=q,
-                )
-                evaluated_track_b_checkpoints.add(q)
-
             ctx = BenchmarkContext(
                 state=state,
                 oracle=oracle,
                 logger=artifact_logger,
                 config=config,
-                checkpoint_callback=_evaluate_track_b_once,
+                checkpoint_callback=None,
             )
 
             # [ADDED] Inject context into attack runner for metric logging
@@ -234,12 +208,16 @@ def run_experiment(
             # FINAL EVALUATION for Track B
             substitute = state.attack_state.get("substitute")
             if substitute is not None and not is_placeholder_victim:
-                reached_checkpoints = [
-                    int(cp) for cp in state.attack_state.get("checkpoint_reached", [])
-                ]
-                for checkpoint in reached_checkpoints:
-                    _evaluate_track_b_once(int(checkpoint))
-                _evaluate_track_b_once(state.query_count)
+                # Ensure victim is attached for metric computation.
+                if attack.victim is None:
+                    attack.victim = victim
+                attack._drain_deferred_track_b_checkpoints(device)
+                attack._evaluate_current_substitute(
+                    substitute,
+                    device,
+                    track="track_b",
+                    query_count=state.query_count,
+                )
 
             logger.info("Attack run complete")
 
