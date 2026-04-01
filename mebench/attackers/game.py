@@ -202,9 +202,10 @@ class GAME(AttackRunner):
         )
 
     def _maybe_periodic_eval(self, device: str) -> None:
-        if self.eval_interval_queries <= 0:
-            return
         if self.victim is None:
+            return
+        self._drain_deferred_track_b_checkpoints(device)
+        if self.eval_interval_queries <= 0:
             return
         current_queries = int(self.state.query_count)
         next_eval_query = int(self._next_eval_query)
