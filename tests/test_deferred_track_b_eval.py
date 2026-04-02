@@ -119,3 +119,50 @@ def test_checkpoint_eval_is_deferred_until_safe_point(monkeypatch) -> None:
 
     attack._drain_deferred_track_b_checkpoints("cpu")
     assert seen == [1, 1]
+
+
+class _TrackingSubstitute(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("marker", torch.zeros(1))
+        self.to_calls: list[object] = []
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    def to(self, *args, **kwargs):
+        if args:
+            self.to_calls.append(args[0])
+        elif "device" in kwargs:
+            self.to_calls.append(kwargs["device"])
+        return self
+
+
+def test_evaluate_current_substitute_moves_to_eval_device_and_restores(monkeypatch) -> None:
+    state = _make_state()
+    attack = _DummyAttack({"output_mode": "soft_prob"}, state)
+    attack.victim = _make_oracle(state).model
+    attack.test_loader = [object()]
+    substitute = _TrackingSubstitute()
+
+    seen_devices = []
+
+    def fake_evaluate_substitute(**kwargs):
+        seen_devices.append(kwargs["device"])
+        return {
+            "acc_gt": 0.1,
+            "agreement": 0.2,
+            "kl_mean": 0.3,
+            "l1_mean": 0.4,
+            "binary_precision": 0.0,
+            "binary_recall": 0.0,
+            "binary_f1": 0.0,
+            "binary_roc_auc": 0.0,
+        }
+
+    monkeypatch.setattr(runner_module, "evaluate_substitute", fake_evaluate_substitute)
+
+    attack._evaluate_current_substitute(substitute, "cuda:0", query_count=7)
+
+    assert seen_devices == ["cuda:0"]
+    assert substitute.to_calls == [torch.device("cuda:0"), torch.device("cpu")]

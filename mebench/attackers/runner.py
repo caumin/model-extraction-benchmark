@@ -184,6 +184,11 @@ class AttackRunner(ABC):
                 sewerml_subset_seed=int(self.state.metadata.get("dataset_config", {}).get("sewerml_subset_seed", 42)),
             )
 
+        original_device = self._module_device(substitute)
+        target_device = torch.device(device)
+        should_restore_device = original_device is not None and original_device != target_device
+        substitute = substitute.to(target_device)
+
         self._log_resource_snapshot(
             "substitute_eval_start",
             device=device,
@@ -191,13 +196,17 @@ class AttackRunner(ABC):
             payload={"track": str(track)},
             reset_peak=True,
         )
-        metrics = evaluate_substitute(
-            substitute=substitute,
-            victim=self.victim,
-            test_loader=self.test_loader,
-            device=device,
-            output_mode=self.config.get("output_mode", "soft_prob")
-        )
+        try:
+            metrics = evaluate_substitute(
+                substitute=substitute,
+                victim=self.victim,
+                test_loader=self.test_loader,
+                device=device,
+                output_mode=self.config.get("output_mode", "soft_prob")
+            )
+        finally:
+            if should_restore_device:
+                substitute.to(original_device)
         self._log_resource_snapshot(
             "substitute_eval_end",
             device=device,
@@ -241,6 +250,13 @@ class AttackRunner(ABC):
 
             # Force save to ensure persistence even if crashed later
             self.ctx.logger.save_metrics_csv()
+
+    def _module_device(self, module: nn.Module) -> Optional[torch.device]:
+        for param in module.parameters():
+            return param.device
+        for buffer in module.buffers():
+            return buffer.device
+        return None
 
     def _drain_deferred_track_b_checkpoints(self, device: str) -> None:
         if self.victim is None:
