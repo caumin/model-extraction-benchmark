@@ -228,7 +228,7 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
             subset = subset.copy()
             subset["Acc/Fidelity"] = subset["Accuracy"] + " / " + subset["Agreement"]
             pivot_combined = subset.pivot(index="Attack", columns="Set", values="Acc/Fidelity")
-            pivot_combined = pivot_combined.applymap(_latex_pm)
+            pivot_combined = pivot_combined.map(_latex_pm)
             pivot_combined.to_csv(f"{output_dir}/final_acc_fidelity_matrix_{b}.csv")
 
             col_format = "l" + "c" * len(pivot_combined.columns)
