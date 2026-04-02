@@ -366,6 +366,10 @@ class InverseNet(AttackRunner):
                 if pool_workers is not None
                 else pool_loader_kwargs(device)
             )
+            # Preloading the full pool is a CPU-side staging step even on CUDA runs.
+            # Keep this loader off the pin-memory path to avoid startup OOMs in
+            # the DataLoader pin-memory thread before any explicit cache-target move.
+            loader_kwargs["pin_memory"] = False
             loader = DataLoader(
                 self.pool_dataset,
                 batch_size=max(1, cache_batch_size),

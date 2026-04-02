@@ -1,6 +1,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 
 from mebench.attackers.copycatcnn import CopycatCNN
 from mebench.attackers.ds import DualStudents, _DualStudentEvalWrapper, _MovingAverageModel
@@ -26,6 +27,17 @@ def _make_state(*, num_classes: int = 10, output_mode: str = "hard_top1") -> Ben
             "max_budget": 64,
         },
     )
+
+
+class _TinyPoolDataset(Dataset):
+    def __init__(self, xs: torch.Tensor) -> None:
+        self.xs = xs
+
+    def __len__(self) -> int:
+        return int(self.xs.size(0))
+
+    def __getitem__(self, idx: int):
+        return self.xs[idx], 0
 
 
 def test_copycatcnn_handles_soft_and_hard_outputs() -> None:
@@ -154,6 +166,44 @@ def test_inversenet_phase3_normalization_is_noop_when_disabled() -> None:
     x = torch.rand(2, 3, 4, 4)
     x_norm = attack._normalize_phase3_queries(x)
     assert torch.equal(x_norm, x)
+
+
+def test_inversenet_pool_preload_disables_pin_memory_on_cuda_runtime(monkeypatch) -> None:
+    state = _make_state(output_mode="hard_top1")
+    state.metadata["device"] = "cuda:0"
+    attack = InverseNet({"cache_pool_to_memory": True, "pool_cache_batch_size": 8}, state)
+
+    dataset = _TinyPoolDataset(torch.rand(4, 3, 32, 32))
+    seen_kwargs: dict[str, object] = {}
+
+    class _FakeLoader:
+        def __init__(self, dataset_obj, batch_size, shuffle, **kwargs):
+            del shuffle
+            seen_kwargs.update(kwargs)
+            self.dataset_obj = dataset_obj
+            self.batch_size = int(batch_size)
+
+        def __iter__(self):
+            xs = []
+            ys = []
+            upper = min(len(self.dataset_obj), self.batch_size)
+            for idx in range(upper):
+                x_item, y_item = self.dataset_obj[idx]
+                xs.append(x_item)
+                ys.append(y_item)
+            yield torch.stack(xs), torch.tensor(ys)
+
+    monkeypatch.setattr(
+        "mebench.attackers.inversenet.create_dataloader",
+        lambda *args, **kwargs: type("_LoaderWrapper", (), {"dataset": dataset})(),
+    )
+    monkeypatch.setattr("mebench.attackers.inversenet.DataLoader", _FakeLoader)
+
+    attack._load_pool(state)
+
+    assert seen_kwargs["pin_memory"] is False
+    assert isinstance(attack.pool_data, torch.Tensor)
+    assert tuple(attack.pool_data.shape) == (4, 3, 32, 32)
 
 
 def test_disguide_target_format_modes() -> None:
