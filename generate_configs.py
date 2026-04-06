@@ -124,8 +124,10 @@ def generate_configs(
     substitute_train_num_workers: Optional[int],
     substitute_val_num_workers: Optional[int],
     imagenet_root: str,
+    sewerml_root: str,
 ) -> int:
     resolved_imagenet_root = str(imagenet_root)
+    resolved_sewerml_root = str(sewerml_root)
     set_budgets: Dict[str, Dict[str, int]] = {
         "SET-A1": {
             "pool": int(set_a_pool_budget),
@@ -528,8 +530,8 @@ def generate_configs(
                     if setup.set_id == "SET-C1":
                         cfg["benchmark"]["eval_batch_size"] = int(set_c_eval_batch_size)
                         cfg["dataset"]["sewerml_label_mode"] = "binary"
-                        cfg["dataset"]["sewerml_ann_root"] = "D:/Sewer/Sewer-ML"
-                        cfg["dataset"]["sewerml_data_root"] = "D:/Sewer/Sewer-ML"
+                        cfg["dataset"]["sewerml_ann_root"] = resolved_sewerml_root
+                        cfg["dataset"]["sewerml_data_root"] = resolved_sewerml_root
                         cfg["dataset"]["sewerml_eval_split"] = "Valid"
                         cfg["dataset"]["sewerml_max_samples"] = int(set_c_sewerml_eval_max_samples)
                         cfg["dataset"]["sewerml_subset_seed"] = int(set_c_sewerml_eval_subset_seed)
@@ -1431,6 +1433,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         help="Local ImageNet root path used as dataset.surrogate_root in generated configs",
     )
     parser.add_argument(
+        "--sewerml-root",
+        type=str,
+        default="D:/Sewer/Sewer-ML",
+        help="Local Sewer-ML root path used as dataset.sewerml_ann_root and dataset.sewerml_data_root in SET-C1 configs",
+    )
+    parser.add_argument(
         "--include-both-hard",
         action="store_true",
         help="Generate hard_top1 variants for 'both' attacks (in addition to soft_prob)",
@@ -1494,6 +1502,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             else None
         ),
         imagenet_root=str(args.imagenet_root),
+        sewerml_root=str(args.sewerml_root),
     )
     print(f"Generated {count} configs in {out_dir}")
     return 0
