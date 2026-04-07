@@ -460,6 +460,17 @@ class SewerMLDataset(Dataset):
 
         self.img_paths = [str(v) for v in gt["Filename"].values]
         self.targets = _parse_sewerml_labels(gt, mode)
+        filtered_img_paths: list[str] = []
+        filtered_targets: list[int] = []
+        for rel_path, target in zip(self.img_paths, self.targets):
+            try:
+                _resolve_sewerml_image_path(self.img_root, self.split, rel_path)
+            except FileNotFoundError:
+                continue
+            filtered_img_paths.append(rel_path)
+            filtered_targets.append(int(target))
+        self.img_paths = filtered_img_paths
+        self.targets = filtered_targets
         max_samples = int(max_samples)
         if 0 < max_samples < len(self.img_paths):
             generator = torch.Generator().manual_seed(int(subset_seed))

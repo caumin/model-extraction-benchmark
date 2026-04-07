@@ -141,6 +141,24 @@ def test_get_test_dataloader_sewerml_reads_images_from_valid_subdirectory(monkey
     assert y.tolist() == [3, 1]
 
 
+def test_get_test_dataloader_sewerml_skips_missing_images(monkeypatch, tmp_path: Path) -> None:
+    ann_root, data_root = _write_dummy_sewerml(tmp_path)
+    missing_df = pd.read_csv(ann_root / "Valid13.csv")
+    missing_df.loc[len(missing_df)] = {**{k: 0 for k in SEWERML_LABELS}, "Filename": "missing.png", "Defect": 0}
+    missing_df.loc[len(missing_df) - 1, "RB"] = 1
+    missing_df.to_csv(ann_root / "Valid13.csv", index=False)
+
+    monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
+    monkeypatch.setenv("SEWERML_DATA_ROOT", str(data_root))
+
+    loader = get_test_dataloader(name="SewerML", batch_size=4, num_workers=0, input_size=(224, 224))
+    x, y = next(iter(loader))
+
+    assert len(loader.dataset) == 2
+    assert tuple(x.shape) == (2, 3, 224, 224)
+    assert y.tolist() == [3, 1]
+
+
 def test_get_test_dataloader_sewerml_binary_mode(monkeypatch, tmp_path: Path) -> None:
     ann_root, data_root = _write_dummy_sewerml(tmp_path)
     monkeypatch.setenv("SEWERML_ANN_ROOT", str(ann_root))
@@ -221,6 +239,41 @@ def test_get_test_dataloader_sewerml_random_subsample_is_deterministic(tmp_path:
     assert loader_a.dataset.img_paths == loader_b.dataset.img_paths
     assert loader_a.dataset.targets == loader_b.dataset.targets
     assert loader_a.dataset.img_paths != loader_c.dataset.img_paths
+
+
+def test_get_test_dataloader_sewerml_random_subsample_stays_deterministic_after_missing_filter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ann_root, data_root = _write_dummy_sewerml_many(tmp_path, image_count=6)
+    (data_root / "img_2.jpg").unlink()
+    monkeypatch.delenv("SEWERML_ANN_ROOT", raising=False)
+    monkeypatch.delenv("SEWERML_DATA_ROOT", raising=False)
+
+    loader_a = get_test_dataloader(
+        name="SewerML",
+        batch_size=3,
+        num_workers=0,
+        input_size=(224, 224),
+        sewerml_ann_root=str(ann_root),
+        sewerml_data_root=str(data_root),
+        sewerml_max_samples=3,
+        sewerml_subset_seed=7,
+    )
+    loader_b = get_test_dataloader(
+        name="SewerML",
+        batch_size=3,
+        num_workers=0,
+        input_size=(224, 224),
+        sewerml_ann_root=str(ann_root),
+        sewerml_data_root=str(data_root),
+        sewerml_max_samples=3,
+        sewerml_subset_seed=7,
+    )
+
+    assert len(loader_a.dataset) == 3
+    assert loader_a.dataset.img_paths == loader_b.dataset.img_paths
+    assert loader_a.dataset.targets == loader_b.dataset.targets
+    assert "img_2.jpg" not in loader_a.dataset.img_paths
 
 
 def test_get_test_dataloader_sewerml_binary_mode_derives_target_without_defect_column(
