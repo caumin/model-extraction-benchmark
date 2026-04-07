@@ -125,6 +125,7 @@ def generate_configs(
     substitute_val_num_workers: Optional[int],
     imagenet_root: str,
     sewerml_root: str,
+    fast_mode: bool,
 ) -> int:
     resolved_imagenet_root = str(imagenet_root)
     resolved_sewerml_root = str(sewerml_root)
@@ -337,6 +338,17 @@ def generate_configs(
     set_c_unified_substitute_max_epochs = 90
     set_c_unified_substitute_patience = 90
 
+    fast_pool_num_workers = 24
+    fast_substitute_num_workers = 12
+    fast_substitute_train_num_workers = 12
+    fast_substitute_val_num_workers = 8
+    fast_eval_batch_size = 1024
+    fast_set_c_eval_batch_size = 512
+    fast_set_a_substitute_batch_size = 1024
+    fast_set_b_substitute_batch_size = 1024
+    fast_set_c_substitute_batch_size = 512
+    fast_set_c_substitute_val_batch_size = 128
+
     # Synthetic/data-free attacks do not depend on the surrogate dataset.
     # Generate them once per victim. Prefer an ImageNet-based SET when available
     # (useful as a canonical location for configs), otherwise keep the first.
@@ -363,6 +375,14 @@ def generate_configs(
         if substitute_val_num_workers is not None
         else int(substitute_num_workers)
     )
+    resolved_pool_workers = int(pool_num_workers)
+    resolved_substitute_workers = int(substitute_num_workers)
+
+    if fast_mode:
+        resolved_pool_workers = max(resolved_pool_workers, fast_pool_num_workers)
+        resolved_substitute_workers = max(resolved_substitute_workers, fast_substitute_num_workers)
+        resolved_sub_train_workers = max(int(resolved_sub_train_workers), fast_substitute_train_num_workers)
+        resolved_sub_val_workers = max(int(resolved_sub_val_workers), fast_substitute_val_num_workers)
 
     count = 0
     for setup in setups:
@@ -430,12 +450,20 @@ def generate_configs(
                         setup_max_epochs = int(set_c_unified_substitute_max_epochs)
                         setup_patience = int(set_c_unified_substitute_patience)
 
+                    if fast_mode:
+                        if setup_set_id == "SET-A1":
+                            setup_substitute_batch_size = int(fast_set_a_substitute_batch_size)
+                        elif setup_set_id == "SET-B1":
+                            setup_substitute_batch_size = int(fast_set_b_substitute_batch_size)
+                        elif setup_set_id == "SET-C1":
+                            setup_substitute_batch_size = int(fast_set_c_substitute_batch_size)
+
                     # Default substitute config
                     substitute_config = {
                         "arch": setup.substitute_arch,
                         "init_seed": 1234 + seed,
                         "batch_size": int(setup_substitute_batch_size),
-                        "num_workers": int(substitute_num_workers),
+                        "num_workers": int(resolved_substitute_workers),
                         "train_num_workers": int(resolved_sub_train_workers),
                         "val_num_workers": int(resolved_sub_val_workers),
                         "optimizer": {
@@ -502,7 +530,7 @@ def generate_configs(
                             "data_mode": data_mode,
                             "surrogate_name": setup.surrogate_name,
                             "surrogate_normalization": "none" if attack.kind == "synthetic" else "standard",
-                            "num_workers": int(pool_num_workers),
+                            "num_workers": int(resolved_pool_workers),
                             "train_split": True,
                             "channels": setup.channels,
                             "input_size": [setup.size, setup.size],
@@ -510,7 +538,7 @@ def generate_configs(
                         "attack": {
                             "name": attack.name,
                             "output_mode": output_mode,
-                            "pool_num_workers": int(pool_num_workers),
+                            "pool_num_workers": int(resolved_pool_workers),
                             **attack_extra,
                         },
                         "substitute": substitute_config,
@@ -527,6 +555,16 @@ def generate_configs(
                         int(cfg["attack"].get("batch_size", _default_query_batch_size_for_setup(setup.set_id))),
                     )
 
+                    if fast_mode:
+                        fast_query_batch_size = 512 if setup.set_id == "SET-C1" else 1024
+                        cfg["attack"]["query_batch_size"] = max(
+                            int(cfg["attack"].get("query_batch_size", fast_query_batch_size)),
+                            int(fast_query_batch_size),
+                        )
+                        cfg["benchmark"]["eval_batch_size"] = int(
+                            fast_set_c_eval_batch_size if setup.set_id == "SET-C1" else fast_eval_batch_size
+                        )
+
                     if setup.set_id == "SET-C1":
                         cfg["benchmark"]["eval_batch_size"] = int(set_c_eval_batch_size)
                         cfg["dataset"]["sewerml_label_mode"] = "binary"
@@ -536,6 +574,9 @@ def generate_configs(
                         cfg["dataset"]["sewerml_max_samples"] = int(set_c_sewerml_eval_max_samples)
                         cfg["dataset"]["sewerml_subset_seed"] = int(set_c_sewerml_eval_subset_seed)
                         cfg["substitute"]["val_batch_size"] = int(set_c_substitute_val_batch_size)
+                        if fast_mode:
+                            cfg["benchmark"]["eval_batch_size"] = int(fast_set_c_eval_batch_size)
+                            cfg["substitute"]["val_batch_size"] = int(fast_set_c_substitute_val_batch_size)
                         # SET-C1 uses 224x224 SewerML inputs, so keep large scoring /
                         # selection passes more conservative than the CIFAR-style cells.
                         if attack.name == "activethief":
@@ -543,11 +584,25 @@ def generate_configs(
                                 int(cfg["attack"].get("scoring_batch_size", 512)),
                                 128,
                             )
+                            if fast_mode:
+                                cfg["attack"]["scoring_batch_size"] = max(
+                                    int(cfg["attack"].get("scoring_batch_size", 512)),
+                                    512,
+                                )
+                                cfg["attack"]["query_batch_size"] = max(
+                                    int(cfg["attack"].get("query_batch_size", 512)),
+                                    512,
+                                )
                         elif attack.name == "blackbox_dissector":
                             cfg["attack"]["selection_batch_size"] = min(
                                 int(cfg["attack"].get("selection_batch_size", 512)),
                                 128,
                             )
+                            if fast_mode:
+                                cfg["attack"]["selection_batch_size"] = max(
+                                    int(cfg["attack"].get("selection_batch_size", 256)),
+                                    256,
+                                )
 
                     if attack.kind == "pool":
                         cfg["attack"].setdefault("initial_seed_ratio", pool_initial_seed_ratio)
@@ -572,6 +627,16 @@ def generate_configs(
                         cfg["attack"].setdefault("featurefool_objective", "euclidean")
                         cfg["attack"].setdefault("max_thres", 10.0 / 255.0)
                         cfg["attack"].setdefault("lbfgs_iters", 10)
+                        if fast_mode:
+                            fast_cloudleak_batch = 256 if setup.set_id == "SET-C1" else 512
+                            cfg["attack"]["batch_size"] = max(
+                                int(cfg["attack"].get("batch_size", fast_cloudleak_batch)),
+                                int(fast_cloudleak_batch),
+                            )
+                            cfg["attack"]["gen_batch_size"] = max(
+                                int(cfg["attack"].get("gen_batch_size", fast_cloudleak_batch)),
+                                int(fast_cloudleak_batch),
+                            )
 
                     def _maybe_add_imagenet_imagefolder_keys(d: Dict[str, Any]) -> None:
                         if str(d.get("data_mode")).lower() != "surrogate":
@@ -595,6 +660,40 @@ def generate_configs(
 
                     if attack.name == "knockoff_nets":
                         cfg["attack"]["offline_train_epochs"] = cfg["substitute"]["max_epochs"]
+                        if fast_mode:
+                            cfg["attack"]["feature_batch_size"] = max(
+                                int(cfg["attack"].get("feature_batch_size", 512)),
+                                512,
+                            )
+
+                    if fast_mode and attack.name == "activethief" and setup.set_id != "SET-C1":
+                        cfg["attack"]["scoring_batch_size"] = max(
+                            int(cfg["attack"].get("scoring_batch_size", 2048)),
+                            2048,
+                        )
+
+                    if fast_mode and attack.name == "blackbox_dissector" and setup.set_id != "SET-C1":
+                        cfg["attack"]["selection_batch_size"] = max(
+                            int(cfg["attack"].get("selection_batch_size", 512)),
+                            512,
+                        )
+
+                    if fast_mode and attack.name == "inversenet":
+                        fast_inversenet_batch = 256 if setup.set_id == "SET-C1" else 512
+                        cfg["attack"]["batch_size"] = max(
+                            int(cfg["attack"].get("batch_size", fast_inversenet_batch)),
+                            int(fast_inversenet_batch),
+                        )
+                        cfg["attack"]["pool_cache_batch_size"] = max(
+                            int(cfg["attack"].get("pool_cache_batch_size", 4096)),
+                            4096,
+                        )
+
+                    if fast_mode and attack.name == "copycatcnn":
+                        cfg["attack"]["batch_size"] = max(
+                            int(cfg["attack"].get("batch_size", 512)),
+                            512,
+                        )
 
                     if attack.name in {"blackbox_ripper", "dfms"}:
                         cfg["attack"]["proxy_dataset"] = {
@@ -602,7 +701,7 @@ def generate_configs(
                             "data_mode": "surrogate",
                             "surrogate_name": setup.surrogate_name,
                             "surrogate_normalization": "none",
-                            "num_workers": int(pool_num_workers),
+                            "num_workers": int(resolved_pool_workers),
                             "train_split": True,
                             "channels": setup.channels,
                             "input_size": [setup.size, setup.size],
@@ -1444,6 +1543,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         help="Generate hard_top1 variants for 'both' attacks (in addition to soft_prob)",
     )
     parser.add_argument(
+        "--fast-mode",
+        action="store_true",
+        help="Generate an aggressive large-VRAM profile with larger batch sizes and worker counts",
+    )
+    parser.add_argument(
         "--no-clean",
         action="store_true",
         help="Do not delete existing *.yaml in output dir before generation",
@@ -1503,6 +1607,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         ),
         imagenet_root=str(args.imagenet_root),
         sewerml_root=str(args.sewerml_root),
+        fast_mode=bool(args.fast_mode),
     )
     print(f"Generated {count} configs in {out_dir}")
     return 0

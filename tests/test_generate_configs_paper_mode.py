@@ -27,6 +27,7 @@ def _generate_matrix(out_dir: Path) -> int:
         substitute_val_num_workers=0,
         imagenet_root="D:/imagenet",
         sewerml_root="D:/Sewer/Sewer-ML",
+        fast_mode=False,
     )
 
 
@@ -244,11 +245,75 @@ def test_generate_configs_allows_overriding_sewerml_root(tmp_path: Path) -> None
         substitute_val_num_workers=0,
         imagenet_root="D:/imagenet",
         sewerml_root="~/data/Sewer-ML",
+        fast_mode=False,
     )
 
     set_c_cfg = yaml.safe_load((out_dir / "SET-C1_random_soft_30k_seed0.yaml").read_text(encoding="utf-8"))
     assert set_c_cfg["dataset"]["sewerml_ann_root"] == "~/data/Sewer-ML"
     assert set_c_cfg["dataset"]["sewerml_data_root"] == "~/data/Sewer-ML"
+
+
+def test_generate_configs_fast_mode_emits_large_vram_profile(tmp_path: Path) -> None:
+    out_dir = tmp_path / "cfg"
+    generate_configs(
+        out_dir=out_dir,
+        device="cpu",
+        seeds=[0],
+        pool_budget=30_000,
+        synthetic_budget=30_000_000,
+        set_a_pool_budget=30_000,
+        set_a_synthetic_budget=30_000_000,
+        set_b_pool_budget=30_000,
+        set_b_synthetic_budget=30_000_000,
+        set_c_pool_budget=30_000,
+        set_c_synthetic_budget=30_000_000,
+        include_both_hard=False,
+        clean=True,
+        pool_num_workers=0,
+        substitute_num_workers=0,
+        substitute_train_num_workers=0,
+        substitute_val_num_workers=0,
+        imagenet_root="D:/imagenet",
+        sewerml_root="D:/Sewer/Sewer-ML",
+        fast_mode=True,
+    )
+
+    set_b_random = yaml.safe_load((out_dir / "SET-B1_random_soft_30k_seed0.yaml").read_text(encoding="utf-8"))
+    set_c_random = yaml.safe_load((out_dir / "SET-C1_random_soft_30k_seed0.yaml").read_text(encoding="utf-8"))
+    set_b_activethief = yaml.safe_load((out_dir / "SET-B1_activethief_soft_30k_seed0.yaml").read_text(encoding="utf-8"))
+    set_c_activethief = yaml.safe_load((out_dir / "SET-C1_activethief_soft_30k_seed0.yaml").read_text(encoding="utf-8"))
+    set_b_dissector = yaml.safe_load((out_dir / "SET-B1_blackbox_dissector_hard_30k_seed0.yaml").read_text(encoding="utf-8"))
+    set_c_dissector = yaml.safe_load((out_dir / "SET-C1_blackbox_dissector_hard_30k_seed0.yaml").read_text(encoding="utf-8"))
+    set_b_cloudleak = yaml.safe_load((out_dir / "SET-B1_cloudleak_soft_30k_seed0.yaml").read_text(encoding="utf-8"))
+    set_c_cloudleak = yaml.safe_load((out_dir / "SET-C1_cloudleak_soft_30k_seed0.yaml").read_text(encoding="utf-8"))
+    set_b_inversenet = yaml.safe_load((out_dir / "SET-B1_inversenet_hard_30k_seed0.yaml").read_text(encoding="utf-8"))
+
+    assert int(set_b_random["substitute"]["batch_size"]) == 1024
+    assert int(set_b_random["substitute"]["train_num_workers"]) == 12
+    assert int(set_b_random["substitute"]["val_num_workers"]) == 8
+    assert int(set_b_random["dataset"]["num_workers"]) == 24
+    assert int(set_b_random["benchmark"]["eval_batch_size"]) == 1024
+    assert int(set_b_random["attack"]["query_batch_size"]) == 1024
+
+    assert int(set_c_random["substitute"]["batch_size"]) == 512
+    assert int(set_c_random["substitute"]["val_batch_size"]) == 128
+    assert int(set_c_random["benchmark"]["eval_batch_size"]) == 512
+    assert int(set_c_random["attack"]["query_batch_size"]) == 512
+
+    assert int(set_b_activethief["attack"]["scoring_batch_size"]) == 2048
+    assert int(set_c_activethief["attack"]["scoring_batch_size"]) == 512
+    assert int(set_c_activethief["attack"]["query_batch_size"]) == 512
+
+    assert int(set_b_dissector["attack"]["selection_batch_size"]) == 512
+    assert int(set_c_dissector["attack"]["selection_batch_size"]) == 256
+
+    assert int(set_b_cloudleak["attack"]["batch_size"]) == 512
+    assert int(set_b_cloudleak["attack"]["gen_batch_size"]) == 512
+    assert int(set_c_cloudleak["attack"]["batch_size"]) == 256
+    assert int(set_c_cloudleak["attack"]["gen_batch_size"]) == 256
+
+    assert int(set_b_inversenet["attack"]["batch_size"]) == 512
+    assert int(set_b_inversenet["attack"]["pool_cache_batch_size"]) == 4096
 
 
 def test_generate_paperlike_configs_emits_only_paper_variants(tmp_path: Path) -> None:
