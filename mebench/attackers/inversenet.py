@@ -1,4 +1,12 @@
-"""InverseNet attack implementation."""
+"""InverseNet attack implementation (Gong et al. 2021, IJCAI).
+
+Audit note: no direct official code clone is available locally; the
+implementation follows the paper's 3-phase staging (inversion → query →
+retrain) and uses `mebench/models/inversion.py:InversionGenerator` for the
+inversion network. LR/batch/epochs are tunable per the SET-A/B/C unified
+substitute profile (see `mebench/attackers/HYPERPARAM_POLICY.md`); only the
+phase semantics and per-phase budget gating are paper-fixed.
+"""
 
 from typing import Dict, Any, List, Tuple, Optional
 import math
@@ -587,7 +595,7 @@ class InverseNet(AttackRunner):
             device = state.metadata.get("device", "cpu")
             self.substitute = create_substitute(
                 arch=self.config.get("substitute_arch", "resnet18"),
-                num_classes=self.semantic_num_classes,
+                num_classes=self.num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
             ).to(device)
             
@@ -747,7 +755,7 @@ class InverseNet(AttackRunner):
             dropout_prob = float(sub_config.get("dropout_prob", 0.0))
             self.substitute = create_substitute(
                 arch=arch,
-            num_classes=self.semantic_num_classes,
+                num_classes=self.num_classes,
                 input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
                 width_mult=width_mult,
                 dropout_prob=dropout_prob,

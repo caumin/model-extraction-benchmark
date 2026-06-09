@@ -1,4 +1,17 @@
-"""ES Attack (Estimate & Synthesize) implementation."""
+"""ES Attack (Estimate & Synthesize) implementation.
+
+EXPERIMENTAL — NOT IN v1 BENCHMARK.
+This implementation is preserved for development but is excluded from the
+public comparison tables (see analyze_results.py: not in `_ATTACK_DISPLAY_MAP`).
+
+Known issues:
+- The class-conditional generation guarantees (DNN-SYN / OPT-SYN paths) are
+  not currently asserted by tests; multiple `CRITICAL FIX` iterations during
+  stabilization (BN handling, optimizer, KL/CE loss) suggest the runtime
+  behavior should be re-validated end-to-end before publication.
+
+Do not include in published comparison tables until parity is verified.
+"""
 
 from typing import Dict, Any, List, Tuple, Optional
 import logging

@@ -22,7 +22,12 @@ from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.data.preprocessing import apply_official_preprocess_batch
 from mebench.models.substitute_factory import create_substitute
-from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.training import (
+    SubstituteTrainer,
+    TrainRequest,
+    build_augmentation_pipeline,
+    resolve_pool_norm_stats,
+)
 from mebench.utils.config_aliases import resolve_iterations
 from mebench.utils.binary import (
     binary_bce_loss,
@@ -337,7 +342,8 @@ class MARICH(AttackRunner):
             **self._pool_scan_loader_kwargs(device),
         )
         self.substitute.eval()
-        scored: List[tuple[int, float]] = []
+        ent_chunks: List[torch.Tensor] = []
+        idx_chunks: List[torch.Tensor] = []
         pbar = self._create_scoring_pbar(len(candidates), "entropy", min(int(budget), len(candidates)))
         try:
             with torch.no_grad():
@@ -350,15 +356,22 @@ class MARICH(AttackRunner):
                     else:
                         probs = F.softmax(logits, dim=1)
                         ent = -(probs * torch.log(probs.clamp_min(1e-10))).sum(dim=1)
-                    for i, idx in enumerate(idx_batch.tolist()):
-                        scored.append((int(idx), float(ent[i].item())))
+                    ent_chunks.append(ent.detach().cpu())
+                    idx_chunks.append(idx_batch.detach().cpu().long())
                     if pbar is not None:
                         pbar.update(int(x_batch.size(0)))
         finally:
             if pbar is not None:
                 pbar.close()
-        scored.sort(key=lambda t: t[1], reverse=True)
-        return [idx for idx, _ in scored[: min(int(budget), len(scored))]]
+        if not ent_chunks:
+            return []
+        all_ent = torch.cat(ent_chunks, dim=0)
+        all_idx = torch.cat(idx_chunks, dim=0)
+        k = min(int(budget), int(all_ent.numel()))
+        if k <= 0:
+            return []
+        top = torch.topk(all_ent, k, largest=True, sorted=True).indices
+        return [int(v) for v in all_idx[top].tolist()]
 
     def _loss_dep_select(self, candidates: List[int], budget: int, device: str) -> List[int]:
         labeled = list(self.state.attack_state.get("labeled_indices", []))
@@ -524,6 +537,11 @@ class MARICH(AttackRunner):
         return [int(v) for v in chosen.tolist()]
 
     def _select_round_indices(self, k: int, device: str) -> List[int]:
+        # Audit note: stage flags below are order-independent, so `all_elg` and
+        # `all_egl` produce identical pipelines (entropy -> loss_dep -> engrad).
+        # The official repo's `all_egl` is treated as a synonym here; if future
+        # work needs the literal e->g->l ordering, branch the engrad stage
+        # before the loss stage explicitly.
         unlabeled = list(self.state.attack_state.get("unlabeled_indices", []))
         if k <= 0 or not unlabeled:
             return []
@@ -631,6 +649,18 @@ class MARICH(AttackRunner):
         train_cfg["max_epochs"] = int(max(1, epochs))
         train_cfg["patience"] = int(max(1, train_cfg.get("patience", self.patience)))
 
+        aug_spec = sub_cfg.get("augmentation")
+        aug_fn = build_augmentation_pipeline(
+            aug_spec,
+            norm_stats=resolve_pool_norm_stats(self.state),
+            input_size=tuple(self.state.metadata.get("input_shape", (3, 32, 32))[1:]),
+        )
+        if aug_fn is not None:
+            self.logger.info(
+                "[MARICH] substitute training with augmentation pipeline=%s",
+                list((aug_spec or {}).get("pipeline", [])),
+            )
+
         trainer = SubstituteTrainer(train_cfg, device=device, logger=self.logger)
         steps_per_epoch = max(1, int(math.ceil(max(1, train_size) / max(1, train_batch_size))))
         request = TrainRequest(
@@ -639,6 +669,7 @@ class MARICH(AttackRunner):
             val_loader=val_loader,
             eval_fn=eval_fn if val_loader is not None else None,
             loss_fn=loss_fn,
+            preprocess_fn=aug_fn,
             max_steps=int(train_cfg["max_epochs"]) * steps_per_epoch,
             validate_every=steps_per_epoch,
             patience=int(train_cfg["patience"]) * steps_per_epoch,
@@ -647,6 +678,50 @@ class MARICH(AttackRunner):
         )
         trainer.train(request)
         self.state.attack_state["substitute"] = self.substitute
+
+    def _compute_initial_round_budget(self, init_k: int, ctx: BenchmarkContext) -> float:
+        """Scale round_budget so the geometric series fills max_budget.
+
+        The original MARICH paper sets budget and rounds independently of any
+        total-budget constraint.  In the benchmark, max_budget is the authoritative
+        target.  We scale the initial round budget upward (never downward) so that
+
+            init_k + round_budget_scaled * Σ(budget_growth^r, r=1..rounds) ≈ max_budget
+
+        If auto_scale_round_budget is False or if the configured params already
+        exceed max_budget, the configured round_budget is returned unchanged.
+        """
+        if not bool(self.config.get("auto_scale_round_budget", True)):
+            return float(self.round_budget)
+
+        max_budget = int(
+            self.state.metadata.get("max_budget")
+            or ctx.budget_remaining
+        )
+        remaining = max_budget - init_k
+        if remaining <= 0:
+            return float(self.round_budget)
+
+        rounds = int(self.rounds)
+        bg = float(self.budget_growth)
+        if abs(bg - 1.0) < 1e-9:
+            geometric_sum = float(rounds)
+        else:
+            geometric_sum = bg * (bg ** rounds - 1.0) / (bg - 1.0)
+
+        if geometric_sum <= 0:
+            return float(self.round_budget)
+
+        scaled = remaining / geometric_sum
+        if scaled <= self.round_budget:
+            return float(self.round_budget)
+
+        self.logger.info(
+            "[MARICH] Auto-scaling round budget %.1f → %.1f "
+            "(max_budget=%d, init=%d, rounds=%d, growth=%.4f)",
+            self.round_budget, scaled, max_budget, init_k, rounds, bg,
+        )
+        return float(scaled)
 
     def run(self, ctx: BenchmarkContext) -> None:
         self.victim = ctx.oracle.model
@@ -668,9 +743,11 @@ class MARICH(AttackRunner):
         if self.substitute is not None:
             self._evaluate_current_substitute(self.substitute, device)
 
-        budget_now = float(self.round_budget)
+        budget_now = self._compute_initial_round_budget(init_k, ctx)
         epochs_now = float(self.epochs)
-        for r in range(int(self.rounds)):
+        r = 0
+        max_rounds = int(self.rounds)
+        while r < max_rounds or int(ctx.budget_remaining) > 0:
             if int(ctx.budget_remaining) <= 0:
                 break
             unlabeled = self.state.attack_state["unlabeled_indices"]
@@ -692,7 +769,8 @@ class MARICH(AttackRunner):
 
             epochs_now = float(epochs_now) * float(self.epochs_growth)
             self._train_substitute(int(max(1, round(epochs_now))), device)
-            self.state.attack_state["round"] = int(r + 1)
+            r += 1
+            self.state.attack_state["round"] = r
             if self.substitute is not None:
                 self._evaluate_current_substitute(self.substitute, device)
 

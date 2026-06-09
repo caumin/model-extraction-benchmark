@@ -30,7 +30,6 @@ def _run_with_cleanup(tmp_path: Path, monkeypatch, delete_on_finish: bool) -> Pa
         "dataset": {"name": "CIFAR10", "data_mode": "data_free", "seed_size": 10},
         "substitute": {
             "arch": "resnet18",
-            "init_seed": 0,
             "optimizer": {"lr": 0.1, "momentum": 0.9, "weight_decay": 5e-4},
             "patience": 2,
         },

@@ -1,4 +1,17 @@
-"""GAME (Generative-Based Adaptive Model Extraction) attack."""
+"""GAME (Generative-Based Adaptive Model Extraction) attack.
+
+EXPERIMENTAL — NOT IN v1 BENCHMARK.
+This implementation is preserved for development but is excluded from the
+public comparison tables (see analyze_results.py: not in `_ATTACK_DISPLAY_MAP`).
+
+Known issues:
+- Substitute accuracy plateaus near random on SET-B1; AGU/proxy-data
+  alignment with Xie et al. 2022 is not fully resolved.
+- Class-conditional generator-discriminator parity vs. official `attack.py`
+  (`repro/papers/2022_xie_game/`) needs an end-to-end reproduction pass.
+
+Do not include in published comparison tables until parity is verified.
+"""
 
 from typing import Any, Optional, Callable
 import torch

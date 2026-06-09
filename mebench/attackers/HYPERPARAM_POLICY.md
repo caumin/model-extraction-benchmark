@@ -7,7 +7,12 @@ This document separates per-attack knobs into:
 
 Scope:
 
-- Evidence source priority: `papers/*.pdf` / `papers/paper_text/*` and `official_repo_clones/*`.
+- Evidence source priority: `papers/*.pdf` and the official author repos
+  cloned under `repro/*_official/` (run `bash scripts/bootstrap_repros.sh`
+  once to populate; the directory is gitignored).
+- Per-attack faithfulness deltas vs. official references are summarized in
+  audit comments at the top of each `mebench/attackers/*.py` file and, where
+  finer evidence exists, in `repro/papers/<paper_id>/evidence.md`.
 - Implementation status evaluated against `mebench/attackers/*.py` and `generate_configs.py`.
 
 ## Matrix
@@ -26,7 +31,7 @@ Scope:
 | `es_attack` | Local paper-faithful constraints encoded (class-conditional DNN-SYN, init Gaussian step) | Iteration counts, synthesis mode variants, optimization steps | **Constrained heuristic** (official clone mapping is limited locally) (`mebench/attackers/es_attack.py:69-75`, `mebench/attackers/es_attack.py:97-106`) |
 | `game` | Official attack script defaults (`batch_size=1024`, `querybudget=2000`, `attack_train_epoch=40`) and beta weights | Proxy data handling, sampler strategy, benchmark normalization controls | **Partial**: major defaults mirrored; benchmark contract adds adaptations (`official_repo_clones/game_attack/attack.py:23-27`, `mebench/attackers/game.py:27-57`) |
 | `inversenet` | Paper-style 3-phase schedule and sparse retrain points are semantic core | Batch/lr/epochs around inversion and retraining under budget constraints | **Constrained heuristic** (official repo evidence limited in local clone) (`mebench/attackers/inversenet.py:47-50`, `mebench/attackers/inversenet.py:87-99`) |
-| `knockoff_nets` | Official split semantics: query batch in transfer construction (`8`), train batch in knockoff training (`64`), train lr `0.01`, momentum `0.5` | Adaptive reward shaping details, hierarchy parameters, retraining cadence | **Aligned split**: query/update batch pinned to `8`; substitute-train path benchmark-aligned (`official_repo_clones/knockoffnets/knockoff/adversary/transfer.py:104`, `official_repo_clones/knockoffnets/knockoff/adversary/train.py:108-115`, `mebench/attackers/knockoff_nets.py:35-43`) |
+| `knockoff_nets` | Two phases per paper §6 / supplement §B.4. **Phase (a)** (adaptive only): 1 SGD step per query batch on just-queried images, persistent optimizer, `lr=0.0005`, `momentum=0.5`; reward window `Δ=25`; action space is the surrogate-pool label space (1000 for ILSVRC). **Phase (b)**: train from scratch on the collected transfer set, paper default `lr=0.01`, `momentum=0.5`, `100 epochs`, `StepLR(60, 0.1)`. Random policy skips phase (a) entirely. | Adaptive reward weights and bandit hierarchy details, k-means feature-extractor choice | **Aligned**: phase (a) implements supplement §B.4 verbatim (`mebench/attackers/knockoff_nets.py:_phase_a_step`); phase (b) is delegated to `sub_config` for benchmark-fair comparison with ActiveThief/RandomBaseline so the paper's exact phase-(b) recipe is opt-in via YAML only (`official_repo_clones/knockoffnets/knockoff/adversary/transfer.py`, `official_repo_clones/knockoffnets/knockoff/adversary/train.py`, supplement §B.4 "Adaptive Strategy"). |
 | `marich` | Local official sources are inconsistent for optimizer/LR values | Selection strategy controls, round budget growth, training knobs | **Heuristic/Partial** until single reference profile is locked (`official_repo_clones/MARICH/lr_cnn_res_al/utils.py:45-49`, `official_repo_clones/MARICH/lr_cnn_res_al/nets.py:57-70`, `mebench/attackers/marich.py:60-69`) |
 | `maze` | Official defaults: `batch=128`, `lr_clone=0.1`, `iter_gen=1`, `iter_clone=5`, ZO params (`eps`, `ndirs`) | Eval cadence, strict budget scheduling, architecture swap experiments | **Code-aligned / Matrix-unified substitute** (`official_repo_clones/maze/src/utils/config.py:16`, `official_repo_clones/maze/src/utils/config.py:53`, `official_repo_clones/maze/src/utils/config.py:92-96`, `mebench/attackers/maze.py:103-109`) |
 | `random_baseline` | No paper-anchored fixed hyperparameter profile; role is benchmark control baseline | Query step size, training cadence, substitute train settings | **Heuristic baseline** by design (`mebench/attackers/random_baseline.py:25-35`, `mebench/attackers/random_baseline.py:74`) |

@@ -1,3 +1,13 @@
+"""CopycatCNN attack (Correia-Silva et al. 2018).
+
+Audit note: no stable official implementation is available locally; the
+reference is the paper (`papers/copycatcnn.pdf`). The attack-side semantic
+constraint (NPDD: Non-Problem-Domain Dataset) is enforced at config-validation
+time. Substitute-training defaults (optimizer/batch/epochs) are
+benchmark-heuristic, not paper-canonical, and are unified under the SET-A/B/C
+substitute profiles in `generate_configs.py`.
+"""
+
 from typing import Dict, Any, List, Tuple, Optional
 import gc
 import logging

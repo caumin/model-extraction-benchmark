@@ -1,9 +1,18 @@
-"""CloudLeak attack implementation."""
+"""CloudLeak attack implementation.
+
+Audit vs official: https://github.com/yunyuntsai/DNN-Model-Stealing
+The official repo only ships the FeatureFool adversarial generator (Caffe +
+scipy LBFGS-B) and an Azure query script. Substitute training, active
+selection, seed/validation bootstrap, triplet objective, and the VGG19+DeepID
+substitute architecture are reconstructed here from the paper (NDSS 2020).
+See `FeatureFool` and `CloudLeakVGGDeepID` for divergence details.
+"""
 
 from typing import Dict, Any, List, Optional, Tuple
 from collections import OrderedDict
 import gc
 import bisect
+import logging
 import math
 import torch
 import torch.nn as nn
@@ -24,7 +33,12 @@ from mebench.utils.dataloader import (
     resolve_val_num_workers,
 )
 from mebench.models.substitute_factory import create_substitute
-from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.training import (
+    SubstituteTrainer,
+    TrainRequest,
+    build_augmentation_pipeline,
+    resolve_pool_norm_stats,
+)
 from mebench.utils.binary import (
     binary_bce_loss,
     binary_hard_labels_from_logits,
@@ -36,6 +50,17 @@ from mebench.utils.config_aliases import resolve_iterations
 
 
 class FeatureFool:
+    # Audit vs official optimize.py (yunyuntsai/DNN-Model-Stealing):
+    # - Official uses scipy `fmin_l_bfgs_b` with native per-pixel box bounds in
+    #   mean-subtracted Caffe pixel space. We use `torch.optim.LBFGS` + a sigmoid
+    #   reparameterization `x = lb + (ub-lb)*sigmoid(w)` because PyTorch LBFGS
+    #   has no box-constraint support. This is the largest numeric divergence;
+    #   results near the eps-boundary may differ from the official solver.
+    # - `factr` (used by scipy LBFGS-B) is accepted for API parity but ignored
+    #   by PyTorch LBFGS; only `pgtol` maps to `tolerance_grad`.
+    # - Official ships 3 objectives (euclidean / relu / label_noloss). We expose
+    #   only euclidean + triplet (paper Eq.3). `relu` and `label_noloss` are not
+    #   implemented; add them if exact official parity is required.
     def __init__(
         self,
         model: nn.Module,
@@ -164,9 +189,11 @@ class FeatureFool:
                     _ = self.model(x_source_dev)
                     phi_s = activations.pop(0).detach().view(B, -1)
 
-            # Official implementation uses explicit box bounds around the base image.
-            # Implement per-pixel bounds in [0,1] via a reparameterization that always
-            # stays within the intersection of [0,1] and [x_source - eps, x_source + eps].
+            # Official uses scipy LBFGS-B with explicit per-pixel box bounds in Caffe
+            # pixel space (`bound = zip(lb.flatten(), ub.flatten())`). PyTorch LBFGS
+            # has no bound support, so we reparameterize into [lb, ub] via sigmoid.
+            # `epsilon` here is in [0,1] units; default 10/255 maps the official
+            # `max_thres=10` (pixel) to our normalized input contract.
             x_base = x_source_dev.detach().clamp(0.0, 1.0)
             eps = float(self.epsilon)
             lb = (x_base - eps).clamp(0.0, 1.0)
@@ -332,6 +359,9 @@ class CloudLeak(AttackRunner):
         super().__init__(config, state)
 
         # Paper uses box-constrained L-BFGS (Section IV.A.3). Use enough iters to converge.
+        # NOTE: `lbfgs_factr` is preserved for config parity with the official scipy
+        # solver but is NOT consumed by PyTorch LBFGS (no `factr` analog). Only
+        # `lbfgs_iters` and `lbfgs_pgtol` actually affect optimization.
         self.lbfgs_iters = int(config.get("lbfgs_iters", 10))
         self.lbfgs_factr = float(config.get("lbfgs_factr", 1e7))
         self.lbfgs_pgtol = float(config.get("lbfgs_pgtol", 1e-5))
@@ -1134,6 +1164,18 @@ class CloudLeak(AttackRunner):
         max_epochs = int(sub_config.get("max_epochs", self.max_epochs))
         patience_epochs = int(sub_config.get("patience", self.patience))
 
+        aug_spec = sub_config.get("augmentation")
+        aug_fn = build_augmentation_pipeline(
+            aug_spec,
+            norm_stats=resolve_pool_norm_stats(state),
+            input_size=tuple(state.metadata.get("input_shape", (3, 32, 32))[1:]),
+        )
+        if aug_fn is not None:
+            logging.getLogger(__name__).info(
+                "[CloudLeak] substitute training with augmentation pipeline=%s",
+                list((aug_spec or {}).get("pipeline", [])),
+            )
+
         trainer = SubstituteTrainer(dict(sub_config), device=device)
         request = TrainRequest(
             model=substitute,
@@ -1141,6 +1183,7 @@ class CloudLeak(AttackRunner):
             val_loader=val_loader,
             eval_fn=eval_fn,
             loss_fn=self._compute_training_loss,
+            preprocess_fn=aug_fn,
             max_steps=max_epochs * steps_per_epoch,
             validate_every=steps_per_epoch,
             patience=patience_epochs * steps_per_epoch,

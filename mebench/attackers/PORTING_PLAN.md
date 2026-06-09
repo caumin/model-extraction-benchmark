@@ -1,11 +1,14 @@
-# Attack Porting Plan (official_repo_clones -> mebench)
+# Attack Porting Plan (official author repos -> mebench)
 
 This document is the implementation mapping for fairness-preserving attack porting.
 
 Companion policy document:
 - `mebench/attackers/HYPERPARAM_POLICY.md` (fixed-required vs tunable knobs and current compliance)
 
-- Official sources (read-only): `official_repo_clones/`
+- Official sources (read-only): clone via `bash scripts/bootstrap_repros.sh`
+  into `repro/*_official/` (gitignored). The path strings below referencing
+  `official_repo_clones/...` are historical and refer to the same upstream
+  files; check the bootstrap script for current clone destinations.
 - Internal framework: `mebench/attackers/`
 - Goal: keep preprocessing, query/output interface, budget semantics, hyperparameters, and seed behavior aligned with official references.
 
@@ -89,4 +92,6 @@ The following mebench attacks do not have direct code in `official_repo_clones/`
 - Default/hparam parity checks: `tests/test_attack_porting_defaults.py`
 - Per-attack logic routing checks: `tests/test_attack_porting_per_attack_logic.py`
 
-Additional metric-parity execution is tracked in `mebench/attackers/ATTACK_PARITY_REPORT.md` and requires long-running matrix runs.
+Per-attack parity audits are documented in audit comments at the top of each
+`mebench/attackers/*.py` file and, where finer evidence exists, in
+`repro/papers/<paper_id>/evidence.md`.

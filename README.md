@@ -2,7 +2,22 @@
 
 PyTorch benchmark for comparing model extraction attacks under a unified experiment envelope.
 
-[한국어](README-ko.md) • [Contract Guide](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md)
+[한국어](README-ko.md) • [Contract Guide](Model_Extraction_Benchmark_v1.0.1_Contract_and_Implementation_Guide.md) • [Threat Model](THREAT_MODEL.md) • [Metrics](docs/METRICS.md) • [Victim Training](VICTIM_TRAINING.md) • [Project Compendium](docs/PROJECT_COMPENDIUM.md)
+
+## Environment variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `IMAGENET_ROOT` | Path to ImageNet root for surrogate-pool attacks | `C:/imagenet` (CI placeholder; override per machine) |
+| `SEWERML_ROOT` | Path to Sewer-ML root for SET-C1 | `D:/Sewer/Sewer-ML` (CI placeholder; override per machine) |
+| `MEBENCH_DEVICE` | Default device for matrix runner | `cuda:0` |
+| `PYTHON_BIN` | Python executable for `scripts/launch/*.sh` | auto-detected |
+
+Cloning the official author repos used for parity audits:
+
+```bash
+bash scripts/bootstrap_repros.sh   # populates repro/*_official/ (gitignored)
+```
 
 ## Overview
 
@@ -68,20 +83,21 @@ python aggregate_matrix.py
 
 ## SET-C1 Substitute Policy
 
-- `SET-C1` uses a fixed substitute-training schedule for all attacks: `batch=128`, `val_batch=32`, `eval_batch=32`, `optimizer=sgd(lr=0.05,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=90`.
+- `SET-C1` uses a fixed substitute-training schedule for all attacks: `batch=128`, `val_batch=128`, `eval_batch=256`, `optimizer=sgd(lr=0.05,momentum=0.9,wd=5e-4)`, `scheduler=multistep([0.5,0.75],gamma=0.1)`, `max_epochs=90`. DataLoader uses `persistent_workers=True` and `prefetch_factor=4` (224×224 IPC overhead).
 - Model selection is by best validation loss.
 - Early stopping is disabled in practice by setting `patience=max_epochs`, so runs always complete the full 90 epochs before restoring the best validation-loss checkpoint.
+- For augmentation and AdamW columns added under the 4-column unification, see [docs/PROJECT_COMPENDIUM.md](docs/PROJECT_COMPENDIUM.md) §2.7 (SET-C augmentation ablation) and §7.2 (current phase plan).
 
 ## Implemented Attacks
 
-The benchmark currently includes `17` attacks across four families, all evaluated under the same Track-B runtime and reporting contract.
+The v1 benchmark includes `15` attacks across four families, all evaluated under the same Track-B runtime and reporting contract. Two additional attacks (GAME, ES-Attack) are present in the codebase but excluded from public comparison tables — see *Experimental (not in v1)* below.
 
 | Family | Count | Coverage |
 | :--- | ---: | :--- |
 | Baseline | 1 | Reference strategy for pooled querying |
 | Active Learning | 6 | Query-efficient sample selection and adaptive acquisition |
 | Pool-based / Offline | 2 | Large-scale surrogate labeling and offline training |
-| Data-Free / Generative | 8 | Query synthesis without a public surrogate pool |
+| Data-Free / Generative | 6 | Query synthesis without a public surrogate pool |
 
 ### Baseline
 
@@ -115,10 +131,19 @@ The benchmark currently includes `17` attacks across four families, all evaluate
 | DFMS | [Sanyal et al. (2022)](https://arxiv.org/abs/2204.11022) | Diverse hard-label query synthesis with staged stealing. |
 | DisGUIDE | [Tan et al. (2023)](https://ojs.aaai.org/index.php/AAAI/article/view/26150) | Disagreement-guided data-free extraction with replay. |
 | MAZE | [Kariyappa et al. (2021)](https://arxiv.org/abs/2005.03161) | Zeroth-order gradient estimation for query synthesis. |
-| ES-Attack | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | Evolutionary query synthesis against black-box victims. |
-| GAME | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | Adaptive class-conditioned generation and extraction. |
 | Dual Students | [Beetham et al. (2023)](https://arxiv.org/abs/2309.10058) | Two-student disagreement-guided data-free extraction. |
 | Blackbox Ripper | [Barbalau et al. (2020)](https://arxiv.org/abs/2010.11158) | Latent-space evolution on pretrained GAN priors. |
+
+### Experimental (not in v1)
+
+These attacks live in `mebench/attackers/` for development purposes but are
+**not** included in the v1 benchmark comparison tables. Known parity issues
+are documented at the top of each file.
+
+| Attack | Paper | Status |
+| :--- | :--- | :--- |
+| GAME | [Xie et al. (2022)](https://link.springer.com/chapter/10.1007/978-3-031-17140-6_28) | Substitute accuracy plateaus near random; AGU/proxy alignment unresolved. |
+| ES-Attack | [Yuan et al. (2022)](https://arxiv.org/abs/2009.09560) | Class-conditional generation guarantees not yet test-verified. |
 
 ## Artifacts
 
@@ -148,6 +173,18 @@ When contributing a new attack or contract change, keep the benchmark surface co
 - Implementation: add new attacks under `mebench/attackers/`
 - Runtime contract: keep implementations compatible with `AttackRunner.run(ctx)`
 - Verification: run `python -m pytest tests/ -q`
+
+## Datasets and licensing
+
+- **MNIST**: public domain.
+- **CIFAR-10 / CIFAR-100**: research use (Krizhevsky et al.); no model-weight
+  redistribution issue.
+- **ImageNet** (used as surrogate pool): academic-use license. The benchmark
+  does not redistribute imagery; supply via `IMAGENET_ROOT`.
+- **GTSRB / SewerML**: per upstream terms; supply via the relevant env var.
+
+See `VICTIM_TRAINING.md` for victim-checkpoint provenance and license
+attribution for any externally sourced weights.
 
 ## License
 

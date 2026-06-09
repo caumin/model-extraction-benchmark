@@ -28,7 +28,14 @@ from mebench.utils.binary import (
 
 
 class _MovingAverageModel(nn.Module):
-    """Train/test model pair with official-style EMA updates."""
+    """Train/test model pair with official-style EMA updates.
+
+    Matches official `dual_students/network/moving_averages.py`:
+    - test_model is fully replaced by train_model on the first `step()` call
+      (momentum=0 once), then EMA-updated as `momentum*test + (1-m)*train`.
+    - `forward(test=True)` returns the train_model output until the first step
+      so that early-iteration evaluations are well-defined.
+    """
 
     def __init__(self, model: nn.Module, momentum: float) -> None:
         super().__init__()

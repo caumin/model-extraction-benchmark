@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -7,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+
+_trainer_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,6 +27,12 @@ class TrainRequest:
     validate_every: int = 100
     load_best: bool = True
     patience: int = 5000  # Default patience in steps (50 checks if validate_every=100)
+    # When set, defer early-stop while the recent train loss is above this
+    # threshold. Mirrors the official ActiveThief
+    # `utils/model.py:443` rule (`if np.mean(t_loss) > 1.5: no_improvement = 0`)
+    # which prevents stopping while training has not yet converged. The mean is
+    # computed over the most recent `validate_every` training steps.
+    train_loss_threshold: Optional[float] = None
 
 
 @dataclass
@@ -59,14 +68,17 @@ class SubstituteTrainer:
         """
         model = request.model
         model.train()
-        
+
         optimizer = self._setup_optimizer(model)
-        
+        scheduler = self._setup_scheduler(optimizer, request.max_steps)
+
         best_value = -float("inf") if request.early_stop_mode == "max" else float("inf")
         best_state = None
         patience_counter = 0
         step = 0
         best_step = 0
+
+        recent_train_losses: list[float] = []
 
         train_iter = iter(request.train_loader)
 
@@ -94,12 +106,20 @@ class SubstituteTrainer:
                 nn.utils.clip_grad_norm_(model.parameters(), self.config["grad_clip"])
 
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             step += 1
+
+            # Always track recent train losses so the per-validation log can
+            # report the running mean and we can compare training curves.
+            recent_train_losses.append(float(loss.detach().cpu().item()))
+            if len(recent_train_losses) > int(request.validate_every):
+                recent_train_losses = recent_train_losses[-int(request.validate_every):]
 
             # Validation
             if (
-                request.val_loader 
-                and request.eval_fn 
+                request.val_loader
+                and request.eval_fn
                 and (step % request.validate_every == 0 or step == request.max_steps)
             ):
                 current_value = request.eval_fn(model, request.val_loader)
@@ -122,8 +142,27 @@ class SubstituteTrainer:
                 else:
                     patience_counter += request.validate_every
 
+                # Per-validation training-curve log.
+                _trainer_logger.info(
+                    "[Trainer] step=%d val=%.6f best=%.6f@%d patience=%d/%d lr=%.6f recent_train=%.6f",
+                    step, float(current_value), float(best_value), int(best_step),
+                    int(patience_counter), int(request.patience),
+                    float(optimizer.param_groups[0]["lr"]),
+                    (sum(recent_train_losses)/len(recent_train_losses)) if recent_train_losses else float("nan"),
+                )
+
                 if patience_counter >= request.patience:
-                    break
+                    # Official ActiveThief rule: defer stop while training loss
+                    # remains above the threshold (model has not yet converged).
+                    if (
+                        request.train_loss_threshold is not None
+                        and recent_train_losses
+                        and (sum(recent_train_losses) / len(recent_train_losses))
+                        > float(request.train_loss_threshold)
+                    ):
+                        patience_counter = 0
+                    else:
+                        break
 
         # Load best model if requested
         if request.load_best and best_state is not None:
@@ -169,7 +208,8 @@ class SubstituteTrainer:
             weight_decay = float(self.config.get("weight_decay", 5e-4))
             momentum = float(self.config.get("momentum", 0.9))
 
-        if str(opt_name).lower() == "adam":
+        name_lc = str(opt_name).lower()
+        if name_lc == "adam":
             betas = (0.9, 0.999)
             if isinstance(opt_config, dict) and "betas" in opt_config:
                 betas = tuple(opt_config["betas"])
@@ -179,10 +219,73 @@ class SubstituteTrainer:
                 weight_decay=weight_decay,
                 betas=betas
             )
-        else:
-            return optim.SGD(
+        if name_lc == "adamw":
+            betas = (0.9, 0.999)
+            if isinstance(opt_config, dict) and "betas" in opt_config:
+                betas = tuple(opt_config["betas"])
+            return optim.AdamW(
                 model.parameters(),
                 lr=lr,
-                momentum=momentum,
-                weight_decay=weight_decay
+                weight_decay=weight_decay,
+                betas=betas,
             )
+        return optim.SGD(
+            model.parameters(),
+            lr=lr,
+            momentum=momentum,
+            weight_decay=weight_decay
+        )
+
+    def _setup_scheduler(
+        self, optimizer: optim.Optimizer, max_steps: int
+    ) -> Optional[Any]:
+        """Configure LR scheduler based on `config["scheduler"]`.
+
+        Returns None if no scheduler is requested. Supports:
+        - {name: multistep, milestones_ratio: [..], gamma: ..}
+        - {name: cosine, T_max: <int> | null} (defaults T_max to max_steps)
+        - {name: step, step_size_ratio: .., gamma: ..}
+        - null / missing → no scheduler (constant LR).
+
+        Milestones are expressed as ratios of `max_steps` so that the same
+        config produces the correct step-based milestones regardless of
+        dataset size or batch size. Stepping is done per-step inside the
+        train loop (not per-epoch), which matches the step-based `max_steps`.
+        """
+        sch = self.config.get("scheduler")
+        if not sch:
+            return None
+        if isinstance(sch, str):
+            sch = {"name": sch}
+        name = str(sch.get("name", "")).lower().strip()
+        if not name or name == "none" or name == "null":
+            return None
+
+        max_steps = max(1, int(max_steps))
+
+        if name == "multistep":
+            ratios = sch.get("milestones_ratio") or sch.get("milestones") or [0.5, 0.75]
+            # If `milestones` is given as absolute step counts, treat as-is;
+            # otherwise interpret as ratios in [0, 1].
+            if all(isinstance(r, (int, float)) and 0.0 <= float(r) <= 1.0 for r in ratios):
+                milestones = sorted({max(1, int(round(float(r) * max_steps))) for r in ratios})
+            else:
+                milestones = sorted({max(1, int(r)) for r in ratios})
+            gamma = float(sch.get("gamma", 0.1))
+            return optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+
+        if name == "cosine":
+            t_max = sch.get("T_max") or sch.get("t_max") or max_steps
+            return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(t_max))
+
+        if name == "step":
+            ratio = float(sch.get("step_size_ratio", 0.3))
+            step_size = max(1, int(round(ratio * max_steps)))
+            gamma = float(sch.get("gamma", 0.1))
+            return optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+
+        warnings.warn(
+            f"Unknown scheduler name '{name}' — falling back to constant LR.",
+            stacklevel=2,
+        )
+        return None

@@ -1,4 +1,14 @@
-"""DFME: Data-Free Model Extraction (CVPR 2021)."""
+"""DFME: Data-Free Model Extraction (CVPR 2021).
+
+Audit note: structurally aligned with the official `cake-lab/datafree-model-
+extraction` repo (see `repro/papers/2021_truong_dfme/evidence.md`). Defaults
+mirror the official `train.py` (batch=256, n_g=1, n_s=5, grad_epsilon=1e-3,
+m=1; lr_S=0.1, lr_G=1e-4). Budget is decremented per query image at the
+oracle boundary, not per generator step or per zeroth-order direction —
+mebench's contract differs from the paper's nominal "queries per round"
+counter but matches the per-image accounting documented in
+`THREAT_MODEL.md`.
+"""
 
 import torch
 import torch.nn as nn
@@ -34,7 +44,7 @@ class DFME(AttackRunner):
         self.noise_dim = int(config.get("noise_dim", 256))
         # Tunable only in explicit ablations; default aligns to official lr_G.
         self.generator_lr = float(config.get("generator_lr", config.get("lr_G", 1e-4)))
-        eval_interval_raw = int(config.get("eval_interval_queries", 100_000))
+        eval_interval_raw = int(config.get("eval_interval_queries", 1000000))
         self.eval_interval_queries = eval_interval_raw if eval_interval_raw > 0 else 0
         self._next_eval_query = self.eval_interval_queries
         self._periodic_eval_done: set[int] = set()

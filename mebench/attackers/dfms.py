@@ -973,7 +973,10 @@ class DFMSHL(AttackRunner):
 
                 self.clone_optimizer.zero_grad(set_to_none=True)
                 logits = self.clone(x_b)
-                loss = F.cross_entropy(logits, y_b)
+                if self.is_single_logit_binary:
+                    loss = binary_bce_loss(logits, y_b.float().unsqueeze(1))
+                else:
+                    loss = F.cross_entropy(logits, y_b)
                 loss.backward()
                 self.clone_optimizer.step()
 

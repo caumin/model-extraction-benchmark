@@ -27,7 +27,6 @@ def test_dfme_track_b_evaluation():
         },
         "substitute": {
             "arch": "resnet18",
-            "init_seed": 1234,
             "optimizer": {"name": "sgd", "lr": 0.01, "momentum": 0.9, "weight_decay": 5e-4},
             "patience": 5,
         },

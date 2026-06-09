@@ -4,8 +4,10 @@ import copy
 import csv
 import json
 import logging
+import queue
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
@@ -13,8 +15,65 @@ from typing import Dict, Any, List
 import torch
 
 
+class _AsyncStream:
+    """Non-blocking stream wrapper backed by a bounded queue and daemon writer.
+
+    When the underlying terminal blocks (e.g. browser disconnect fills the
+    kernel buffer), writes are silently dropped instead of blocking the caller.
+    """
+
+    def __init__(self, stream, maxsize: int = 4000):
+        self._stream = stream
+        self._q: queue.Queue[str | None] = queue.Queue(maxsize=maxsize)
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        while True:
+            data = self._q.get()
+            if data is None:
+                break
+            try:
+                self._stream.write(data)
+                self._stream.flush()
+            except OSError:
+                pass
+
+    def write(self, data: str) -> int:
+        try:
+            self._q.put_nowait(data)
+        except queue.Full:
+            pass
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return self._stream.isatty()
+
+    @property
+    def encoding(self):
+        return self._stream.encoding
+
+    def fileno(self):
+        return self._stream.fileno()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _install_async_streams() -> None:
+    """Replace sys.stdout/stderr with non-blocking async wrappers."""
+    if not isinstance(sys.stdout, _AsyncStream):
+        sys.stdout = _AsyncStream(sys.stdout)  # type: ignore[assignment]
+    if not isinstance(sys.stderr, _AsyncStream):
+        sys.stderr = _AsyncStream(sys.stderr)  # type: ignore[assignment]
+
+
 def setup_console_logging():
     """Configure logging to show INFO level and above to console."""
+    _install_async_streams()
     root_logger = logging.getLogger()
     if not root_logger.handlers:
         root_logger.setLevel(logging.INFO)

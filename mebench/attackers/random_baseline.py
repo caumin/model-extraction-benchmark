@@ -10,7 +10,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from mebench.models.substitute_factory import create_substitute
-from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.training import (
+    SubstituteTrainer,
+    TrainRequest,
+    build_augmentation_pipeline,
+    resolve_pool_norm_stats,
+)
 from mebench.utils.binary import binary_bce_loss, is_single_logit_binary_num_classes
 from mebench.utils.dataloader import (
     pool_loader_kwargs,
@@ -72,20 +77,21 @@ class RandomBaseline(AttackRunner):
             state.attack_state["unqueried_indices"] = list(range(pool_size))
 
     def run(self, ctx: BenchmarkContext) -> None:
+        # One-shot random baseline: sample the full budget at once, query the
+        # victim in IO-sized chunks (purely for batching), then train the
+        # substitute once on all collected labels. No round-by-round logic and
+        # no intermediate retraining — Random is a control baseline and the
+        # benchmark table reads only the final metric.
         self.victim = ctx.oracle.model
         device = self.state.metadata.get("device", "cpu")
 
         total_budget = ctx.budget_remaining
-        checkpoints = sorted(int(c) for c in ctx.checkpoints)
-        seen_checkpoints = set(int(c) for c in self.state.attack_state.get("checkpoint_reached", []))
-
         indices, pool_exhausted = self._sample_indices(total_budget, self.state)
         step_size = int(self.config.get("batch_size", self._default_step_size(ctx)))
 
         pbar = self._create_progress_bar(
             total_budget, f"[{self.__class__.__name__}] Extracting"
         )
-        previous_queries = int(self.state.query_count)
         offset = 0
         while offset < total_budget:
             k = min(step_size, total_budget - offset)
@@ -102,76 +108,12 @@ class RandomBaseline(AttackRunner):
             self._handle_oracle_output(query_batch, oracle_output, self.state)
             pbar.update(query_batch.x.size(0))
             offset += k
-
-            current_queries = int(self.state.query_count)
-            self._maybe_train_and_log_checkpoint(
-                current_queries=current_queries,
-                previous_queries=previous_queries,
-                checkpoints=checkpoints,
-                seen_checkpoints=seen_checkpoints,
-                device=str(device),
-            )
-            previous_queries = current_queries
         pbar.close()
 
-        # If no checkpoints were configured, keep the previous behavior.
-        if not checkpoints:
-            self._train_substitute(self.state)
-
-        # Final evaluation is handled by the engine. Keep latest substitute available.
-        
-    def _maybe_train_and_log_checkpoint(
-        self,
-        current_queries: int,
-        previous_queries: int,
-        checkpoints: list,
-        seen_checkpoints: set,
-        device: str,
-    ) -> None:
-        if not checkpoints:
-            return
-        if self.ctx is None or self.victim is None:
-            return
-
-        query_x = self.state.attack_state.get("query_data_x", [])
-        query_y = self.state.attack_state.get("query_data_y", [])
-        if len(query_x) == 0 or len(query_y) == 0:
-            return
-
-        all_x = torch.cat(query_x, dim=0)
-        all_y = torch.cat(query_y, dim=0)
-        total_received = int(all_x.size(0))
-
-        for checkpoint in checkpoints:
-            if (
-                checkpoint <= previous_queries
-                or checkpoint > current_queries
-                or checkpoint in seen_checkpoints
-                or checkpoint <= 0
-                or checkpoint > total_received
-            ):
-                continue
-
-            x_subset = all_x[: int(checkpoint)]
-            y_subset = all_y[: int(checkpoint)]
-            substitute = self._train_substitute_checkpoint(
-                x_all=x_subset,
-                y_all=y_subset,
-                device=str(device),
-            )
-
-            if substitute is None:
-                continue
-
-            seen_checkpoints.add(checkpoint)
-            self.state.attack_state["substitute"] = substitute
-
-            self._evaluate_current_substitute(
-                substitute,
-                device=str(device),
-                track="track_b",
-                query_count=checkpoint,
-            )
+        # Single training pass on all collected (x, y) — substitute is freshly
+        # initialized inside `_train_substitute`. Final evaluation is performed
+        # by the engine afterward.
+        self._train_substitute(self.state)
 
     def _train_batch_size(self) -> int:
         sub_config = self.state.metadata.get("substitute_config", {})
@@ -198,121 +140,6 @@ class RandomBaseline(AttackRunner):
 
     def _input_channels(self) -> int:
         return int(self.state.metadata.get("input_shape", (3, 32, 32))[0])
-
-    def _train_substitute_checkpoint(
-        self,
-        x_all: torch.Tensor,
-        y_all: torch.Tensor,
-        device: str,
-    ):
-        if x_all.size(0) == 0 or y_all.size(0) == 0:
-            return None
-
-        sub_config = self.state.metadata.get("substitute_config", {})
-        init_seed = int(sub_config.get("init_seed", 42))
-        torch.manual_seed(init_seed)
-
-        substitute = create_substitute(
-            arch=sub_config.get("arch", "resnet18"),
-            num_classes=self._num_classes(),
-            input_channels=self._input_channels(),
-            width_mult=int(sub_config.get("width_mult", 1)),
-            dropout_prob=float(sub_config.get("dropout_prob", 0.0)),
-        ).to(device)
-
-        full_dataset = torch.utils.data.TensorDataset(x_all, y_all)
-        total_size = int(x_all.size(0))
-        val_size = max(1, int(0.2 * total_size)) if total_size > 1 else 0
-        train_size = max(1, total_size - val_size)
-        if val_size > 0 and train_size > 0:
-            train_dataset, val_dataset = torch.utils.data.random_split(
-                full_dataset,
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(init_seed + total_size),
-            )
-        else:
-            train_dataset = full_dataset
-            val_dataset = None
-
-        output_mode = str(self.config.get("output_mode", "soft_prob"))
-
-        def loss_fn(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-            if self.is_single_logit_binary:
-                return binary_bce_loss(outputs, targets)
-            if output_mode == "soft_prob":
-                targets = targets.clamp_min(1e-10)
-                targets = targets / targets.sum(dim=1, keepdim=True).clamp_min(1e-12)
-                return nn.KLDivLoss(reduction="batchmean")(torch.log_softmax(outputs, dim=1), targets)
-            return nn.CrossEntropyLoss()(outputs, targets.long())
-
-        trainer_config = dict(sub_config)
-        trainer_config.setdefault("grad_clip", 1.0)
-
-        train_batch_size = self._train_batch_size()
-        train_generator = torch.Generator().manual_seed(init_seed + total_size)
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=train_batch_size,
-            shuffle=True,
-            generator=train_generator,
-            **pool_loader_kwargs(
-                device,
-                {
-                    "num_workers": self._train_num_workers("train"),
-                },
-            ),
-        )
-
-        val_loader = None
-        if val_dataset is not None:
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=train_batch_size,
-                shuffle=False,
-                **pool_loader_kwargs(
-                    device,
-                    {
-                        "num_workers": self._train_num_workers("val"),
-                    },
-                ),
-            )
-
-        def eval_fn(model: nn.Module, loader: DataLoader) -> float:
-            model.eval()
-            total_loss = 0.0
-            total_count = 0
-            with torch.no_grad():
-                for x_batch, y_batch in loader:
-                    x_batch = x_batch.to(device)
-                    y_batch = y_batch.to(device)
-                    outputs = model(x_batch)
-                    loss = loss_fn(outputs, y_batch)
-                    total_loss += float(loss.item()) * int(x_batch.size(0))
-                    total_count += int(x_batch.size(0))
-            return total_loss / total_count if total_count > 0 else float("inf")
-
-        batch_size = max(1, int(train_batch_size))
-        steps_per_epoch = max(1, int(math.ceil(len(train_dataset) / batch_size)))
-        max_epochs = int(sub_config.get("max_epochs", 200))
-        patience_epochs = int(sub_config.get("patience", 20))
-
-        trainer = SubstituteTrainer(trainer_config, device=device)
-        request = TrainRequest(
-            model=substitute,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            eval_fn=eval_fn if val_loader is not None else None,
-            loss_fn=loss_fn,
-            max_steps=max_epochs * steps_per_epoch,
-            validate_every=steps_per_epoch if val_loader is not None else None,
-            patience=patience_epochs * steps_per_epoch if val_loader is not None else None,
-            early_stop_mode="min",
-            load_best=val_loader is not None,
-        )
-        trainer.train(request)
-
-        return substitute
-
 
     def _sample_indices(self, k: int, state: BenchmarkState) -> tuple[list[int], bool]:
         self._ensure_pool_dataset(state)
@@ -374,7 +201,28 @@ class RandomBaseline(AttackRunner):
 
         x_all = torch.cat(query_x, dim=0)
         y_all = torch.cat(query_y, dim=0)
-        
+
+        # ===== DIAGNOSTIC INSTRUMENTATION =====
+        import hashlib, os
+        x_hash = hashlib.sha256(x_all.detach().cpu().numpy().tobytes()).hexdigest()[:16]
+        y_hash = hashlib.sha256(y_all.detach().cpu().numpy().tobytes()).hexdigest()[:16]
+        y_for_stats = y_all if y_all.is_floating_point() else y_all.float()
+        y_mean = float(y_for_stats.mean().item())
+        y_std = float(y_for_stats.std().item())
+        run_name = os.environ.get("MEBENCH_RUN_NAME", "?")
+        msg = (
+            f"[DIAG] x_all hash={x_hash} y_all hash={y_hash} "
+            f"y_mean={y_mean:.10e} y_std={y_std:.10e} "
+            f"x_shape={tuple(x_all.shape)} y_shape={tuple(y_all.shape)}"
+        )
+        self.logger.info(msg)
+        # Save tensors for direct comparison
+        diag_dir = state.metadata.get("run_dir") or os.environ.get("DIAG_DIR", "/tmp/mebench_diag")
+        os.makedirs(diag_dir, exist_ok=True)
+        torch.save({"x_all": x_all.detach().cpu(), "y_all": y_all.detach().cpu()},
+                   os.path.join(diag_dir, f"diag_xy_{run_name}.pt"))
+        # ===== END INSTRUMENTATION =====
+
         # Ensure we have enough data for split
         if x_all.size(0) < 10:
              # Too few samples, fallback to simple training without split
@@ -488,6 +336,19 @@ class RandomBaseline(AttackRunner):
         max_epochs = int(sub_config.get("max_epochs", 200))
         patience_epochs = int(sub_config.get("patience", 20))
 
+        aug_spec = sub_config.get("augmentation")
+        input_hw = tuple(state.metadata.get("input_shape", (3, 32, 32))[1:])
+        aug_fn = build_augmentation_pipeline(
+            aug_spec,
+            norm_stats=resolve_pool_norm_stats(state),
+            input_size=input_hw,
+        )
+        if aug_fn is not None:
+            logging.getLogger(__name__).info(
+                "[Random] substitute training with augmentation pipeline=%s",
+                list((aug_spec or {}).get("pipeline", [])),
+            )
+
         trainer = SubstituteTrainer(dict(sub_config), device=device)
         request = TrainRequest(
             model=substitute,
@@ -495,6 +356,7 @@ class RandomBaseline(AttackRunner):
             val_loader=val_loader,     # [ADDED]
             eval_fn=eval_fn,           # [ADDED]
             loss_fn=train_loss_fn,
+            preprocess_fn=aug_fn,
             max_steps=max_epochs * steps_per_epoch,
             validate_every=steps_per_epoch,
             patience=patience_epochs * steps_per_epoch,

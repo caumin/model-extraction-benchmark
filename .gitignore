@@ -47,9 +47,16 @@ runs/
 !/docs/reference/
 /docs/reference/*
 !/docs/reference/ATTACK_REFERENCES.md
+!/docs/METRICS.md
+!/docs/PROJECT_COMPENDIUM.md
+# session_notes/ and experiments/ are working docs — kept locally only
+/configs/*.yaml
+/configs/*.yml
+/configs/smoke/
 /configs/matrix/
 /configs/paper_mode/
 /configs/tmp_channel_check/
+/configs/repro/
 analysis_results/
 logs/
 checkpoints/
@@ -89,3 +96,41 @@ Users*desktop*model-extraction-benchmark*/
 /tmp_*.txt
 /SESSION_HANDOFF_*.md
 /repro/papers/*/TODO_ULTRAWORK.md
+
+# Official author repo clones (bootstrap on demand via scripts/bootstrap_repros.sh)
+/repro/*_official/
+/repro/run_official_repro.log
+
+# Run log junk at repo root
+/nohup.out
+/*.out
+
+# Victim checkpoint rotation backups
+runs/victims/*.bak
+runs/victims/*.bak[0-9]*
+
+# Claude / IDE workspace
+.claude/
+
+# Legacy run archives (kept locally only)
+runs_legacy_*/
+
+# Historical one-off launch helpers + temp scratch (kept locally only)
+scripts/_*.txt
+scripts/launch_*.sh
+scripts/launch/run_reschedfix.sh
+scripts/run_remaining_*
+
+# Historical sweep / aug runners (work completed; superseded by gen_phase_rerun.py + run_phase.py)
+scripts/gen_setb_resnet34_sweep*.py
+scripts/run_setb_resnet34_sweep*.py
+scripts/gen_adamw_configs.py
+scripts/generate_aug_configs.py
+scripts/generate_seta_soft_aug.py
+scripts/run_setc_aug.py
+scripts/run_setc_disguide_fills.py
+scripts/run_setc_fills.py
+scripts/run_seta_aug.py
+scripts/run_priority_aug.py
+scripts/analyze_knockoff_repatch.py
+scripts/diag_chunking_rng.py

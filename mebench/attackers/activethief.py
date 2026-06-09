@@ -17,7 +17,12 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
-from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.training import (
+    SubstituteTrainer,
+    TrainRequest,
+    build_augmentation_pipeline,
+    resolve_pool_norm_stats,
+)
 from mebench.utils.config_aliases import resolve_iterations
 from mebench.utils.binary import (
     binary_bce_loss,
@@ -37,9 +42,10 @@ from mebench.utils.dataloader import (
 
 class ActiveThief(AttackRunner):
     """ActiveThief with uncertainty, k-center, and DFAL sampling strategies.
-    
+
     Ref: "ActiveThief: Model Extraction Using Active Learning and Unannotated Public Data" (AAAI 2020)
-    
+    Official: https://github.com/iisc-seal/activethief
+
     Algorithm loop:
     1. Initialize: Select random initial seed S0 from thief dataset
     2. Query: Send S_i to victim f to get labels D_i
@@ -47,6 +53,18 @@ class ActiveThief(AttackRunner):
     4. Evaluate: Predict on remaining pool (unlabeled thief data)
     5. Select: Use active learning strategy to select next queries S_{i+1}
     6. Repeat: Continue until budget exhausted
+
+    Audit note (defaults vs official cfg.py):
+    - official cfg.py uses Adam(lr=1e-3), batch_size=50, dropout=0.5,
+      val_size=1000 (fixed), seed_size=1000 (fixed), early_stop_tolerance=20.
+    - This implementation defers optimizer/dropout/batch/patience to
+      `substitute_config` and resolves seed/val from ratios (0.1 / 0.2 of total
+      budget) via `_resolve_seed_and_validation_targets`. SET-B1 ablation
+      configs (`*_official_full|optim|dropout`) toggle these to investigate
+      the SET-B1 ~10%p paper gap.
+    - Official `train_copynet_iter` includes a `t_loss > 1.5` retry/reset rule
+      not reproduced here; SubstituteTrainer relies on patience-based early
+      stop only.
     """
 
     def __init__(self, config: dict, state: BenchmarkState):
@@ -397,24 +415,48 @@ class ActiveThief(AttackRunner):
         # [FEATURE] Enable TQDM for substitute training visualization
         sub_config_with_tqdm = dict(sub_config)
         sub_config_with_tqdm["use_tqdm"] = True
-        
+
+        aug_spec = sub_config.get("augmentation")
+        aug_fn = build_augmentation_pipeline(
+            aug_spec,
+            norm_stats=resolve_pool_norm_stats(self.state),
+            input_size=tuple(self.state.metadata.get("input_shape", (3, 32, 32))[1:]),
+        )
+        if aug_fn is not None:
+            self.logger.info(
+                "[ActiveThief] substitute training with augmentation pipeline=%s",
+                list((aug_spec or {}).get("pipeline", [])),
+            )
+
         trainer = SubstituteTrainer(sub_config_with_tqdm, device=device, logger=self.logger)
         batch_size = max(1, int(train_batch_size))
         train_size = int(len(train_dataset))
         steps_per_epoch = max(1, int(math.ceil(train_size / batch_size)))
         max_epochs = int(sub_config.get("max_epochs", 200))
         patience_epochs = int(sub_config.get("patience", 20))
+        # Optional official-parity rule: defer early-stop while train loss is
+        # still above this threshold (official `utils/model.py:443`).
+        train_loss_threshold = self.config.get(
+            "train_loss_threshold",
+            sub_config.get("train_loss_threshold"),
+        )
         request = TrainRequest(
             model=self.substitute,
             train_loader=labeled_loader,
             val_loader=val_loader,
             eval_fn=eval_fn,
             loss_fn=loss_fn,
+            preprocess_fn=aug_fn,
             load_best=True,
             max_steps=max_epochs * steps_per_epoch,
             validate_every=steps_per_epoch,
             patience=patience_epochs * steps_per_epoch,
-            early_stop_mode="min", # minimizing validation loss
+            early_stop_mode="min",  # minimizing validation loss
+            train_loss_threshold=(
+                float(train_loss_threshold)
+                if train_loss_threshold is not None
+                else None
+            ),
         )
         trainer.train(request)
 

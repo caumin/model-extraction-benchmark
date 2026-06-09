@@ -132,7 +132,12 @@ def load_victim_checkpoint(
     if isinstance(checkpoint, dict):
         state_dict = checkpoint.get(
             "state_dict",
-            checkpoint.get("model_state_dict", checkpoint.get("model", checkpoint)),
+            checkpoint.get(
+                "model_state_dict",
+                # `model_dict` is the format used by the official SwiftThief repo
+                # (https://github.com/ku-air/SwiftThief).
+                checkpoint.get("model_dict", checkpoint.get("model", checkpoint)),
+            ),
         )
     else:
         state_dict = checkpoint

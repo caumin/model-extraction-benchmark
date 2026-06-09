@@ -279,7 +279,17 @@ def generate_configs(
         
         AttackSpec("dfme", kind="synthetic", label_capability="soft_only"),
         AttackSpec("ds", kind="synthetic", label_capability="both"),
-        AttackSpec("maze", kind="synthetic", label_capability="soft_only"),
+        # MAZE는 매 query interval(default 100K)마다 substitute evaluation을 수행한다.
+        # SET-C(224x224 SewerML)에서 한 번 eval에 200-1000s 들고, 20M budget이면
+        # 200 eval cycles × 평균 ~6분 ≈ 20+h가 평가에 소모돼 학습 시간의 80%+를
+        # 차지한다. 최종 평가는 budget 도달 시 checkpoint에서 자동 수행되므로
+        # periodic eval을 끄고(0) trajectory 모니터링은 포기한다.
+        AttackSpec(
+            "maze",
+            kind="synthetic",
+            label_capability="soft_only",
+            extra={"eval_interval_queries": 0},
+        ),
         AttackSpec("disguide", kind="synthetic", label_capability="both"),
         # NOTE: GAME is temporarily excluded from the default matrix because its
         # TDL pretraining requires proxy labels aligned to victim classes.
@@ -330,8 +340,13 @@ def generate_configs(
     # conservative, but use a 128-image training batch with a linearly scaled LR
     # (0.05) relative to the previous 256->0.1 target.
     set_c_substitute_batch_size = 128
-    set_c_substitute_val_batch_size = 32
-    set_c_eval_batch_size = 128
+    # SET-C: val batch 32→128. 224x224 SewerML eval에서 batch 작으면 iteration
+    # overhead가 커지고 DataLoader worker IPC가 매 batch 19MB(32x224x224x3xf32)
+    # 전송 비용을 곱하기로 받는다. 128로 키워 batch 수를 4x 줄임.
+    set_c_substitute_val_batch_size = 128
+    # eval_batch_size도 동일 이유로 128→256 (track-B 평가 시 SewerML test 10K
+    # samples → 39 batches 만에 끝남).
+    set_c_eval_batch_size = 256
     set_c_sewerml_eval_max_samples = 10_000
     set_c_sewerml_eval_subset_seed = 42
     set_c_unified_substitute_lr = 0.05
@@ -459,13 +474,18 @@ def generate_configs(
                             setup_substitute_batch_size = int(fast_set_c_substitute_batch_size)
 
                     # Default substitute config
+                    # persistent_workers/prefetch_factor: SET-C(224x224)에서 매
+                    # eval cycle마다 worker fork → CPU spike → GPU starvation을
+                    # 유발하는 패턴을 방지. mebench/utils/dataloader.py의
+                    # pool_loader_kwargs가 persistent_workers=True를 인식한다.
                     substitute_config = {
                         "arch": setup.substitute_arch,
-                        "init_seed": 1234 + seed,
                         "batch_size": int(setup_substitute_batch_size),
                         "num_workers": int(resolved_substitute_workers),
                         "train_num_workers": int(resolved_sub_train_workers),
                         "val_num_workers": int(resolved_sub_val_workers),
+                        "persistent_workers": True,
+                        "prefetch_factor": 4,
                         "optimizer": {
                             "name": "sgd",
                             "lr": target_lr,
@@ -659,7 +679,14 @@ def generate_configs(
                     _maybe_add_imagenet_imagefolder_keys(cfg["dataset"])
 
                     if attack.name == "knockoff_nets":
+                        # Phase (b) epochs follow the matrix's `substitute.max_epochs` for
+                        # fair comparison with other pool-based attacks. KnockoffNets reads
+                        # `offline_train_epochs` (explicit) or falls back to sub_config; we
+                        # keep the explicit value so YAML self-documents the schedule.
                         cfg["attack"]["offline_train_epochs"] = cfg["substitute"]["max_epochs"]
+                        # Phase (a) knobs (`phase_a_lr=5e-4`, `phase_a_momentum=0.5`,
+                        # `reward_window=25`) follow paper supplement §B.4 defaults and are
+                        # NOT emitted into matrix YAML — modify in knockoff_nets.py to retune.
                         if fast_mode:
                             cfg["attack"]["feature_batch_size"] = max(
                                 int(cfg["attack"].get("feature_batch_size", 512)),
@@ -797,7 +824,6 @@ def generate_paperlike_configs(
     ) -> Dict[str, Any]:
         cfg = {
             "arch": str(arch),
-            "init_seed": 1234 + int(seed),
             "batch_size": substitute_batch_size,
             "num_workers": int(substitute_num_workers),
             "train_num_workers": int(resolved_sub_train_workers),

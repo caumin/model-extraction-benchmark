@@ -30,7 +30,7 @@ try {
     [int]$setBSyntheticBudget = [int](Get-EnvOrDefault -Name "SET_B_SYNTHETIC_BUDGET" -Default "20000000")
     $poolBudgetOverride = [System.Environment]::GetEnvironmentVariable("POOL_BUDGET")
     $syntheticBudgetOverride = [System.Environment]::GetEnvironmentVariable("SYNTHETIC_BUDGET")
-    [int]$generateConfigs = [int](Get-EnvOrDefault -Name "GENERATE_CONFIGS" -Default "1")
+    [int]$generateConfigs = [int](Get-EnvOrDefault -Name "GENERATE_CONFIGS" -Default "0")
     [int]$includeBothHard = [int](Get-EnvOrDefault -Name "INCLUDE_BOTH_HARD" -Default "1")
 
     if ($generateConfigs -ne 0) {

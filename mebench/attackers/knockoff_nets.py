@@ -24,7 +24,12 @@ from mebench.utils.dataloader import (
     resolve_val_num_workers,
 )
 from mebench.models.substitute_factory import create_substitute
-from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.training import (
+    SubstituteTrainer,
+    TrainRequest,
+    build_augmentation_pipeline,
+    resolve_pool_norm_stats,
+)
 from mebench.utils.binary import (
     binary_bce_loss,
     binary_distribution_from_labels,
@@ -46,16 +51,28 @@ class KnockoffNets(AttackRunner):
         self.policy = str(config.get("policy", "adaptive")).strip().lower()
         if self.policy not in {"random", "adaptive"}:
             raise ValueError(f"KnockoffNets policy must be 'random' or 'adaptive', got {self.policy!r}")
-        # Update substitute periodically or every batch if policy requires fresh logits
+
+        # Phase (a) — supplement §B.4: SGD(lr=0.0005, momentum=0.5), 1 step per query batch.
+        # `paper_train_lr` / `paper_train_momentum` kept as back-compat aliases (old configs).
+        self.phase_a_lr = float(
+            config.get("phase_a_lr", config.get("paper_train_lr", 5e-4))
+        )
+        self.phase_a_momentum = float(
+            config.get("phase_a_momentum", config.get("paper_train_momentum", 0.5))
+        )
+
+        # Deprecated knobs (kept readable so old YAMLs don't crash; phase (a) now always
+        # runs once per query batch, phase (b) is delegated to sub_config like other attacks).
         self.train_every = max(1, int(config.get("train_every", self.batch_size)))
-        # Tunable (benchmark): online/offline retraining cadence.
         self.train_epochs = int(config.get("train_epochs", 1))
         self.online_train_epochs = int(config.get("online_train_epochs", self.train_epochs))
         offline_train_epochs = config.get("offline_train_epochs")
         self.offline_train_epochs = (
             int(offline_train_epochs) if offline_train_epochs is not None else None
         )
-        self.reward_window = int(config.get("reward_window", 100))
+
+        # Reward shaping — supplement §B.4: ∆ = 25 past time-steps.
+        self.reward_window = int(config.get("reward_window", 25))
         self.reward_certainty_weight = float(config.get("reward_certainty_weight", 1.0))
         self.reward_diversity_weight = float(config.get("reward_diversity_weight", 1.0))
         self.reward_loss_weight = float(config.get("reward_loss_weight", 1.0))
@@ -69,8 +86,6 @@ class KnockoffNets(AttackRunner):
             feature_arch = "resnet50"
         self.feature_arch = feature_arch
         self.policy_lr = float(config.get("policy_lr", 0.01))
-        self.paper_train_lr = float(config.get("paper_train_lr", 0.1))
-        self.paper_train_momentum = float(config.get("paper_train_momentum", 0.5))
         self.num_classes = int(
             state.metadata.get("num_classes")
             or config.get("num_classes")
@@ -82,8 +97,16 @@ class KnockoffNets(AttackRunner):
         )
         self.loss_reward_scale = max(loss_reward_scale, 1e-6)
 
+        # Paper §4.1.2: action space Z is the surrogate-dataset label space (e.g., 1000 for
+        # ILSVRC), NOT the victim's K output classes. `pool_num_classes` is set in `_load_pool`
+        # from the surrogate dataset; `num_classes` stays as victim K (substitute output dim).
+        self.pool_num_classes: Optional[int] = None
         self.pool_dataset = None
         self.class_to_indices: Dict[int, List[int]] = {}
+
+        # Phase (a) persistent optimizer slot (not in state.attack_state — re-created on resume).
+        self._phase_a_optimizer: Optional[torch.optim.Optimizer] = None
+        self._phase_a_optimizer_for: Optional[nn.Module] = None
 
         self._initialize_state(state)
 
@@ -118,19 +141,29 @@ class KnockoffNets(AttackRunner):
         # Regression/unit tests may set `pool_dataset` directly (mock) without calling `_load_pool`,
         # leaving bookkeeping uninitialized. Ensure a consistent minimal state.
         state.attack_state.setdefault("queried_indices", [])
-        state.attack_state.setdefault("unqueried_indices", [])
+        state.attack_state.setdefault("unqueried_indices", set())
+        if not isinstance(state.attack_state["unqueried_indices"], set):
+            state.attack_state["unqueried_indices"] = set(state.attack_state["unqueried_indices"])
         if len(state.attack_state["unqueried_indices"]) == 0:
-            state.attack_state["unqueried_indices"] = list(range(pool_len))
+            state.attack_state["unqueried_indices"] = set(range(pool_len))
 
         if not self.class_to_indices:
-            self.class_to_indices = {i: [] for i in range(int(self.num_classes))}
-            for idx in range(pool_len):
-                try:
-                    _, label = self.pool_dataset[idx]
-                    class_id = int(label) % int(self.num_classes)
-                except Exception:
-                    class_id = 0
-                self.class_to_indices.setdefault(class_id, []).append(idx)
+            # Tests may set pool_dataset directly (bypassing `_load_pool`). Build
+            # class_to_indices over the *actual* surrogate labels, not folded into victim K.
+            self.class_to_indices = {}
+            labels_attr = self._fast_pool_labels(self.pool_dataset)
+            if labels_attr is not None:
+                for idx, label in enumerate(labels_attr):
+                    self.class_to_indices.setdefault(int(label), []).append(idx)
+            else:
+                for idx in range(pool_len):
+                    try:
+                        _, label = self.pool_dataset[idx]
+                        class_id = int(label)
+                    except Exception:
+                        class_id = 0
+                    self.class_to_indices.setdefault(class_id, []).append(idx)
+            self._sync_action_space_to_pool(state)
 
         unqueried = state.attack_state["unqueried_indices"]
         if len(unqueried) == 0:
@@ -152,20 +185,21 @@ class KnockoffNets(AttackRunner):
             idx = pool_list.pop()
             if idx not in unqueried:
                 continue
-            unqueried.remove(idx)
+            unqueried.discard(idx)
             state.attack_state["queried_indices"].append(idx)
             selected_indices.append(idx)
             selected_classes.append(class_id)
 
         if len(selected_indices) < k:
-            remaining = [idx for idx in unqueried if idx not in selected_indices]
+            selected_set = set(selected_indices)
+            remaining = [idx for idx in unqueried if idx not in selected_set]
             extra = min(k - len(selected_indices), len(remaining))
             if extra > 0:
                 extra_indices = np.random.choice(remaining, extra, replace=False).tolist()
                 for idx in extra_indices:
-                    unqueried.remove(idx)
-                    state.attack_state["queried_indices"].append(idx)
-                    selected_indices.append(idx)
+                    unqueried.discard(int(idx))
+                    state.attack_state["queried_indices"].append(int(idx))
+                    selected_indices.append(int(idx))
                     selected_classes.append(-1)
 
         x_list = []
@@ -195,10 +229,12 @@ class KnockoffNets(AttackRunner):
             raise ValueError(f"{self.__class__.__name__} requires a non-empty pool dataset.")
 
         state.attack_state.setdefault("queried_indices", [])
-        state.attack_state.setdefault("unqueried_indices", list(range(pool_len)))
+        state.attack_state.setdefault("unqueried_indices", set(range(pool_len)))
+        if not isinstance(state.attack_state["unqueried_indices"], set):
+            state.attack_state["unqueried_indices"] = set(state.attack_state["unqueried_indices"])
         unqueried = state.attack_state["unqueried_indices"]
         if len(unqueried) == 0:
-            unqueried.extend(list(range(pool_len)))
+            unqueried.update(range(pool_len))
             state.attack_state["random_refill_count"] = int(
                 state.attack_state.get("random_refill_count", 0)
             ) + 1
@@ -206,17 +242,20 @@ class KnockoffNets(AttackRunner):
         selected_indices: List[int] = []
         while len(selected_indices) < int(k):
             if len(unqueried) == 0:
-                unqueried.extend(list(range(pool_len)))
+                unqueried.update(range(pool_len))
                 state.attack_state["random_refill_count"] = int(
                     state.attack_state.get("random_refill_count", 0)
                 ) + 1
 
             take = min(int(k) - len(selected_indices), len(unqueried))
-            chosen = np.random.choice(unqueried, take, replace=False).tolist()
+            # np.random.choice needs an array-like; materialise once per draw.
+            pool_arr = np.fromiter(unqueried, dtype=np.int64, count=len(unqueried))
+            chosen = np.random.choice(pool_arr, take, replace=False).tolist()
             for idx in chosen:
-                unqueried.remove(idx)
-                state.attack_state["queried_indices"].append(int(idx))
-            selected_indices.extend(chosen)
+                idx_i = int(idx)
+                unqueried.discard(idx_i)
+                state.attack_state["queried_indices"].append(idx_i)
+                selected_indices.append(idx_i)
 
         x_list = [self.pool_dataset[idx][0] for idx in selected_indices]
         x = torch.stack(x_list)
@@ -249,16 +288,8 @@ class KnockoffNets(AttackRunner):
             recent_probs.append(row)
 
         if self.policy == "random":
-            last_train_count = state.attack_state.get("last_train_count", 0)
-            if state.attack_state["query_count"] - last_train_count >= self.train_every:
-                self._train_substitute(
-                    state,
-                    reset_model=False,
-                    epochs=self.online_train_epochs,
-                    store_key="online_substitute",
-                )
-                state.attack_state["substitute"] = state.attack_state.get("online_substitute")
-                state.attack_state["last_train_count"] = state.attack_state["query_count"]
+            # Paper §6 + official `transfer.py`: random strategy has no phase (a). Queries are
+            # only collected here; the substitute is trained from scratch in `_finalize_attack`.
             return
 
         top2 = torch.topk(probs, k=2, dim=1).values
@@ -273,9 +304,10 @@ class KnockoffNets(AttackRunner):
 
         substitute = state.attack_state.get("online_substitute")
         if substitute is not None:
-            substitute.eval()
             device = state.metadata.get("device", "cpu")
             substitute = substitute.to(device)
+            state.attack_state["online_substitute"] = substitute
+            substitute.eval()
             norm_mean, norm_std = self._get_normalization(state, device)
             with torch.no_grad():
                 x_input = (x_batch.to(device) - norm_mean) / norm_std
@@ -286,13 +318,6 @@ class KnockoffNets(AttackRunner):
                 else:
                     log_probs = F.log_softmax(logits, dim=1)
                 loss_reward = -(probs.to(device) * log_probs).sum(dim=1).detach().cpu()
-            substitute = substitute.cpu()
-            state.attack_state["online_substitute"] = substitute
-            if state.attack_state.get("substitute") is not None:
-                state.attack_state["substitute"] = substitute
-            gc.collect()
-            if str(device).startswith("cuda"):
-                torch.cuda.empty_cache()
         else:
             loss_reward = torch.zeros(probs.size(0))
 
@@ -376,24 +401,15 @@ class KnockoffNets(AttackRunner):
         if coarse_weights.numel() > 0:
             state.attack_state["coarse_policy_weights"] = coarse_weights
 
-        last_train_count = state.attack_state.get("last_train_count", 0)
-        if state.attack_state["query_count"] - last_train_count >= self.train_every:
-            self.logger.debug(
-                "Training substitute at query count %s...",
-                state.attack_state["query_count"],
-            )
-            self._train_substitute(
-                state,
-                reset_model=False,
-                epochs=self.online_train_epochs,
-                store_key="online_substitute",
-            )
-            state.attack_state["substitute"] = state.attack_state.get("online_substitute")
-            state.attack_state["last_train_count"] = state.attack_state["query_count"]
+        # Phase (a) — supplement §B.4: a single SGD step on the just-queried batch using a
+        # persistent online optimizer (NOT a fresh trainer over the accumulated transfer set).
+        self._phase_a_step(x_batch, probs, state)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         state.attack_state["queried_indices"] = []
-        state.attack_state["unqueried_indices"] = []
+        # `unqueried_indices` is a set for O(1) discard/lookup over large surrogate pools
+        # (e.g. ImageNet1k = 1.28M images). Order-insensitive: sampling reads via `list()`.
+        state.attack_state["unqueried_indices"] = set()
         state.attack_state["policy_weights"] = torch.zeros(self.num_classes)
         state.attack_state["coarse_policy_weights"] = torch.zeros(0)
         state.attack_state["action_counts"] = torch.zeros(self.num_classes)
@@ -438,25 +454,106 @@ class KnockoffNets(AttackRunner):
             shuffle=False,
         ).dataset
 
-        # IMPORTANT: keep num_classes aligned with the victim, not the surrogate pool.
-        # ImageNet/ImageFolder pools may have 1000 classes; we still steal a 10-class victim.
+        # Paper §4.1.2: action space = surrogate-dataset label space (e.g., 1000 for ILSVRC).
+        # `num_classes` stays victim K (substitute output dim, loss); a separate
+        # `pool_num_classes` drives the bandit action space.
         victim_num_classes = int(state.metadata.get("num_classes", self.num_classes))
         self.num_classes = victim_num_classes
-        state.attack_state["policy_weights"] = torch.zeros(self.num_classes)
 
-        self.class_to_indices = {i: [] for i in range(self.num_classes)}
-        for idx in range(len(self.pool_dataset)):
-            _, label = self.pool_dataset[idx]
-            # Map surrogate classes to victim classes via modulo if needed
-            class_id = int(label) % self.num_classes
-            if class_id not in self.class_to_indices:
-                self.class_to_indices[class_id] = []
-            self.class_to_indices[class_id].append(idx)
+        # Build class_to_indices keyed by the *actual* surrogate label (no `% num_classes`).
+        # Read labels via the dataset's `targets`/`samples` metadata when available — avoids
+        # calling `__getitem__` (which decodes images) just to read labels. For ImageFolder
+        # over 100k+ ILSVRC images this is the difference between minutes and seconds.
+        self.class_to_indices = {}
+        labels_attr = self._fast_pool_labels(self.pool_dataset)
+        if labels_attr is not None:
+            for idx, label in enumerate(labels_attr):
+                self.class_to_indices.setdefault(int(label), []).append(idx)
+        else:
+            for idx in range(len(self.pool_dataset)):
+                _, label = self.pool_dataset[idx]
+                self.class_to_indices.setdefault(int(label), []).append(idx)
 
-        state.attack_state["unqueried_indices"] = list(range(len(self.pool_dataset)))
+        self._sync_action_space_to_pool(state)
+
+        state.attack_state["unqueried_indices"] = set(range(len(self.pool_dataset)))
 
         if not state.attack_state["class_to_coarse"]:
             self._build_hierarchy(state)
+
+    @staticmethod
+    def _fast_pool_labels(pool: Any) -> Optional[List[int]]:
+        """Return per-index class labels without decoding images.
+
+        Returns None if the dataset doesn't expose label metadata cheaply (in which case
+        the caller falls back to iterating `pool[idx]`).
+        """
+        try:
+            pool_len = int(len(pool))
+        except Exception:
+            return None
+
+        def _coerce(seq: Any, expected: int) -> Optional[List[int]]:
+            """Materialize seq → list[int] of length `expected`. Reject Mock-like proxies."""
+            if seq is None:
+                return None
+            if isinstance(seq, torch.Tensor):
+                try:
+                    out = [int(t) for t in seq.tolist()]
+                except Exception:
+                    return None
+                return out if len(out) == expected else None
+            if not isinstance(seq, (list, tuple)):
+                return None  # don't trust iterables like Mock; require explicit sequence
+            if len(seq) != expected:
+                return None
+            try:
+                if seq and isinstance(seq[0], (tuple, list)):
+                    return [int(s[1]) for s in seq]
+                return [int(s) for s in seq]
+            except Exception:
+                return None
+
+        # torchvision ImageFolder/CIFAR/MNIST etc. expose `targets`.
+        labels = _coerce(getattr(pool, "targets", None), pool_len)
+        if labels is not None:
+            return labels
+        # ImageFolder also exposes `samples` as (path, class_idx) tuples.
+        labels = _coerce(getattr(pool, "samples", None), pool_len)
+        if labels is not None:
+            return labels
+        # Subset wrapping (e.g. torchvision Subset(base, indices)) — peek through.
+        base = getattr(pool, "dataset", None)
+        if base is not None and base is not pool:
+            indices = getattr(pool, "indices", None)
+            base_labels = KnockoffNets._fast_pool_labels(base)
+            if base_labels is not None:
+                if isinstance(indices, (list, tuple, torch.Tensor)):
+                    try:
+                        if isinstance(indices, torch.Tensor):
+                            indices = indices.tolist()
+                        return [base_labels[int(i)] for i in indices]
+                    except Exception:
+                        return None
+                # Wrapper without `indices` (forwards 1-to-1, e.g. our `SurrogateDataset`).
+                if len(base_labels) == pool_len:
+                    return base_labels
+        return None
+
+    def _sync_action_space_to_pool(self, state: BenchmarkState) -> None:
+        """Resize policy/action tensors to match the surrogate action space."""
+        if not self.class_to_indices:
+            return
+        max_class = max(int(c) for c in self.class_to_indices.keys())
+        # `ImageFolder` enumerates classes 0..N-1, but the lazy-init path may see arbitrary
+        # ints from a mock pool. Size by max(label)+1 to accommodate both.
+        pool_n = max(max_class + 1, len(self.class_to_indices))
+        if self.pool_num_classes == pool_n and state.attack_state.get("policy_weights") is not None \
+                and int(state.attack_state["policy_weights"].numel()) == pool_n:
+            return
+        self.pool_num_classes = pool_n
+        state.attack_state["policy_weights"] = torch.zeros(pool_n)
+        state.attack_state["action_counts"] = torch.zeros(pool_n)
 
     def _get_feature_extractor(self, device: str, input_channels: int = 3) -> nn.Module:
         if self.feature_arch == "resnet18":
@@ -586,6 +683,91 @@ class KnockoffNets(AttackRunner):
 
         class_probs = torch.softmax(class_weights[class_ids], dim=0).cpu().numpy()
         return int(np.random.choice(class_ids, p=class_probs))
+
+    def _ensure_online_model(self, state: BenchmarkState, device: str) -> Optional[nn.Module]:
+        """Return the persistent phase-(a) online model, creating it on first call.
+
+        Honors an existing `state.attack_state["online_substitute"]` (used by unit tests),
+        otherwise builds a fresh substitute from `sub_config`. Returns None only if no
+        substitute config is available and no model was pre-seeded into state.
+        """
+        existing = state.attack_state.get("online_substitute")
+        if existing is not None:
+            existing = existing.to(device)
+            state.attack_state["online_substitute"] = existing
+            return existing
+
+        sub_config = state.metadata.get("substitute_config", {}) or {}
+        arch = sub_config.get("arch")
+        if arch is None:
+            return None
+
+        width_mult = int(sub_config.get("width_mult", 1))
+        dropout_prob = float(sub_config.get("dropout_prob", 0.0))
+        model = create_substitute(
+            arch=arch,
+            num_classes=self.num_classes,
+            input_channels=state.metadata.get("input_shape", (3, 32, 32))[0],
+            width_mult=width_mult,
+            dropout_prob=dropout_prob,
+        ).to(device)
+        state.attack_state["online_substitute"] = model
+        return model
+
+    def _phase_a_step(
+        self,
+        x_batch: torch.Tensor,
+        y_probs: torch.Tensor,
+        state: BenchmarkState,
+    ) -> None:
+        """Supplement §B.4 phase (a): one SGD step on the just-queried (x, victim-probs) batch.
+
+        Persistent SGD optimizer (so momentum accumulates across the entire online phase, as
+        the paper specifies). No accumulated retrain — that's phase (b) in `_finalize_attack`.
+        """
+        device = state.metadata.get("device", "cpu")
+        model = self._ensure_online_model(state, device)
+        if model is None:
+            return
+
+        if (
+            self._phase_a_optimizer is None
+            or self._phase_a_optimizer_for is not model
+        ):
+            self._phase_a_optimizer = torch.optim.SGD(
+                model.parameters(),
+                lr=self.phase_a_lr,
+                momentum=self.phase_a_momentum,
+            )
+            self._phase_a_optimizer_for = model
+
+        model.train()
+        norm_mean, norm_std = self._get_normalization(state, device)
+        x_dev = (x_batch.to(device) - norm_mean) / norm_std
+        y_dev = y_probs.to(device)
+
+        output_mode = self.config.get("output_mode", "soft_prob")
+        self._phase_a_optimizer.zero_grad()
+        logits = model(x_dev)
+        if self.is_single_logit_binary:
+            # `y_probs` here is the binary distribution (B, 2); BCE needs positive-class only.
+            if y_dev.ndim == 2 and y_dev.size(1) == 2:
+                positive = y_dev[:, 1:2]
+            else:
+                positive = y_dev
+            loss = binary_bce_loss(logits, positive)
+        elif output_mode == "soft_prob":
+            targets = torch.clamp(y_dev, min=1e-10)
+            targets = targets / targets.sum(dim=1, keepdim=True)
+            log_probs = F.log_softmax(logits, dim=1)
+            loss = -(targets * log_probs).sum(dim=1).mean()
+        else:
+            loss = nn.CrossEntropyLoss()(logits, y_dev.long())
+        loss.backward()
+        self._phase_a_optimizer.step()
+
+        state.attack_state["online_substitute"] = model
+        state.attack_state["substitute"] = model
 
     def _train_substitute(
         self,
@@ -734,24 +916,40 @@ class KnockoffNets(AttackRunner):
             return total_loss / max(1, total_count)
 
         train_config = dict(sub_config)
+        # Phase (b): fully driven by `sub_config` (optimizer, lr, momentum, scheduler, patience).
+        # This keeps offline substitute training identical to other attackers' phase (b) so the
+        # benchmark stays a fair comparison; paper-specific knockoff knobs only affect phase (a).
         optimizer_config = dict(train_config.get("optimizer", {}))
         optimizer_config.setdefault("name", "sgd")
-        optimizer_config.setdefault("lr", self.paper_train_lr)
-        optimizer_config.setdefault("momentum", self.paper_train_momentum)
         train_config["optimizer"] = optimizer_config
-        # Respect the caller's epoch budget. This keeps online retraining fast
-        # (typically 1 epoch) while allowing a longer final offline retrain.
         train_config["max_epochs"] = max(1, int(epochs))
         train_config["patience"] = int(sub_config.get("patience", 20))
+
+        aug_spec = sub_config.get("augmentation")
+        aug_fn = build_augmentation_pipeline(
+            aug_spec,
+            norm_stats=resolve_pool_norm_stats(state),
+            input_size=tuple(state.metadata.get("input_shape", (3, 32, 32))[1:]),
+        )
+        if aug_fn is not None:
+            self.logger.info(
+                "[KnockoffNets] substitute training with augmentation pipeline=%s",
+                list((aug_spec or {}).get("pipeline", [])),
+            )
+
         trainer = SubstituteTrainer(train_config, device=device, logger=self.logger)
         steps_per_epoch = max(1, int(math.ceil(train_size / max(1, train_batch_size))))
+        # When augmentation is enabled, the aug pipeline handles normalization
+        # internally; the original identity-normalization preprocess_fn becomes a
+        # no-op and is replaced. eval_fn still uses the original preprocess_fn
+        # (closure-captured) so validation remains on raw normalized data.
         request = TrainRequest(
             model=model,
             train_loader=loader,
             val_loader=val_loader,
             eval_fn=eval_fn,
             loss_fn=loss_fn,
-            preprocess_fn=preprocess_fn,
+            preprocess_fn=aug_fn if aug_fn is not None else preprocess_fn,
             max_steps=int(train_config["max_epochs"]) * steps_per_epoch,
             validate_every=steps_per_epoch,
             patience=int(train_config["patience"]) * steps_per_epoch,
@@ -791,9 +989,17 @@ class KnockoffNets(AttackRunner):
             return
 
         self.logger.debug("Final offline retraining for KnockoffNets...")
+        # Drop the persistent phase-(a) SGD so phase (b) is genuinely from-scratch with
+        # whatever optimizer `sub_config` specifies (same path as ActiveThief/RandomBaseline).
+        self._phase_a_optimizer = None
+        self._phase_a_optimizer_for = None
+
         sub_config = state.metadata.get("substitute_config", {})
-        default_epochs = int(sub_config.get("max_epochs", self.train_epochs))
-        offline_epochs = self.offline_train_epochs or default_epochs
+        # Phase (b) epochs: follow `sub_config.max_epochs` like other attacks. Legacy
+        # `offline_train_epochs` config still overrides if explicitly set.
+        offline_epochs = self.offline_train_epochs
+        if offline_epochs is None:
+            offline_epochs = int(sub_config.get("max_epochs", 200))
         self._train_substitute(
             state,
             reset_model=True,

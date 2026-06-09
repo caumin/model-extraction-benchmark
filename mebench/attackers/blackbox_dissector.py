@@ -18,7 +18,12 @@ from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
 from mebench.data.loaders import create_dataloader, get_test_dataloader
 from mebench.models.substitute_factory import create_substitute
-from mebench.training import SubstituteTrainer, TrainRequest
+from mebench.training import (
+    SubstituteTrainer,
+    TrainRequest,
+    build_augmentation_pipeline,
+    resolve_pool_norm_stats,
+)
 from mebench.utils.binary import (
     binary_bce_loss,
     binary_distribution_from_logits,
@@ -67,10 +72,46 @@ class _LabeledTensorDataset(Dataset):
         return self.x[idx], self.y[idx]
 
 
+def _resolve_gradcam_target_layer(model: nn.Module, arch: Optional[str] = None) -> Optional[nn.Module]:
+    """[공식 일치] Per-arch GradCAM target layer (CIFAR setup in
+    repro/Blackbox-Dissector_official/attack.py:erase_and_save):
+
+    - resnet34/resnet18/resnet50 → layer3.<last block>
+    - vgg16 → features[28]
+    - densenet → dense3.<last block>
+    - others → layer4 / layer3 / last conv (fallback)
+
+    Returns None if the model has no Conv2d (e.g. test stubs); caller is
+    expected to fall back to a uniform heatmap in that case.
+    """
+    a = (arch or "").lower()
+    if "resnet" in a and hasattr(model, "layer3"):
+        return model.layer3
+    if a == "vgg16" and hasattr(model, "features"):
+        feats = model.features
+        if isinstance(feats, nn.Sequential) and len(feats) > 28:
+            return feats[28]
+        return feats
+    if "densenet" in a and hasattr(model, "dense3"):
+        return model.dense3
+    if hasattr(model, "layer4"):
+        return model.layer4
+    if hasattr(model, "layer3"):
+        return model.layer3
+    if hasattr(model, "features"):
+        return model.features
+    last_conv = None
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            last_conv = module
+    return last_conv
+
+
 def generate_gradcam_heatmap(
     model: nn.Module,
     x: torch.Tensor,
     target_class: int = None,
+    target_layer_module: Optional[nn.Module] = None,
 ) -> torch.Tensor:
     """Generate Grad-CAM heatmap for attention region.
 
@@ -78,38 +119,26 @@ def generate_gradcam_heatmap(
         model: Substitute model (must have final conv + fc)
         x: Input image [B, C, H, W]
         target_class: Target class (if None, use predicted class)
+        target_layer_module: Optional explicit target layer (per-arch from caller).
 
     Returns:
         Heatmap [B, H, W] normalized to [0, 1]
     """
     model.eval()
 
-    def _get_target_layer(net: nn.Module) -> nn.Module:
-        if hasattr(net, "layer4"):
-            return net.layer4
-        if hasattr(net, "layer3"):
-            return net.layer3
-        if hasattr(net, "dense4"):
-            return net.dense4
-        if hasattr(net, "dense3"):
-            return net.dense3
-        if hasattr(net, "features"):
-            features = net.features
-            if isinstance(features, nn.Sequential) and len(features) > 28:
-                return features[28]
-            return features
-        last_conv = None
-        for module in net.modules():
-            if isinstance(module, nn.Conv2d):
-                last_conv = module
-        if last_conv is None:
-            raise ValueError("Grad-CAM requires a Conv2d layer")
-        return last_conv
-
     activations: List[torch.Tensor] = []
     gradients: List[torch.Tensor] = []
 
-    target_layer = _get_target_layer(model)
+    target_layer = target_layer_module if target_layer_module is not None else _resolve_gradcam_target_layer(model)
+
+    if target_layer is None:
+        # No Conv2d available — return a uniform heatmap so callers degrade
+        # gracefully (used by tests that stub the substitute with a single
+        # Linear/Parameter).
+        b = int(x.shape[0])
+        h = int(x.shape[-2])
+        w = int(x.shape[-1])
+        return torch.full((b, h, w), 1.0 / float(h * w), device=x.device)
 
     def forward_hook(_module, _inputs, output):
         activations.append(output)
@@ -231,11 +260,12 @@ def random_erase_batch(
     img_batch: torch.Tensor,
     n: int = 10,
     sl: float = 0.02,
-    sh: float = 0.4,
+    sh: float = 0.1,
     r1: float = 0.3,
     r2: float = 3.3,
     fill_min: float = 0.0,
     fill_max: float = 1.0,
+    fill_mean: Optional[List[float]] = None,
 ) -> torch.Tensor:
     """Generate N random erasing variants for a batch of images.
 
@@ -283,7 +313,17 @@ def random_erase_batch(
     mask = (grid_y >= y1) & (grid_y < y1 + h_e) & (grid_x >= x1) & (grid_x < x1 + w_e)
     mask = mask.unsqueeze(1).expand(-1, c, -1, -1)
 
-    fill_values = torch.empty_like(imgs_repeated).uniform_(fill_min, fill_max)
+    # [공식 일치] deterministic mean fill (per-channel) when fill_mean is given.
+    if fill_mean is not None:
+        mean_t = torch.as_tensor(list(fill_mean), dtype=imgs_repeated.dtype, device=device)
+        # adapt channel count
+        if mean_t.numel() == 1 and c > 1:
+            mean_t = mean_t.expand(c)
+        elif mean_t.numel() == 3 and c == 1:
+            mean_t = mean_t[:1]
+        fill_values = mean_t.view(1, c, 1, 1).expand_as(imgs_repeated)
+    else:
+        fill_values = torch.empty_like(imgs_repeated).uniform_(fill_min, fill_max)
     erased_batch = imgs_repeated.clone()
     erased_batch[mask] = fill_values[mask]
 
@@ -367,12 +407,14 @@ def cam_erase_batch(
     img_batch: torch.Tensor,
     model: nn.Module,
     sl: float = 0.02,
-    sh: float = 0.4,
+    sh: float = 0.1,
     r1: float = 0.3,
     r2: float = 3.3,
     fill_min: float = 0.0,
     fill_max: float = 1.0,
     target_class: torch.Tensor = None,
+    fill_mean: Optional[List[float]] = None,
+    target_layer_module: Optional[nn.Module] = None,
 ) -> torch.Tensor:
     """Generate CAM-driven erasing variants for a batch of images.
 
@@ -386,7 +428,7 @@ def cam_erase_batch(
         erased_batch: [B, C, H, W]
     """
     b, c, h, w = img_batch.shape
-    heatmap = generate_gradcam_heatmap(model, img_batch, target_class)
+    heatmap = generate_gradcam_heatmap(model, img_batch, target_class, target_layer_module=target_layer_module)
 
     h_map, w_map = heatmap.shape[1], heatmap.shape[2]
     heatmap_flat = heatmap.view(b, -1)
@@ -434,7 +476,16 @@ def cam_erase_batch(
     mask = (grid_y >= y1) & (grid_y < y1 + h_e) & (grid_x >= x1) & (grid_x < x1 + w_e)
     mask = mask.unsqueeze(1).expand(-1, c, -1, -1)
 
-    fill_values = torch.empty_like(img_batch).uniform_(fill_min, fill_max)
+    # [공식 일치] deterministic mean fill (per-channel) when fill_mean given.
+    if fill_mean is not None:
+        mean_t = torch.as_tensor(list(fill_mean), dtype=img_batch.dtype, device=device)
+        if mean_t.numel() == 1 and c > 1:
+            mean_t = mean_t.expand(c)
+        elif mean_t.numel() == 3 and c == 1:
+            mean_t = mean_t[:1]
+        fill_values = mean_t.view(1, c, 1, 1).expand_as(img_batch)
+    else:
+        fill_values = torch.empty_like(img_batch).uniform_(fill_min, fill_max)
     erased_batch = img_batch.clone()
     erased_batch[mask] = fill_values[mask]
 
@@ -452,11 +503,18 @@ class BlackboxDissector(AttackRunner):
         # Hyperparameters
         self.n_variants = int(config.get("n_variants", 10))
 
-        # Algorithm 1 (psi) parameters
+        # [공식 일치] Algorithm 1 (psi) parameters: sl=0.02, sh=0.1 per
+        # PrioriPatchErasing/RandomErasing defaults in repro/Blackbox-Dissector_official.
         self.sl = float(config.get("sl", 0.02))
-        self.sh = float(config.get("sh", 0.4))
+        self.sh = float(config.get("sh", 0.1))
         self.r1 = float(config.get("r1", 0.3))
         self.r2 = float(config.get("r2", 3.3))
+        # [공식 일치] Erase fill is the dataset mean color (deterministic), not
+        # uniform random. Default uses CIFAR-10 mean; can be overridden via config.
+        # `fill_mean` may be a list of per-channel floats, or None (fall back to
+        # legacy uniform behaviour for backwards compat).
+        self.fill_mean = config.get("fill_mean", [0.4914, 0.4822, 0.4465])
+        # Legacy uniform fill kept for ablation only. Default is to use fill_mean.
         self.fill_min = float(config.get("fill_min", 0.0))
         self.fill_max = float(config.get("fill_max", 1.0))
 
@@ -546,9 +604,15 @@ class BlackboxDissector(AttackRunner):
     def _advance_iteration_if_needed(self, state: BenchmarkState) -> None:
         target_q = int(state.attack_state.get("iter_target_q", 0))
         if target_q > 0 and int(state.query_count) >= target_q:
-            teacher_model = state.attack_state.get("substitute")
-            self._generate_pseudo_labels(state, teacher_model)
-            self.train_substitute(state)
+            # [공식 일치] Two-pass training per iteration:
+            #   Pass 1: train substitute on labeled-only (no pseudo);
+            #   then generate pseudo labels using THIS pass-1 substitute on a
+            #   random `split`-sized subset of unlabeled.
+            #   Pass 2: train substitute from scratch on labeled + pseudo.
+            self.train_substitute(state, use_pseudo=False)
+            pass1_substitute = state.attack_state.get("substitute")
+            self._generate_pseudo_labels(state, pass1_substitute, n_pseudo=target_q)
+            self.train_substitute(state, use_pseudo=True)
 
             ptr = int(state.attack_state.get("iter_ptr", 0))
             targets = state.attack_state.get("iter_targets", [])
@@ -601,6 +665,12 @@ class BlackboxDissector(AttackRunner):
         state.attack_state["query_data_indices"].append(torch.tensor(indices))
 
         self._advance_iteration_if_needed(state)
+
+    def _select_gradcam_layer(self, model: nn.Module, state: BenchmarkState) -> nn.Module:
+        """[공식 일치] Per-arch target layer for GradCAM (CIFAR setup)."""
+        sub_config = state.metadata.get("substitute_config", {}) or {}
+        arch = str(sub_config.get("arch", "resnet18"))
+        return _resolve_gradcam_target_layer(model, arch=arch)
 
     def _initialize_state(self, state: BenchmarkState) -> None:
         """Initialize attack-specific state.
@@ -797,11 +867,15 @@ class BlackboxDissector(AttackRunner):
                 },
             )
 
-        # Stage B
+        # Stage B preparation — official's flow trains the model first on labeled-only,
+        # uses it to generate pseudo, then retrains with labeled+pseudo before the
+        # CAM-driven erasure selection runs.
         if len(state.attack_state.get("D_T_x", [])) > 0 and not state.attack_state.get("step1_trained", False):
-            teacher_model = state.attack_state.get("substitute")
-            self._generate_pseudo_labels(state, teacher_model)
-            self.train_substitute(state)
+            self.train_substitute(state, use_pseudo=False)
+            pass1_substitute = state.attack_state.get("substitute")
+            target_q = int(state.attack_state.get("iter_target_q", 0))
+            self._generate_pseudo_labels(state, pass1_substitute, n_pseudo=target_q)
+            self.train_substitute(state, use_pseudo=True)
             state.attack_state["step1_trained"] = True
             substitute = state.attack_state.get("substitute")
         budget_rem = int(state.attack_state.get("stage_b_remaining", 0))
@@ -867,26 +941,39 @@ class BlackboxDissector(AttackRunner):
             imgs_repeated = imgs.unsqueeze(1).repeat(1, self.n_variants, 1, 1, 1).view(-1, *imgs.shape[1:])
             labels_repeated = labels.unsqueeze(1).repeat(1, self.n_variants).view(-1)
             
+            # [공식 일치] CAM-driven erase with mean-color fill.
             variants = cam_erase_batch(
                 imgs_repeated,
                 substitute,
                 sl=self.sl, sh=self.sh, r1=self.r1, r2=self.r2,
                 fill_min=self.fill_min, fill_max=self.fill_max,
-                target_class=None
+                fill_mean=getattr(self, "fill_mean", None),
+                target_class=None,
+                target_layer_module=self._select_gradcam_layer(substitute, state),
             )
             
             with torch.no_grad():
                 logits = substitute(variants)
                 if self.is_single_logit_binary:
                     probs = binary_distribution_from_logits(logits)
+                    log_probs = torch.log(probs.clamp_min(1e-12))
                 else:
                     probs = F.softmax(logits, dim=1)
-                
-            p_y0 = probs.gather(1, labels_repeated.unsqueeze(1)).squeeze(1)
-            p_y0 = p_y0.view(batch_size, self.n_variants)
-            
-            best_variant_indices = p_y0.argmin(dim=1)
-            
+                    log_probs = F.log_softmax(logits, dim=1)
+
+            # [공식 일치] erase_and_save() in attack.py:
+            #   tmp_score = [soft_cross_entropy(p, one_hot) for p in tmp_e_pres]
+            #   _, t_indices = tmp_score.max(0)
+            # i.e. select the variant that MAXIMIZES soft-CE(softmax(model(variant)),
+            # one_hot(victim_label)). For one-hot target this equals
+            # -log(p[victim_label]). With log_probs (per the official soft_cross_entropy
+            # over softmax-then-log) the score is `-log_probs[victim_label]`.
+            score_per_variant = -log_probs.gather(1, labels_repeated.unsqueeze(1)).squeeze(1)
+            score_per_variant = score_per_variant.view(batch_size, self.n_variants)
+            best_variant_indices = score_per_variant.argmax(dim=1)
+
+            # Then top-k by p.max() of the chosen variant (= confidence on its
+            # most-likely class), matching the official outer ranking.
             all_msp = probs.max(dim=1)[0].view(batch_size, self.n_variants)
             best_msps = all_msp.gather(1, best_variant_indices.unsqueeze(1)).squeeze(1)
             
@@ -924,13 +1011,36 @@ class BlackboxDissector(AttackRunner):
             },
         )
 
-    def _generate_pseudo_labels(self, state: BenchmarkState, teacher: Optional[nn.Module]) -> None:
+    def _generate_pseudo_labels(
+        self,
+        state: BenchmarkState,
+        teacher: Optional[nn.Module],
+        n_pseudo: Optional[int] = None,
+    ) -> None:
+        """[공식 일치] Generate pseudo-labels for at most `n_pseudo` randomly
+        sampled unlabeled images (matches `random.sample(unlabeled_indices, split)`
+        in get_pseudo_label_with_random). When `n_pseudo` is None, fall back to
+        the current iteration's labeled-target as a proxy for `split`.
+        """
         pseudo_labels: dict[int, torch.Tensor] = {}
         if teacher is None:
             state.attack_state["pseudo_labels"] = pseudo_labels
             return
 
-        unlabeled_indices = state.attack_state.get("unlabeled_indices", [])
+        all_unlabeled = state.attack_state.get("unlabeled_indices", [])
+        if len(all_unlabeled) == 0:
+            state.attack_state["pseudo_labels"] = pseudo_labels
+            return
+
+        # Sample subset; default to current iteration's target_q (= "split").
+        if n_pseudo is None:
+            n_pseudo = int(state.attack_state.get("iter_target_q", 0)) or len(all_unlabeled)
+        n_pseudo = max(1, min(int(n_pseudo), len(all_unlabeled)))
+        if n_pseudo < len(all_unlabeled):
+            unlabeled_indices = list(np.random.choice(all_unlabeled, n_pseudo, replace=False))
+        else:
+            unlabeled_indices = list(all_unlabeled)
+
         if len(unlabeled_indices) == 0:
             state.attack_state["pseudo_labels"] = pseudo_labels
             return
@@ -988,6 +1098,7 @@ class BlackboxDissector(AttackRunner):
                 current_idx_ptr += batch_size
 
                 x_batch = x_batch.to(device, non_blocking=str(device).startswith("cuda"))
+                # [공식 일치] random-erase variants with mean-color fill.
                 x_variants = random_erase_batch(
                     x_batch,
                     n=self.n_variants,
@@ -997,6 +1108,7 @@ class BlackboxDissector(AttackRunner):
                     r2=self.r2,
                     fill_min=self.fill_min,
                     fill_max=self.fill_max,
+                    fill_mean=getattr(self, "fill_mean", None),
                 )
                 x_variants_norm = (x_variants - norm_mean) / norm_std
                 logits_variants = teacher(x_variants_norm)
@@ -1019,13 +1131,14 @@ class BlackboxDissector(AttackRunner):
         if str(device).startswith("cuda"):
             torch.cuda.empty_cache()
 
-    def train_substitute(self, state: BenchmarkState) -> None:
-        """Train substitute model with Self-KD on Unlabeled Data.
+    def train_substitute(self, state: BenchmarkState, use_pseudo: bool = True) -> None:
+        """Train substitute model on labeled queries (and optionally pseudo-labeled
+        unlabeled data, when ``use_pseudo=True``).
 
-        Loss = CE(victim_labels) + alpha * Consistency(unlabeled_data)
-
-        Args:
-            state: Current benchmark state
+        [공식 일치] The official BD pipeline runs two trainings per iteration:
+          * Pass 1: labeled-only (``use_pseudo=False``) — its output is used as
+            the teacher for pseudo-label generation.
+          * Pass 2: labeled + pseudo (``use_pseudo=True``).
         """
         device = state.metadata.get("device", "cpu")
         d_t_x = state.attack_state.get("D_T_x", [])
@@ -1133,23 +1246,14 @@ class BlackboxDissector(AttackRunner):
         )
 
         # Teacher model = frozen copy of previous substitute (Eq. 7)
-        teacher_model = state.attack_state.get("substitute")
-        teacher: Optional[nn.Module]
-        if teacher_model is None:
-            teacher = None
-        else:
-            teacher = copy.deepcopy(teacher_model)
-            teacher.eval()
-            for p in teacher.parameters():
-                p.requires_grad_(False)
-
-        if teacher is not None and len(state.attack_state.get("pseudo_labels", {})) == 0:
-            self._generate_pseudo_labels(state, teacher)
-
-        pseudo_labels = state.attack_state.get("pseudo_labels", {})
+        # [공식 일치] Pass 1 (use_pseudo=False) trains on labeled only. Pass 2
+        # (use_pseudo=True) consumes the pseudo labels prepared by the caller
+        # using the pass-1 substitute as teacher. We do NOT auto-regenerate
+        # pseudo labels here (caller controls the pipeline).
+        pseudo_labels = state.attack_state.get("pseudo_labels", {}) if use_pseudo else {}
         pseudo_loader = None
         pseudo_iter = None
-        if len(pseudo_labels) > 0:
+        if use_pseudo and len(pseudo_labels) > 0:
             pseudo_indices = list(pseudo_labels.keys())
 
             pseudo_loader = torch.utils.data.DataLoader(
@@ -1192,8 +1296,22 @@ class BlackboxDissector(AttackRunner):
         norm_mean = torch.zeros((1, channels, 1, 1), device=device)
         norm_std = torch.ones((1, channels, 1, 1), device=device)
 
+        aug_spec = sub_config.get("augmentation")
+        aug_fn = build_augmentation_pipeline(
+            aug_spec,
+            norm_stats=resolve_pool_norm_stats(state),
+            input_size=tuple(input_shape[1:]),
+        )
+        if aug_fn is not None:
+            self.logger.info(
+                "[BlackBoxDissector] substitute training with augmentation pipeline=%s",
+                list((aug_spec or {}).get("pipeline", [])),
+            )
+
         def step_fn(model_local: nn.Module, x_batch: torch.Tensor, y_batch: torch.Tensor) -> torch.Tensor:
             nonlocal pseudo_iter
+            if aug_fn is not None:
+                x_batch = aug_fn(x_batch)
             x_norm = (x_batch - norm_mean) / norm_std
             outputs = model_local(x_norm)
             if self.is_single_logit_binary:
@@ -1211,6 +1329,8 @@ class BlackboxDissector(AttackRunner):
 
                 x_pseudo = x_pseudo.to(device)
                 y_pseudo = y_pseudo.to(device)
+                if aug_fn is not None:
+                    x_pseudo = aug_fn(x_pseudo)
                 x_pseudo_norm = (x_pseudo - norm_mean) / norm_std
                 logits_pseudo = model_local(x_pseudo_norm)
                 loss_kd = soft_cross_entropy(logits_pseudo, y_pseudo).mean()
