@@ -34,6 +34,17 @@ _OFF_RE = re.compile(
 # category.
 _OPTIMIZER_SUFFIX_RE = re.compile(r"_(adamw)$")
 
+# Substitute architecture markers. Used to split SET-B (and any future set)
+# results between the legacy substitute (no marker) and a newer surrogate-
+# victim unified substitute. For SET-B specifically, `_sub_resnet34` runs are
+# routed to the virtual set_id "SET-B1-main" while bare SET-B1 runs (resnet18)
+# become "SET-B1-legacy" and appear in the paper appendix.
+_SUBSTITUTE_SUFFIX_RE = re.compile(r"_sub_(resnet34|resnet18|xie2019|lenet_mnist)$")
+_LEGACY_SET_REMAP = {"SET-B1": "SET-B1-legacy"}  # bare SET-B1 → legacy
+_MAIN_SET_REMAP = {
+    ("SET-B1", "resnet34"): "SET-B1-main",
+}
+
 # Augmentation marker suffixes. Two variants emit different downstream
 # columns:
 #   _aug       → 'strong' (SwiftThief-style: RRC scale 0.2 + HFlip + CJ + Gray)
@@ -96,36 +107,58 @@ def _classify_run(run_name: str) -> Optional[dict]:
     # Strip optional aug-variant suffix FIRST so the optimizer detection below
     # can still recognise canonical names. Variants are scanned longest-first
     # (_aug_soft before _aug). Only strip when the remainder (with or without
-    # optimizer suffix) matches _BASE_RE.
+    # optimizer suffix and substitute suffix) matches _BASE_RE.
     augmentation = ""  # "" | "strong" | "soft"
     candidate = base_name
+
+    def _is_canonical_after_optional_opt_and_sub(name: str) -> bool:
+        """True if `name` ends in optimizer+/sub_+/base, with each strip optional."""
+        s = name
+        m_opt = _OPTIMIZER_SUFFIX_RE.search(s)
+        if m_opt:
+            s = s[: m_opt.start()]
+        m_sub = _SUBSTITUTE_SUFFIX_RE.search(s)
+        if m_sub:
+            s = s[: m_sub.start()]
+        return bool(_BASE_RE.match(s))
+
     for suffix, label in _AUG_VARIANT_SUFFIXES:
         if candidate.endswith(suffix):
             stripped_aug = candidate[: -len(suffix)]
-            m_opt_check = _OPTIMIZER_SUFFIX_RE.search(stripped_aug)
-            if m_opt_check and _BASE_RE.match(stripped_aug[: m_opt_check.start()]):
-                candidate = stripped_aug
-                augmentation = label
-                break
-            if _BASE_RE.match(stripped_aug):
+            if _is_canonical_after_optional_opt_and_sub(stripped_aug):
                 candidate = stripped_aug
                 augmentation = label
                 break
 
-    # Optimizer suffix may sit between the seed and the legacy __tag. Strip it
-    # only when the resulting name matches the canonical main pattern, so that
-    # _ablation_adamw / _p2_adamw_* etc. remain in their own categories.
+    # Optimizer suffix may sit between the seed (or sub_X) and end.
     optimizer = "sgd"
     m_opt = _OPTIMIZER_SUFFIX_RE.search(candidate)
     if m_opt:
         stripped = candidate[: m_opt.start()]
-        if _BASE_RE.match(stripped):
+        # Stripped form must be canonical, with sub_X allowed in tail position.
+        check = stripped
+        m_sub_check = _SUBSTITUTE_SUFFIX_RE.search(check)
+        if m_sub_check:
+            check = check[: m_sub_check.start()]
+        if _BASE_RE.match(check):
             candidate = stripped
             optimizer = m_opt.group(1)
+
+    # Substitute suffix (e.g. _sub_resnet34): strip + remember.
+    substitute = ""
+    m_sub = _SUBSTITUTE_SUFFIX_RE.search(candidate)
+    if m_sub and _BASE_RE.match(candidate[: m_sub.start()]):
+        candidate = candidate[: m_sub.start()]
+        substitute = m_sub.group(1)
 
     m = _BASE_RE.match(candidate)
     if m:
         set_id, attack, label, budget, seed = m.groups()
+        # Apply set_id remap so SET-B legacy/main split into virtual sets.
+        if substitute and (set_id, substitute) in _MAIN_SET_REMAP:
+            set_id = _MAIN_SET_REMAP[(set_id, substitute)]
+        elif not substitute and set_id in _LEGACY_SET_REMAP:
+            set_id = _LEGACY_SET_REMAP[set_id]
         return {
             "category": "legacy" if legacy_tag else "main",
             "run_name": run_name,
@@ -138,6 +171,7 @@ def _classify_run(run_name: str) -> Optional[dict]:
             "legacy_tag": legacy_tag,
             "optimizer": optimizer,
             "augmentation": augmentation,
+            "substitute": substitute or "default",
         }
 
     return {
@@ -194,7 +228,7 @@ def _annotate_attack_name(attack_name: str, variant_tag: Optional[str]) -> str:
 # Paper table display settings
 # ---------------------------------------------------------------------------
 
-CANONICAL_SETS = {"SET-A1", "SET-B1", "SET-C1"}
+CANONICAL_SETS = {"SET-A1", "SET-B1-legacy", "SET-B1-main", "SET-C1"}
 LOW_BUDGET_MAX = 100_000  # queries; above this = data-free / high-budget tier
 
 # Tables with fewer rows than this are too sparse to read as a benchmark and
@@ -208,9 +242,13 @@ MIN_TABLE_ROWS = 2
 # auxiliary `paper_tables_baseline.tex` file.
 COMBINED_PAPER_ORDER: List[Tuple[str, str]] = [
     ("SET-A1", "sgd"),
-    ("SET-B1", "adamw"),
-    ("SET-B1", "sgd"),
+    ("SET-A1", "adamw"),
+    ("SET-B1-main", "adamw"),
+    ("SET-B1-main", "sgd"),
+    ("SET-B1-legacy", "adamw"),  # appendix
+    ("SET-B1-legacy", "sgd"),    # appendix
     ("SET-C1", "sgd"),
+    ("SET-C1", "adamw"),
 ]
 
 # Per-Set master ordering: for each canonical Set, the list of
@@ -220,27 +258,42 @@ COMBINED_PAPER_ORDER: List[Tuple[str, str]] = [
 # all three variants (baseline / strong / soft) since the comparison is
 # directly informative.
 PER_SET_PAPER_ORDER: Dict[str, List[Tuple[str, str]]] = {
+    # SET-A1: 5 col — baseline / +Aug / +Aug-soft / AdamW / AdamW+Aug.
     "SET-A1": [
         ("sgd", ""),
         ("sgd", "strong"),
         ("sgd", "soft"),
+        ("adamw", ""),
+        ("adamw", "strong"),
     ],
-    # Optimizer-grouped: SGD(Base/+Aug) | AdamW(Base/+Aug). The unified table
-    # renderer emits a multi-row header so the optimizer grouping is visible.
-    "SET-B1": [
+    # SET-B1-main: 4 col with resnet34 substitute (surrogate-victim unified).
+    # SGD column reported as negative finding (~44–47%, learning insufficient
+    # for resnet34 at 20k budget; see PROJECT_COMPENDIUM.md §2.8).
+    "SET-B1-main": [
         ("sgd",   ""),
         ("sgd",   "strong"),
         ("adamw", ""),
         ("adamw", "strong"),
     ],
+    # SET-B1-legacy: 4 col with resnet18 substitute (paper appendix only).
+    "SET-B1-legacy": [
+        ("sgd",   ""),
+        ("sgd",   "strong"),
+        ("adamw", ""),
+        ("adamw", "strong"),
+    ],
+    # SET-C1: 4 col — added AdamW + AdamW+Aug under 4-col unification.
     "SET-C1": [
         ("sgd", ""),
         ("sgd", "strong"),
+        ("adamw", ""),
+        ("adamw", "strong"),
     ],
 }
 
 # Order in which Sets appear in the main `paper_tables.tex` master.
-MAIN_MASTER_SETS: List[str] = ["SET-A1", "SET-B1", "SET-C1"]
+# SET-B1-legacy is intentionally placed last so it reads as appendix material.
+MAIN_MASTER_SETS: List[str] = ["SET-A1", "SET-B1-main", "SET-C1", "SET-B1-legacy"]
 
 # Attacks excluded from the public v1 benchmark tables. See top-of-file notes
 # in mebench/attackers/{game,es_attack}.py for the parity status.
@@ -702,7 +755,7 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
 
     # Order SETs by canonical paper order (SET-A1 → SET-B1 → SET-C1) but only
     # include those that have data.
-    _SET_ORDER = ["SET-A1", "SET-B1", "SET-C1"]
+    _SET_ORDER = ["SET-A1", "SET-B1-main", "SET-C1", "SET-B1-legacy"]
 
     with open(f"{output_dir}/report.md", "w") as f:
         f.write("# Final Benchmark Results\n\n")
