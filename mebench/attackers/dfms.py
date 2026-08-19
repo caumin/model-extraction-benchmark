@@ -619,11 +619,18 @@ class DFMSHL(AttackRunner):
             self.clone = base_clone
             self._eval_substitute = None
 
-        self.clone_optimizer = optim.SGD(
-            self.clone.parameters(),
-            lr=float(lr),
-            momentum=float(self.student_momentum),
-            weight_decay=float(self.student_weight_decay),
+        # Config-driven optimizer construction (consistent with other data-free
+        # attacks). Defaults preserve paper-canonical SGD baseline: when nothing
+        # in `sub_config.optimizer` overrides, we use SGD with the stage's
+        # `lr` argument and DFMS-specific momentum/weight_decay.
+        sub_config = self.state.metadata.get("substitute_config", {}) or {}
+        opt_spec = dict(sub_config.get("optimizer") or {})
+        opt_spec.setdefault("name", "sgd")
+        opt_spec.setdefault("lr", float(lr))
+        opt_spec.setdefault("momentum", float(self.student_momentum))
+        opt_spec.setdefault("weight_decay", float(self.student_weight_decay))
+        self.clone_optimizer = self._build_optimizer(
+            self.clone.parameters(), opt_spec
         )
         self.clone_scheduler = optim.lr_scheduler.CosineAnnealingLR(
             self.clone_optimizer,
@@ -1506,12 +1513,13 @@ class DFMSHL(AttackRunner):
         # Benchmark scaling unification (DFME-style): clone consumes [0,1] inputs.
         self.clone = base_clone
         self._eval_substitute = None
-        self.clone_optimizer = optim.SGD(
-            self.clone.parameters(),
-            lr=float(opt_params.get("lr", self.clone_lr)),
-            momentum=float(opt_params.get("momentum", 0.9)),
-            weight_decay=float(opt_params.get("weight_decay", 5e-4)),
-        )
+        # Config-driven optimizer (consistent with `_reset_clone_for_stage`).
+        opt_spec = dict(opt_params)
+        opt_spec.setdefault("name", "sgd")
+        opt_spec.setdefault("lr", float(self.clone_lr))
+        opt_spec.setdefault("momentum", 0.9)
+        opt_spec.setdefault("weight_decay", 5e-4)
+        self.clone_optimizer = self._build_optimizer(self.clone.parameters(), opt_spec)
 
         if self.use_clone_cosine:
             max_budget = self.state.metadata.get("max_budget", 1000)

@@ -677,7 +677,9 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
 
     if selected_groups:
         df = pd.concat(selected_groups, ignore_index=True)
-    df.to_csv(f"{output_dir}/final_metrics_selected.csv", index=False)
+    # `final_metrics_selected.csv` intentionally not written — it is a strict
+    # subset of `final_metrics_raw.csv` (one track per key) and adds no new
+    # information; keep it only in memory for the aggregate step below.
 
     # 2. Aggregate Mean/Std (Safe Explicit Method)
     grouped = df.groupby(["Set", "Attack", "Budget", "Optimizer", "Augmentation"])
@@ -757,124 +759,43 @@ def analyze_results(root_dir="runs", output_dir="analysis_results"):
     # include those that have data.
     _SET_ORDER = ["SET-A1", "SET-B1-main", "SET-C1", "SET-B1-legacy"]
 
-    with open(f"{output_dir}/report.md", "w") as f:
-        f.write("# Final Benchmark Results\n\n")
-        f.write("Per-Set tables; columns are (optimizer × augmentation) variants "
-                "ordered per PER_SET_PAPER_ORDER.\n\n")
+    # Console preview of per-Set × per-Budget accuracy pivot (readable only;
+    # no side-effect files). All persisted matrices are consolidated in
+    # `paper_tables.tex` / `paper_tables.md` produced downstream.
+    def _pivot_to_md(pivot: pd.DataFrame) -> str:
+        disp = pivot.copy()
+        for col in disp.columns:
+            disp[col] = disp[col].apply(
+                lambda v: _fmt_cell_md(v, bold=False) if isinstance(v, str) else "--"
+            )
+        return disp.to_markdown()
 
-        for set_id in [s for s in _SET_ORDER if s in summary_df["Set"].unique()]:
-            entries = PER_SET_PAPER_ORDER.get(set_id, [])
-            if not entries:
+    for set_id in [s for s in _SET_ORDER if s in summary_df["Set"].unique()]:
+        entries = PER_SET_PAPER_ORDER.get(set_id, [])
+        if not entries:
+            continue
+        ordered_vars = [_variant_label(o, a) for o, a in entries]
+        set_df = summary_df[summary_df["Set"] == set_id]
+        if set_df.empty:
+            continue
+        print(f"\n=== {set_id} ===")
+        print(f"Variants (in column order): {ordered_vars}")
+        for b in sorted(set_df["Budget"].unique()):
+            subset = set_df[set_df["Budget"] == b]
+            if subset.empty:
                 continue
-            ordered_vars = [_variant_label(o, a) for o, a in entries]
-            set_df = summary_df[summary_df["Set"] == set_id]
-            if set_df.empty:
-                continue
+            print(f"\n--- {set_id} | Budget: {b} ---")
+            try:
+                pivot_acc = subset.pivot(index="Attack", columns="Variant", values="Accuracy")
+                ordered_present = [c for c in ordered_vars if c in pivot_acc.columns]
+                extras = [c for c in pivot_acc.columns if c not in ordered_present]
+                pivot_acc = pivot_acc[ordered_present + extras]
+                print("[Accuracy %]")
+                print(_pivot_to_md(pivot_acc))
+            except Exception as e:
+                print(f"ERROR: pivot failed for {set_id}/budget={b}: {e}")
 
-            set_slug = set_id.lower().replace("-", "")
-            budgets_in_set = sorted(set_df["Budget"].unique())
-
-            f.write(f"## {set_id}\n\n")
-            print(f"\n=== {set_id} ===")
-            print(f"Variants (in column order): {ordered_vars}")
-
-            # Pretty-print as percent with subscript-style ± (markdown uses ±).
-            def _pivot_to_md(pivot: pd.DataFrame) -> str:
-                disp = pivot.copy()
-                for col in disp.columns:
-                    disp[col] = disp[col].apply(
-                        lambda v: _fmt_cell_md(v, bold=False) if isinstance(v, str) else "--"
-                    )
-                return disp.to_markdown()
-
-            for b in budgets_in_set:
-                subset = set_df[set_df["Budget"] == b]
-                if subset.empty:
-                    continue
-                print(f"\n--- {set_id} | Budget: {b} ---")
-                f.write(f"### Budget {b}\n\n")
-
-                try:
-                    pivot_acc = subset.pivot(index="Attack", columns="Variant", values="Accuracy")
-                    pivot_agr = subset.pivot(index="Attack", columns="Variant", values="Agreement")
-
-                    # Re-order columns by PER_SET_PAPER_ORDER. Variants not in
-                    # the order list (e.g. unexpected combos) are appended.
-                    def _reorder(piv: pd.DataFrame) -> pd.DataFrame:
-                        ordered_present = [c for c in ordered_vars if c in piv.columns]
-                        extras = [c for c in piv.columns if c not in ordered_present]
-                        return piv[ordered_present + extras]
-
-                    pivot_acc = _reorder(pivot_acc)
-                    pivot_agr = _reorder(pivot_agr)
-
-                    # Keep raw 0..1 values in CSVs (downstream parsing).
-                    pivot_acc.to_csv(f"{output_dir}/final_accuracy_matrix_{set_slug}_{b}.csv")
-                    pivot_agr.to_csv(f"{output_dir}/final_agreement_matrix_{set_slug}_{b}.csv")
-
-                    md_acc = _pivot_to_md(pivot_acc)
-                    md_agr = _pivot_to_md(pivot_agr)
-
-                    print("[Accuracy %]")
-                    print(md_acc)
-
-                    f.write("#### Accuracy (mean ± std, %)\n\n")
-                    f.write(md_acc)
-                    f.write("\n\n")
-
-                    f.write("#### Agreement / Fidelity (mean ± std, %)\n\n")
-                    f.write(md_agr)
-                    f.write("\n\n")
-
-                except Exception as e:
-                    print(f"ERROR: pivot failed for {set_id}/budget={b}: {e}")
-
-    # LaTeX (Overleaf-style) report: per-Set Acc/Fidelity matrix with
-    # (optimizer × aug) variants as columns. Mirrors the new report.md layout.
-    latex_path = Path(output_dir) / "report.tex"
-    with open(latex_path, "w") as f:
-        f.write("% Auto-generated. Per-Set Acc/Fidelity matrix; "
-                "columns are (optimizer × augmentation) variants.\n\n")
-        for set_id in [s for s in _SET_ORDER if s in summary_df["Set"].unique()]:
-            entries = PER_SET_PAPER_ORDER.get(set_id, [])
-            if not entries:
-                continue
-            ordered_vars = [_variant_label(o, a) for o, a in entries]
-            set_df = summary_df[summary_df["Set"] == set_id]
-            if set_df.empty:
-                continue
-            set_slug = set_id.lower().replace("-", "")
-            budgets_in_set = sorted(set_df["Budget"].unique())
-
-            for b in budgets_in_set:
-                subset = set_df[set_df["Budget"] == b]
-                if subset.empty:
-                    continue
-                subset = subset.copy()
-                subset["Acc/Fidelity"] = subset["Accuracy"] + " / " + subset["Agreement"]
-                pivot_combined = subset.pivot(index="Attack", columns="Variant", values="Acc/Fidelity")
-                ordered_present = [c for c in ordered_vars if c in pivot_combined.columns]
-                extras = [c for c in pivot_combined.columns if c not in ordered_present]
-                pivot_combined = pivot_combined[ordered_present + extras]
-                pivot_combined = pivot_combined.map(_latex_pm)
-                pivot_combined.to_csv(
-                    f"{output_dir}/final_acc_fidelity_matrix_{set_slug}_{b}.csv"
-                )
-
-                col_format = "l" + "c" * len(pivot_combined.columns)
-                table = pivot_combined.to_latex(
-                    escape=False, na_rep="-", column_format=col_format,
-                )
-                f.write("\\begin{table}[t]\n\\centering\n")
-                f.write(
-                    f"\\caption{{Final results on {set_id} at budget {b} queries "
-                    f"(Acc/Fidelity by optimizer$\\times$aug).}}\n"
-                )
-                f.write(f"\\label{{tab:final-{set_slug}-{b}}}\n")
-                f.write(table)
-                f.write("\\end{table}\n\n")
-
-    # 3. Paper-quality per-dataset tables (Option A)
+    # 3. Paper-quality per-dataset tables (final .tex + .md)
     _generate_per_dataset_tables(summary_df, output_dir)
 
     print(f"\nSaved main analysis to {output_dir}/")
@@ -1060,24 +981,6 @@ def _generate_per_dataset_tables(summary_df: pd.DataFrame, output_dir: str) -> N
         acc_score = acc if acc is not None else float("-inf")
         return (label_rank, -acc_score, r["Display"])
 
-    tex_blocks_by_opt: Dict[str, List[str]] = {
-        opt: [
-            f"% Per-dataset paper tables (optimizer={opt}, no augmentation).\n"
-            "% Required LaTeX packages: \\usepackage{booktabs}\n\n"
-        ]
-        for opt in unique_optimizers
-    }
-    tex_blocks_by_opt_aug: Dict[str, List[str]] = {
-        opt: [
-            f"% Per-dataset paper tables (optimizer={opt}, with augmentation).\n"
-            "% Required LaTeX packages: \\usepackage{booktabs}\n\n"
-        ]
-        for opt in unique_optimizers
-    }
-    # Per-(set, optimizer, augmentation) tex block, keyed for combined ordering.
-    # Augmentation value is "" | "strong" | "soft".
-    tex_block_by_triple: Dict[Tuple[str, str, str], str] = {}
-    compare_block_by_pair: Dict[Tuple[str, str], str] = {}
     md_lines: List[str] = ["# Paper Tables — Per-Dataset\n"]
 
     # Decide which (set, optimizer, aug="") pair gets the full-notation
@@ -1101,13 +1004,16 @@ def _generate_per_dataset_tables(summary_df: pd.DataFrame, output_dir: str) -> N
     _AUG_ORDER = ["", "strong", "soft"]
     aug_present = [a for a in _AUG_ORDER if (rdf["Augmentation"] == a).any()]
 
+    # Only produce Markdown preview per (set × optimizer × augmentation) —
+    # no intermediate .tex files. All final .tex output is generated below via
+    # `_build_unified_per_set_table` split by tier (pool-based / data-free).
     for set_id in sorted(CANONICAL_SETS):
         sdf_all = rdf[rdf["Set"] == set_id]
         if sdf_all.empty:
             continue
         section_added = False
 
-        # Loop over optimizers, then augmentation flavour
+        # Loop over optimizers, then augmentation flavour (markdown preview only)
         for optimizer in sorted(sdf_all["Optimizer"].unique()):
             opt_df = sdf_all[sdf_all["Optimizer"] == optimizer]
             if opt_df.empty:
@@ -1179,70 +1085,8 @@ def _generate_per_dataset_tables(summary_df: pd.DataFrame, output_dir: str) -> N
                 else:
                     caption_body += opt_tag
 
-                set_slug = set_id.lower().replace("-", "")
-                aug_suffix_map = {"strong": "_aug", "soft": "_aug_soft"}
-                aug_suffix = aug_suffix_map.get(augmentation, "")
-
                 # ------------------------------------------------------------------
-                # LaTeX
-                # ------------------------------------------------------------------
-                tex: List[str] = []
-                tex.append(r"\begin{table}[t]")
-                tex.append(r"\centering")
-                tex.append(caption_body)
-                tex.append(f"\\label{{tab:{set_slug}-{optimizer}{aug_suffix}}}")
-                tex.append(r"\begin{tabular}{ll rr}")
-                tex.append(r"\toprule")
-                tex.append(r"Method & Label & Acc & Fid \\")
-
-                def _tex_tier(rows: List[dict], tier_label: str,
-                              best_by_label: Dict[str, Tuple[Optional[float], Optional[float]]]) -> List[str]:
-                    if not rows:
-                        return []
-                    out_lines: List[str] = []
-                    out_lines.append(r"\midrule")
-                    out_lines.append(
-                        f"\\multicolumn{{4}}{{l}}{{\\textit{{{tier_label}}}}} \\\\"
-                    )
-                    out_lines.append(r"\midrule")
-                    for r in rows:
-                        single = _is_single_seed(r["Accuracy"])
-                        dagger = r"$^\dag$" if (single and not all_single) else ""
-                        b_acc, b_agr = best_by_label.get(r["QueryType"], (None, None))
-                        acc_cell = _fmt_cell(r["Accuracy"], _is_best(r["Accuracy"], b_acc))
-                        agr_cell = _fmt_cell(r["Agreement"], _is_best(r["Agreement"], b_agr))
-                        out_lines.append(
-                            f"{r['Display']}{dagger} & {r['QueryType']} & {acc_cell} & {agr_cell} \\\\"
-                        )
-                    return out_lines
-
-                tex += _tex_tier(
-                    low_rows,
-                    f"Pool-based ({low_label} queries)" if low_label else "Pool-based",
-                    best_low,
-                )
-                tex += _tex_tier(
-                    high_rows,
-                    f"Data-free ({high_label} queries)" if high_label else "Data-free",
-                    best_high,
-                )
-
-                tex.append(r"\bottomrule")
-                tex.append(r"\end{tabular}")
-                tex.append(r"\end{table}")
-
-                tex_block = "\n".join(tex)
-                table_file = out / f"paper_table_{set_slug}_{optimizer}{aug_suffix}.tex"
-                table_file.write_text(tex_block + "\n")
-                print(f"[paper] {table_file.name}")
-                if augmentation == "":
-                    tex_blocks_by_opt[optimizer].append(tex_block + "\n")
-                else:
-                    tex_blocks_by_opt_aug[optimizer].append(tex_block + "\n")
-                tex_block_by_triple[(set_id, optimizer, augmentation)] = tex_block + "\n"
-
-                # ------------------------------------------------------------------
-                # Markdown preview
+                # Markdown preview (no .tex written here — see final tier tables below)
                 # ------------------------------------------------------------------
                 aug_md_map = {
                     "strong": " — with strong augmentation",
@@ -1278,43 +1122,6 @@ def _generate_per_dataset_tables(summary_df: pd.DataFrame, output_dir: str) -> N
                     best_high,
                 )
 
-            # End of augmentation loop. After both flavours processed for this
-            # (set, optimizer), build a side-by-side comparison table.
-            compare_block = _build_compare_table(
-                rdf, set_id, optimizer, victim_acc_by_set.get(set_id),
-                _row_sort_key, all_single_default=False,
-            )
-            if compare_block is not None:
-                set_slug = set_id.lower().replace("-", "")
-                cmp_file = out / f"paper_table_{set_slug}_{optimizer}_compare.tex"
-                cmp_file.write_text(compare_block + "\n")
-                print(f"[paper] {cmp_file.name}")
-                compare_block_by_pair[(set_id, optimizer)] = compare_block + "\n"
-
-                # Markdown comparison preview
-                cmp_md = _build_compare_md(
-                    rdf, set_id, optimizer, _row_sort_key,
-                )
-                if cmp_md:
-                    md_lines.append(f"\n### {set_id} — optimizer: {optimizer} — comparison (no-aug vs aug)\n")
-                    md_lines.extend(cmp_md)
-
-    # Write combined outputs — one combined .tex per optimizer (baseline)
-    for optimizer, blocks in tex_blocks_by_opt.items():
-        if len(blocks) <= 1:
-            continue
-        combined_tex = out / f"paper_tables_{optimizer}.tex"
-        combined_tex.write_text("\n".join(blocks))
-        print(f"[paper] Combined LaTeX ({optimizer}) → {combined_tex.name}")
-
-    # Augmentation-only combined per optimizer
-    for optimizer, blocks in tex_blocks_by_opt_aug.items():
-        if len(blocks) <= 1:
-            continue
-        combined_tex = out / f"paper_tables_{optimizer}_aug.tex"
-        combined_tex.write_text("\n".join(blocks))
-        print(f"[paper] Combined LaTeX ({optimizer}, aug) → {combined_tex.name}")
-
     # ----------------------------------------------------------------------
     # Unified per-Set tables — single LaTeX `table*` per Set with all
     # (optimizer, augmentation) variants laid out as side-by-side column
@@ -1329,99 +1136,70 @@ def _generate_per_dataset_tables(summary_df: pd.DataFrame, output_dir: str) -> N
             return f"{opt_disp}+Aug(soft)"
         return opt_disp
 
-    unified_per_set: Dict[str, str] = {}
+    # ----------------------------------------------------------------------
+    # FINAL TABLES ONLY. Per Set produce two tables (pool-based, data-free)
+    # and one combined master. No auxiliary per-optimizer / per-aug outputs.
+    # ----------------------------------------------------------------------
+    tier_blocks: Dict[Tuple[str, str], str] = {}  # (set_id, tier) -> tex
     primary_set = next(
         (s for s in MAIN_MASTER_SETS if not rdf[rdf["Set"] == s].empty), None
     )
     for set_id, entries in PER_SET_PAPER_ORDER.items():
-        unified = _build_unified_per_set_table(
-            rdf, set_id, entries,
-            victim_acc=victim_acc_by_set.get(set_id),
-            row_sort_key=_row_sort_key,
-            is_primary=(set_id == primary_set),
-        )
-        if unified is None:
-            print(f"[paper] per-set unified skip {set_id} (no data)")
-            continue
-        unified_per_set[set_id] = unified
-        set_slug = set_id.lower().replace("-", "")
-        order_str = " | ".join(_entry_label(o, a) for o, a in entries)
-        (out / f"paper_tables_{set_slug}.tex").write_text(
-            f"% Unified per-Set paper table for {set_id}. "
-            f"Required: \\usepackage{{booktabs}}\n"
-            f"% Columns in order: {order_str}\n\n" + unified + "\n"
-        )
-        print(f"[paper] Per-Set unified master → paper_tables_{set_slug}.tex "
-              f"({order_str})")
+        for tier in ("pool", "datafree"):
+            block = _build_unified_per_set_table(
+                rdf, set_id, entries,
+                victim_acc=victim_acc_by_set.get(set_id),
+                row_sort_key=_row_sort_key,
+                is_primary=(set_id == primary_set and tier == "pool"),
+                tier=tier,
+            )
+            if block is None:
+                continue
+            tier_blocks[(set_id, tier)] = block
 
-    # ----------------------------------------------------------------------
-    # Main master `paper_tables.tex` — concatenates the unified per-Set
-    # tables in MAIN_MASTER_SETS order. SET-A1 omitted by default
-    # (paper_tables_seta1.tex still emitted).
-    # ----------------------------------------------------------------------
-    main_master_blocks: List[str] = [
-        "% Main paper tables: one unified table per Set with multiple "
-        "(optimizer, augmentation) variants as side-by-side column pairs.\n"
-        "% Required LaTeX packages: \\usepackage{booktabs} and a wide page "
-        "(uses \\begin{table*}; for single-column docs, switch to \\begin{table}).\n"
+    # Combined master file: for each set, emit pool-based then data-free.
+    master_blocks: List[str] = [
+        "% Paper tables. One pool-based and one data-free table per Set.\n"
+        "% Required: \\usepackage{booktabs}. Wide tables use \\begin{table*}.\n"
         f"% Sets in order: {', '.join(MAIN_MASTER_SETS)}\n\n"
     ]
     for set_id in MAIN_MASTER_SETS:
-        block = unified_per_set.get(set_id)
-        if block is None:
-            continue
-        main_master_blocks.append(block + "\n")
-    if len(main_master_blocks) > 1:
-        (out / "paper_tables.tex").write_text("\n".join(main_master_blocks))
-        print(f"[paper] Main master → paper_tables.tex "
-              f"(unified, sets={MAIN_MASTER_SETS})")
-
-    # ----------------------------------------------------------------------
-    # Auxiliary masters (kept for downstream tooling / back-compat).
-    # ----------------------------------------------------------------------
-    baseline_blocks: List[str] = [
-        "% Auxiliary: baseline-only tables across all Sets. "
-        "Required: \\usepackage{booktabs}\n"
-        "% Order: " + " → ".join(f"{s}/{o}" for s, o in COMBINED_PAPER_ORDER) + "\n\n"
-    ]
-    for pair in COMBINED_PAPER_ORDER:
-        block = tex_block_by_triple.get((pair[0], pair[1], ""))
-        if block is None:
-            continue
-        baseline_blocks.append(block)
-    if len(baseline_blocks) > 1:
-        (out / "paper_tables_baseline.tex").write_text("\n".join(baseline_blocks))
-        print("[paper] Auxiliary baseline-only → paper_tables_baseline.tex")
-
-    aug_only_blocks: List[str] = [
-        "% Auxiliary: augmentation-only tables across all Sets. "
-        "Required: \\usepackage{booktabs}\n"
-        "% Order: " + " → ".join(f"{s}/{o}" for s, o in COMBINED_PAPER_ORDER) + "\n\n"
-    ]
-    for pair in COMBINED_PAPER_ORDER:
-        # Aug-only auxiliary master: include every non-baseline variant for the pair.
-        for aug_label in ("strong", "soft"):
-            block = tex_block_by_triple.get((pair[0], pair[1], aug_label))
+        for tier in ("pool", "datafree"):
+            block = tier_blocks.get((set_id, tier))
             if block is None:
                 continue
-            aug_only_blocks.append(block)
-    if len(aug_only_blocks) > 1:
-        (out / "paper_tables_aug.tex").write_text("\n".join(aug_only_blocks))
-        print("[paper] Auxiliary augmentation-only → paper_tables_aug.tex")
+            master_blocks.append(block + "\n")
+    if len(master_blocks) > 1:
+        (out / "paper_tables.tex").write_text("\n".join(master_blocks))
+        print(f"[paper] Final master → paper_tables.tex "
+              f"({len(tier_blocks)} tables, sets={MAIN_MASTER_SETS})")
 
-    # Side-by-side compare master is retained as an auxiliary view only.
-    cmp_blocks: List[str] = [
-        "% Auxiliary: side-by-side baseline vs augmentation comparison tables. "
-        "Required: \\usepackage{booktabs}\n\n"
+    # Compact 4-column tables (SGD vs AdamW × Acc/Fid), one per Set.
+    # Pool-based rows show aug variants only; data-free rows unchanged.
+    # SET-B1-legacy intentionally excluded.
+    compact_blocks: List[str] = [
+        "% Compact 4-column tables per Set: SGD vs AdamW × Acc/Fid.\n"
+        "% Pool-based rows use a single aug variant per Set (declared in each\n"
+        "% caption): SET-A1 -> Aug_soft, SET-B/C -> Aug. Data-free rows use no\n"
+        "% aug. Method column shows the plain attack name.\n"
+        "% Required: \\usepackage{booktabs}.\n"
+        f"% Sets: {', '.join(COMPACT_SETS)}\n\n"
     ]
-    for pair in COMBINED_PAPER_ORDER:
-        block = compare_block_by_pair.get(pair)
+    n_compact = 0
+    for set_id in COMPACT_SETS:
+        block = _build_compact_per_set_table(
+            rdf, set_id,
+            victim_acc=victim_acc_by_set.get(set_id),
+            row_sort_key=_row_sort_key,
+        )
         if block is None:
             continue
-        cmp_blocks.append(block)
-    if len(cmp_blocks) > 1:
-        (out / "paper_tables_compare.tex").write_text("\n".join(cmp_blocks))
-        print("[paper] Auxiliary compare master → paper_tables_compare.tex")
+        compact_blocks.append(block + "\n")
+        n_compact += 1
+    if n_compact > 0:
+        (out / "paper_tables_compact.tex").write_text("\n".join(compact_blocks))
+        print(f"[paper] Compact tables → paper_tables_compact.tex "
+              f"({n_compact} tables, sets={COMPACT_SETS})")
 
     paper_md = out / "paper_tables.md"
     paper_md.write_text("\n".join(md_lines))
@@ -1436,6 +1214,7 @@ def _build_unified_per_set_table(
     row_sort_key,
     *,
     is_primary: bool = False,
+    tier: str = "both",
 ) -> Optional[str]:
     """Unified LaTeX table for one Set: multiple (optimizer, augmentation)
     variants as side-by-side `Acc / Fid` column pairs in a single tabular.
@@ -1458,6 +1237,17 @@ def _build_unified_per_set_table(
     """
     set_df = rdf[rdf["Set"] == set_id]
     if set_df.empty:
+        return None
+
+    # Tier filter: pool-based (IsLow=True) or data-free (IsLow=False) or both.
+    # Data-free rows never have augmentation, so restrict entries to baseline
+    # (aug="") only when generating a data-free-only table.
+    if tier == "pool":
+        set_df = set_df[set_df["IsLow"]]
+    elif tier == "datafree":
+        set_df = set_df[~set_df["IsLow"]]
+        entries = [(opt, aug) for (opt, aug) in entries if aug == ""]
+    if set_df.empty or not entries:
         return None
 
     def _opt_disp(opt: str) -> str:
@@ -1567,9 +1357,20 @@ def _build_unified_per_set_table(
             for o in opt_order
         )
 
+    # Tier tag for caption / label
+    if tier == "pool":
+        tier_tag = f"pool-based extraction ({low_label_str} queries)"
+        label_slug_extra = "-pool"
+    elif tier == "datafree":
+        tier_tag = f"data-free extraction ({high_label_str} queries)"
+        label_slug_extra = "-datafree"
+    else:
+        tier_tag = "model extraction"
+        label_slug_extra = "-unified"
+
     if is_primary:
         caption_lines = [
-            f"Model extraction results on {set_id}." + victim_note,
+            f"{tier_tag.capitalize()} results on {set_id}." + victim_note,
             r"\textbf{Acc}: top-1 accuracy of the substitute on the victim's "
             r"test set $\mathcal{D}^{\mathrm{test}}$ (\%). "
             r"\textbf{Fid}: agreement rate between substitute and victim "
@@ -1577,16 +1378,14 @@ def _build_unified_per_set_table(
             r"\emph{Soft}: probability-vector queries; \emph{Hard}: top-1-only queries.",
             f"Columns: {cols_desc}. All cells report mean$\\pm$1 std over $n{{=}}3$ seeds.",
             r"Within each variant column, \textbf{bold} marks the column-best "
-            r"per Soft/Hard sub-group; cross-column comparison should account "
-            r"for the augmentation difference.",
+            r"per Soft/Hard sub-group.",
         ]
     else:
         caption_lines = [
-            f"Model extraction results on {set_id} "
+            f"{tier_tag.capitalize()} results on {set_id} "
             f"(Acc/Fid in \\%; mean$\\pm$1 std, $n{{=}}3$)." + victim_note,
             f"Columns: {cols_desc}.",
-            r"Notation, abbreviations, and bolding rule follow "
-            r"Table~\ref{tab:seta1-unified}.",
+            r"Notation and bolding rule follow the SET-A1 pool-based table.",
         ]
     caption = " ".join(caption_lines)
 
@@ -1612,7 +1411,7 @@ def _build_unified_per_set_table(
     tex.append(rf"\begin{{{table_env}}}[t]")
     tex.append(r"\centering")
     tex.append(f"\\caption{{{caption}}}")
-    tex.append(f"\\label{{tab:{set_slug}-unified}}")
+    tex.append(f"\\label{{tab:{set_slug}{label_slug_extra}}}")
     if wide_table:
         # Compact spacing + auto-scale to text width (NeurIPS/ICML standard
         # idiom for wide multi-variant tables).
@@ -1636,17 +1435,21 @@ def _build_unified_per_set_table(
             cmids_top.append(f"\\cmidrule(lr){{{cs}-{ce}}}")
         tex.append(" ".join(cmids_top))
 
-    # Variant (Base / +Aug / +Aug_soft) header — middle row
-    row_var = ["", ""]
-    col_cursor = 3
-    cmids_var: List[str] = []
-    for opt in opt_order:
-        for aug in opt_groups[opt]:
-            row_var.append(f"\\multicolumn{{2}}{{c}}{{{_aug_disp(aug)}}}")
-            cmids_var.append(f"\\cmidrule(lr){{{col_cursor}-{col_cursor + 1}}}")
-            col_cursor += 2
-    tex.append(" & ".join(row_var) + r" \\")
-    tex.append(" ".join(cmids_var))
+    # Variant (Base / +Aug / +Aug_soft) header — middle row.
+    # Skip this row entirely when every optimizer has just a single variant
+    # (typical for data-free tables), since a lone "Base" adds no information.
+    any_multi_variant = any(len(opt_groups[o]) > 1 for o in opt_order)
+    if any_multi_variant:
+        row_var = ["", ""]
+        col_cursor = 3
+        cmids_var: List[str] = []
+        for opt in opt_order:
+            for aug in opt_groups[opt]:
+                row_var.append(f"\\multicolumn{{2}}{{c}}{{{_aug_disp(aug)}}}")
+                cmids_var.append(f"\\cmidrule(lr){{{col_cursor}-{col_cursor + 1}}}")
+                col_cursor += 2
+        tex.append(" & ".join(row_var) + r" \\")
+        tex.append(" ".join(cmids_var))
 
     # Sub-header: Method | Label | Acc Fid Acc Fid ...
     sub = ["Method", "Label"]
@@ -1657,12 +1460,16 @@ def _build_unified_per_set_table(
 
     def _tier_lines(tier_rows: List[dict],
                     bests: Dict[Tuple[str, int, str], Optional[float]],
-                    tier_label: str) -> List[str]:
+                    tier_label: str,
+                    *,
+                    include_header: bool = True) -> List[str]:
         if not tier_rows:
             return []
-        lines = [r"\midrule",
-                 f"\\multicolumn{{{ncols}}}{{l}}{{\\textit{{{tier_label}}}}} \\\\",
-                 r"\midrule"]
+        lines: List[str] = []
+        if include_header:
+            lines += [r"\midrule",
+                      f"\\multicolumn{{{ncols}}}{{l}}{{\\textit{{{tier_label}}}}} \\\\"]
+        lines.append(r"\midrule")
         for r in tier_rows:
             parts = [r["Display"], r["QueryType"]]
             for vi in range(len(valid_entries)):
@@ -1674,14 +1481,22 @@ def _build_unified_per_set_table(
             lines.append(" & ".join(parts) + r" \\")
         return lines
 
-    tex += _tier_lines(
-        low_rows, bests_low,
-        f"Pool-based ({low_label_str} queries)" if low_label_str else "Pool-based",
-    )
-    tex += _tier_lines(
-        high_rows, bests_high,
-        f"Data-free ({high_label_str} queries)" if high_label_str else "Data-free",
-    )
+    # When rendering a single-tier table, omit the tier heading and place all
+    # rows directly under the column header — no need for a "Pool-based (…)"
+    # midrule separator that adds visual noise.
+    if tier == "pool":
+        tex += _tier_lines(low_rows, bests_low, "", include_header=False)
+    elif tier == "datafree":
+        tex += _tier_lines(high_rows, bests_high, "", include_header=False)
+    else:
+        tex += _tier_lines(
+            low_rows, bests_low,
+            f"Pool-based ({low_label_str} queries)" if low_label_str else "Pool-based",
+        )
+        tex += _tier_lines(
+            high_rows, bests_high,
+            f"Data-free ({high_label_str} queries)" if high_label_str else "Data-free",
+        )
 
     tex.append(r"\bottomrule")
     if wide_table:
@@ -1690,6 +1505,208 @@ def _build_unified_per_set_table(
     else:
         tex.append(r"\end{tabular}")
     tex.append(rf"\end{{{table_env}}}")
+    return "\n".join(tex)
+
+
+# Sets included in the compact 4-column table file (excludes SET-B1-legacy).
+COMPACT_SETS: List[str] = ["SET-A1", "SET-B1-main", "SET-C1"]
+
+# Per-Set choice of the single augmentation variant used for pool-based rows
+# in the compact table. SET-A1 uses the soft aug (Aug_soft); the other sets
+# do not have a soft aug variant and use the standard strong Aug.
+COMPACT_POOL_AUG: Dict[str, str] = {
+    "SET-A1": "soft",
+    "SET-B1-main": "strong",
+    "SET-C1": "strong",
+}
+
+
+def _build_compact_per_set_table(
+    rdf: pd.DataFrame,
+    set_id: str,
+    *,
+    victim_acc: Optional[float],
+    row_sort_key,
+) -> Optional[str]:
+    """Compact per-Set table with exactly 4 data columns:
+    SGD (Acc, Fid) and AdamW (Acc, Fid).
+
+    Row policy:
+      - Pool-based attacks (IsLow=True): one row per attack. The aug variant
+        used (per-Set: SET-A1 -> soft, SET-B/C -> strong) is declared in the
+        caption only; the Method column shows the plain attack name.
+      - Data-free attacks (IsLow=False): one row per attack (no aug variant).
+
+    Best per (tier, QueryType, optimizer, metric) is bolded.
+    """
+    set_df = rdf[rdf["Set"] == set_id]
+    if set_df.empty:
+        return None
+
+    optimizers = ["sgd", "adamw"]
+    pool_aug = COMPACT_POOL_AUG.get(set_id, "strong")
+
+    def _aug_caption(aug: str) -> str:
+        if aug == "strong":
+            return r"Aug"
+        if aug == "soft":
+            return r"Aug$_\mathrm{soft}$"
+        return r"no augmentation"
+
+    # Pool rows: for each (Display, QueryType, opt), pick the Set-specific
+    # aug variant when it exists, otherwise fall back to base (aug=""). The
+    # fallback covers attacks that bundle augmentation internally and thus
+    # have no explicit *_aug config (e.g., SwiftThief's contrastive pipeline
+    # already applies its own aug, so its base run is the fair comparison).
+    # Data-free rows: keep only the base (aug="").
+    pool_by_key: Dict[Tuple[str, str, str], Dict[str, Tuple[str, str]]] = {}
+    #   (Display, QueryType, opt) -> {aug: (acc, agr)}
+    datafree_map: Dict[Tuple[str, str], Dict[str, Tuple[str, str]]] = {}
+    #   (Display, QueryType) -> {opt: (acc, agr)}
+    for _, r in set_df.iterrows():
+        opt = r["Optimizer"]
+        if opt not in optimizers:
+            continue
+        aug = r["Augmentation"]
+        is_low = bool(r["IsLow"])
+        if is_low:
+            if aug not in (pool_aug, ""):
+                continue
+            pool_by_key.setdefault(
+                (r["Display"], r["QueryType"], opt), {}
+            )[aug] = (r["Accuracy"], r["Agreement"])
+        else:
+            if aug != "":
+                continue
+            datafree_map.setdefault(
+                (r["Display"], r["QueryType"]), {}
+            )[opt] = (r["Accuracy"], r["Agreement"])
+
+    # Assemble pool rows: pick pool_aug if available else base.
+    pool_rows_map: Dict[Tuple[str, str], Dict[str, Tuple[str, str]]] = {}
+    for (display, qtype, opt), by_aug in pool_by_key.items():
+        picked = by_aug.get(pool_aug) or by_aug.get("")
+        if picked is None:
+            continue
+        pool_rows_map.setdefault((display, qtype), {})[opt] = picked
+
+    rows: List[dict] = []
+    for (display, qtype), cells in pool_rows_map.items():
+        row_cells = [cells.get(opt, ("", "")) for opt in optimizers]
+        sort_acc = next((ac for ac, _ in row_cells if ac), "")
+        rows.append({
+            "Display": display, "QueryType": qtype, "IsLow": True,
+            "cells": row_cells, "Accuracy": sort_acc,
+        })
+    for (display, qtype), cells in datafree_map.items():
+        row_cells = [cells.get(opt, ("", "")) for opt in optimizers]
+        sort_acc = next((ac for ac, _ in row_cells if ac), "")
+        rows.append({
+            "Display": display, "QueryType": qtype, "IsLow": False,
+            "cells": row_cells, "Accuracy": sort_acc,
+        })
+
+    if not rows:
+        return None
+
+    low_rows = sorted([r for r in rows if r["IsLow"]], key=row_sort_key)
+    high_rows = sorted([r for r in rows if not r["IsLow"]], key=row_sort_key)
+
+    def _bests_for(tier_rows: List[dict]) -> Dict[Tuple[str, int, str], Optional[float]]:
+        best: Dict[Tuple[str, int, str], Optional[float]] = {}
+        for label in ("Soft", "Hard"):
+            for oi, _ in enumerate(optimizers):
+                accs: List[float] = []
+                fids: List[float] = []
+                for r in tier_rows:
+                    if r["QueryType"] != label:
+                        continue
+                    ac, fd = r["cells"][oi]
+                    ma = _extract_mean(ac) if ac else None
+                    mf = _extract_mean(fd) if fd else None
+                    if ma is not None:
+                        accs.append(ma)
+                    if mf is not None:
+                        fids.append(mf)
+                best[(label, oi, "acc")] = max(accs) if accs else None
+                best[(label, oi, "fid")] = max(fids) if fids else None
+        return best
+
+    bests_low = _bests_for(low_rows)
+    bests_high = _bests_for(high_rows)
+
+    low_budgets = sorted(set_df[set_df["IsLow"]]["Budget"].unique())
+    high_budgets = sorted(set_df[~set_df["IsLow"]]["Budget"].unique())
+    low_label = "/".join(dict.fromkeys(f"{b // 1000}K" for b in low_budgets))
+    high_label = "/".join(dict.fromkeys(
+        f"{round(b / 1_000_000)}M" for b in high_budgets))
+
+    set_slug = set_id.lower().replace("-", "")
+    victim_note = (
+        f" Victim test accuracy: {victim_acc*100:.2f}\\%."
+        if victim_acc is not None else ""
+    )
+    caption = (
+        f"Model-extraction results on {set_id} (Acc/Fid in \\%; "
+        f"mean$\\pm$1 std, $n{{=}}3$).{victim_note} "
+        f"Pool-based rows are trained with {_aug_caption(pool_aug)} "
+        r"augmentation on the substitute; data-free rows use no augmentation. "
+        r"\emph{Soft}/\emph{Hard}: probability-vector vs top-1-only queries. "
+        r"Within each tier/QueryType/optimizer, \textbf{bold} marks the "
+        r"column-best."
+    )
+
+    ncols = 2 + 2 * len(optimizers)  # Method + Label + 2*(Acc,Fid)
+    col_spec = "@{}ll rr rr@{}"
+
+    tex: List[str] = []
+    tex.append(r"\begin{table}[t]")
+    tex.append(r"\centering")
+    tex.append(f"\\caption{{{caption}}}")
+    tex.append(f"\\label{{tab:{set_slug}-compact}}")
+    tex.append(f"\\begin{{tabular}}{{{col_spec}}}")
+    tex.append(r"\toprule")
+    # Header row 1: optimizer spans
+    row1 = ["", "",
+            r"\multicolumn{2}{c}{SGD}",
+            r"\multicolumn{2}{c}{AdamW}"]
+    tex.append(" & ".join(row1) + r" \\")
+    tex.append(r"\cmidrule(lr){3-4} \cmidrule(lr){5-6}")
+    # Header row 2: sub-columns
+    tex.append(" & ".join(["Method", "Label", "Acc", "Fid", "Acc", "Fid"]) + r" \\")
+
+    def _tier_lines(tier_rows: List[dict],
+                    bests: Dict[Tuple[str, int, str], Optional[float]],
+                    tier_label: str) -> List[str]:
+        if not tier_rows:
+            return []
+        lines: List[str] = [
+            r"\midrule",
+            f"\\multicolumn{{{ncols}}}{{l}}{{\\textit{{{tier_label}}}}} \\\\",
+            r"\midrule",
+        ]
+        for r in tier_rows:
+            parts = [r["Display"], r["QueryType"]]
+            for oi in range(len(optimizers)):
+                ac, fd = r["cells"][oi]
+                b_acc = bests.get((r["QueryType"], oi, "acc"))
+                b_fid = bests.get((r["QueryType"], oi, "fid"))
+                parts.append(_fmt_cell(ac or "", _is_best(ac or "", b_acc)))
+                parts.append(_fmt_cell(fd or "", _is_best(fd or "", b_fid)))
+            lines.append(" & ".join(parts) + r" \\")
+        return lines
+
+    tex += _tier_lines(
+        low_rows, bests_low,
+        f"Pool-based ({low_label} queries)" if low_label else "Pool-based",
+    )
+    tex += _tier_lines(
+        high_rows, bests_high,
+        f"Data-free ({high_label} queries)" if high_label else "Data-free",
+    )
+    tex.append(r"\bottomrule")
+    tex.append(r"\end{tabular}")
+    tex.append(r"\end{table}")
     return "\n".join(tex)
 
 

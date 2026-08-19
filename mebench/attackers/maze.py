@@ -173,17 +173,14 @@ class MAZE(AttackRunner):
             dropout_prob=dropout_prob,
         ).to(device)
         
-        # [UNIFIED] Standard Student Optimizer (SGD)
-        # Config-driven LR to support SET-A (0.01) vs SET-B (0.1)
-        # Default to 0.1 if not specified (Data-Free Standard)
-        opt_config = sub_config.get("optimizer", {})
-        lr = float(opt_config.get("lr", 0.1))
-        self.c_opt = optim.SGD(
-            self.clone.parameters(),
-            lr=lr,
-            momentum=float(opt_config.get("momentum", 0.9)),
-            weight_decay=float(opt_config.get("weight_decay", 5e-4))
-        )
+        # Config-driven optimizer construction (consistent with other data-free
+        # attacks). Defaults preserve the paper-canonical SGD baseline.
+        opt_spec = dict(sub_config.get("optimizer") or {})
+        opt_spec.setdefault("name", "sgd")
+        opt_spec.setdefault("lr", 0.1)
+        opt_spec.setdefault("momentum", 0.9)
+        opt_spec.setdefault("weight_decay", 5e-4)
+        self.c_opt = self._build_optimizer(self.clone.parameters(), opt_spec)
 
         if self.lr_schedule == "cosine":
             max_budget = int(self.state.metadata.get("max_budget", 20_000_000))

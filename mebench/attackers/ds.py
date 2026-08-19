@@ -203,13 +203,17 @@ class DualStudents(AttackRunner):
             wrapped = _MovingAverageModel(model, self.student_momentum).to(device)
             self.student_models.append(wrapped)
             self.students.append(wrapped.train_model)
+            # Consistent with other data-free attacks: read the substitute
+            # optimizer spec from config. Defaults preserve the paper-canonical
+            # SGD(lr=student_lr, momentum=0.9, wd=5e-4) behaviour when nothing
+            # in the config overrides them.
+            opt_spec = dict(sub_config.get("optimizer") or {})
+            opt_spec.setdefault("name", "sgd")
+            opt_spec.setdefault("lr", float(self.student_lr))
+            opt_spec.setdefault("momentum", 0.9)
+            opt_spec.setdefault("weight_decay", 5e-4)
             self.s_opts.append(
-                torch.optim.SGD(
-                    wrapped.train_model.parameters(),
-                    lr=self.student_lr,
-                    momentum=0.9,
-                    weight_decay=5e-4,
-                )
+                self._build_optimizer(wrapped.train_model.parameters(), opt_spec)
             )
 
     @staticmethod

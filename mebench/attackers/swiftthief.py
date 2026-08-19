@@ -47,6 +47,27 @@ from mebench.attackers.runner import AttackRunner
 from mebench.core.context import BenchmarkContext
 from mebench.core.types import QueryBatch, OracleOutput
 from mebench.core.state import BenchmarkState
+
+
+def _build_stage_optimizer(spec: Dict[str, Any], params, default_lr: float) -> torch.optim.Optimizer:
+    """Build a per-stage optimizer for SwiftThief from a config spec.
+
+    Defaults to paper SGD (lr=default_lr, momentum=0.9, wd=5e-4) so existing
+    SGD configs reproduce identically. Override via:
+        substitute.cl_optimizer: { name: adamw, lr: 1e-3, weight_decay: 0.01,
+                                   betas: [0.9, 0.999] }
+        substitute.kd_optimizer: { name: adamw, lr: 5e-4, ... }
+    """
+    name = str(spec.get("name", "sgd")).lower()
+    lr = float(spec.get("lr", default_lr))
+    if name == "adamw":
+        wd = float(spec.get("weight_decay", 0.01))
+        betas = tuple(spec.get("betas", [0.9, 0.999]))
+        return torch.optim.AdamW(params, lr=lr, weight_decay=wd, betas=betas)
+    # SGD default (paper-matching behaviour)
+    wd = float(spec.get("weight_decay", 5e-4))
+    momentum = float(spec.get("momentum", 0.9))
+    return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=wd)
 from mebench.data.loaders import create_dataloader
 from mebench.models.substitute_factory import create_substitute
 from mebench.utils.binary import (
@@ -527,8 +548,14 @@ class SwiftThief(AttackRunner):
         self.sl_epoch = int(config.get("sl_epoch", 500))
         self.sl_aug_interval = int(config.get("sl_aug_interval", 50))
 
-        # [논문 일치] KD optimizer: SGD(lr=sl_lr=1e-2, momentum=0.9, wd=5e-4).
+        # KD optimizer config. Paper-default: SGD(lr=1e-2, momentum=0.9, wd=5e-4).
+        # Override via substitute.kd_optimizer.{name,lr,weight_decay,betas,momentum}
+        # if present in the config; otherwise the paper SGD default is used so
+        # legacy SGD results remain reproducible.
         self.kd_lr = float(config.get("kd_lr", 1e-2))
+        self._kd_optimizer_spec = dict(config.get("kd_optimizer") or {})
+        # CL optimizer config. Paper-default: SGD(lr=0.06, momentum=0.9, wd=5e-4).
+        self._cl_optimizer_spec = dict(config.get("cl_optimizer") or {})
 
         # internal
         self.pool_dataset = None
@@ -1244,12 +1271,12 @@ class SwiftThief(AttackRunner):
 
         self._ensure_normalizers(state, device)
 
-        # [논문 일치] persistent KD optimizer (sl_lr=1e-2, SGD m=0.9, wd=5e-4).
-        self._kd_optimizer = torch.optim.SGD(
+        # KD optimizer. Default SGD(lr=sl_lr=1e-2, momentum=0.9, wd=5e-4); paper-matching.
+        # Override via substitute.kd_optimizer (see _build_stage_optimizer).
+        self._kd_optimizer = _build_stage_optimizer(
+            self._kd_optimizer_spec,
             substitute.parameters(),
-            lr=float(self.kd_lr),
-            momentum=0.9,
-            weight_decay=5e-4,
+            default_lr=float(self.kd_lr),
         )
 
         state.attack_state["substitute"] = substitute
@@ -1338,15 +1365,19 @@ class SwiftThief(AttackRunner):
         fgsm_model = _SimSiamWrapper(substitute, self.projection_head, self.predictor_head).to(device)
         reg_adversary = CL_FGSM(fgsm_model, float(self.fgsm_epsilon), str(device)).to(device)
 
-        # [논문 일치] CL optimizer: SGD lr=0.06, momentum=0.9, wd=5e-4, cosine over T=800.
-        optimizer_cl = torch.optim.SGD(
+        # CL optimizer. Default SGD(lr=0.06, momentum=0.9, wd=5e-4); paper-matching.
+        # Override via substitute.cl_optimizer (see _build_stage_optimizer).
+        # Cosine schedule (T=800) below adjusts lr in-place via param_groups, so
+        # this works identically for SGD and AdamW.
+        optimizer_cl = _build_stage_optimizer(
+            self._cl_optimizer_spec,
             list(substitute.parameters())
             + list(self.projection_head.parameters())
             + list(self.predictor_head.parameters()),
-            lr=float(self.cl_init_lr),
-            momentum=0.9,
-            weight_decay=5e-4,
+            default_lr=float(self.cl_init_lr),
         )
+        # Effective CL base lr (after spec override) drives the cosine schedule.
+        cl_base_lr = float(optimizer_cl.param_groups[0]["lr"])
 
         # [논문 일치] No patience / best-state restoration within a CL stage.
         # Rationale: CL losses (loss1+loss2+loss3) only update backbone+projector+
@@ -1364,7 +1395,7 @@ class SwiftThief(AttackRunner):
         for local_e in cl_pbar:
             # cosine LR by global epoch count
             global_e = int(state.attack_state.get("cl_global_epoch", 0)) + local_e
-            lr_now = self._cosine_lr(self.cl_init_lr, global_e, total=800)
+            lr_now = self._cosine_lr(cl_base_lr, global_e, total=800)
             for g in optimizer_cl.param_groups:
                 g["lr"] = lr_now
 
